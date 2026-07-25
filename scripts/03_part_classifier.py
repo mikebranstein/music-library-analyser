@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -518,78 +519,300 @@ def apply_ensemble(records: list[dict[str, Any]]) -> None:
 # --- Reporting -------------------------------------------------------------------------------
 
 
+def _pct(part: int, whole: int) -> float:
+    return (100.0 * part / whole) if whole else 0.0
+
+
+def _part_status_icon(rec: dict[str, Any]) -> str:
+    """One-glyph status for the per-document detail table."""
+    status = rec.get("processing_status")
+    if status == "error":
+        return "❌"
+    if status != "success":
+        return "⏭️"
+    if rec.get("is_score"):
+        return "🎼"
+    if rec.get("canonical_instrument") is None:
+        return "⚠️"
+    if rec.get("confidence", 0.0) < LOW_CONFIDENCE:
+        return "⚠️"
+    return "✅"
+
+
+def _md_cell(value: Any) -> str:
+    """Escape a value for safe inclusion in a Markdown table cell."""
+    return str(value if value is not None else "").replace("|", "\\|")
+
+
 def build_report(
     records: list[dict[str, Any]],
-    run_id: str,
-    rules_source: str,
-    llm_enabled: bool,
+    meta: dict[str, Any],
 ) -> str:
+    """Render a human-readable Markdown summary of the classification outputs."""
     classified = [r for r in records if r["processing_status"] == "success"]
-    skipped = [r for r in records if r["processing_status"] != "success"]
+    skipped = [r for r in records if r["processing_status"] == "skipped_unreadable"]
+    errors = [r for r in records if r["processing_status"] == "error"]
+    total = len(records)
+
     family_counts: dict[str, int] = {}
     instrument_counts: dict[str, int] = {}
+    evidence_counts: dict[str, int] = {}
     for rec in classified:
         family_counts[rec["family"]] = family_counts.get(rec["family"], 0) + 1
         canonical = rec["canonical_instrument"] or "(unmatched)"
         instrument_counts[canonical] = instrument_counts.get(canonical, 0) + 1
+        evidence = rec.get("evidence_source") or "none"
+        evidence_counts[evidence] = evidence_counts.get(evidence, 0) + 1
+
     scores = [r for r in classified if r["is_score"]]
-    unmatched = [r for r in classified if r["canonical_instrument"] is None and not r["is_score"]]
-    low_conf = [r for r in classified if r["confidence"] < LOW_CONFIDENCE and not r["is_score"]]
+    parts = [r for r in classified if not r["is_score"]]
+    unmatched = [r for r in parts if r["canonical_instrument"] is None]
+    low_conf = [
+        r for r in parts if r["canonical_instrument"] is not None and r["confidence"] < LOW_CONFIDENCE
+    ]
     duplicates = [r for r in classified if r["duplicate_in_piece"]]
+
+    high_conf = sum(1 for r in classified if r["confidence"] >= 0.90)
+    med_conf = sum(1 for r in classified if LOW_CONFIDENCE <= r["confidence"] < 0.90)
+    lo_conf_all = sum(1 for r in classified if 0.0 < r["confidence"] < LOW_CONFIDENCE)
+    zero_conf = sum(1 for r in classified if r["confidence"] <= 0.0)
+
+    overall = "✅ Healthy"
+    if errors:
+        overall = "❌ Errors present"
+    elif unmatched or low_conf or duplicates:
+        overall = "⚠️ Review recommended"
 
     out: list[str] = []
     out.append("# Part Classification Report")
     out.append("")
-    out.append(f"- Run ID: `{run_id}`")
-    out.append(f"- Documents classified: {len(classified)}")
-    out.append(f"- Skipped (unreadable): {len(skipped)}")
-    out.append(f"- Scores detected: {len(scores)}")
-    out.append(f"- Unmatched parts: {len(unmatched)}")
-    out.append(f"- Low-confidence (<{LOW_CONFIDENCE:.2f}): {len(low_conf)}")
-    out.append(f"- Duplicate labels within a piece: {len(duplicates)}")
-    out.append(f"- Rules source: {rules_source}")
-    out.append(f"- LLM fallback: {'enabled' if llm_enabled else 'disabled'}")
+    out.append(
+        f"_Generated {meta['generated_at']} • run `{meta['run_id']}` • "
+        f"mode **{meta['mode']}** • {meta['elapsed_seconds']:.1f}s_"
+    )
+    out.append("")
+    out.append(f"**Status:** {overall}")
     out.append("")
 
-    out.append("## By family")
+    # Navigation
+    out.append("## Contents")
     out.append("")
-    out.append("| Family | Count |")
-    out.append("|--------|-------|")
-    for family in sorted(family_counts):
-        out.append(f"| {family} | {family_counts[family]} |")
-    out.append("")
-
-    out.append("## By instrument")
-    out.append("")
-    out.append("| Instrument | Count |")
-    out.append("|------------|-------|")
-    for canonical in sorted(instrument_counts):
-        out.append(f"| {canonical} | {instrument_counts[canonical]} |")
+    out.append("- [At a Glance](#at-a-glance)")
+    out.append("- [Instrument Coverage](#instrument-coverage)")
+    out.append("- [Confidence and Evidence](#confidence-and-evidence)")
+    out.append("- [Attention Needed](#attention-needed)")
+    out.append("- [Per-Piece Breakdown](#per-piece-breakdown)")
+    out.append("- [Per-Document Detail](#per-document-detail)")
+    out.append("- [Configuration and Environment](#configuration-and-environment)")
     out.append("")
 
-    if unmatched or low_conf:
-        out.append("## Review recommended")
+    # At a Glance
+    out.append("## At a Glance")
+    out.append("")
+    out.append("| Metric | Value |")
+    out.append("| --- | --- |")
+    out.append(f"| Documents in output | {total} |")
+    out.append(
+        f"| Processed this run | {meta['processed']} (reused {meta['reused']}) |"
+    )
+    out.append(f"| Skipped (unreadable in inventory) | {len(skipped)} |")
+    out.append(f"| Classification errors | {len(errors)} |")
+    out.append(
+        f"| Parts classified | {len(parts)} "
+        f"({_pct(len(parts), len(classified)):.1f}% of classified) |"
+    )
+    out.append(f"| Scores detected | {len(scores)} |")
+    out.append(f"| Distinct instruments | {len(instrument_counts)} |")
+    out.append(f"| Distinct families | {len(family_counts)} |")
+    out.append(f"| Unmatched parts | {len(unmatched)} |")
+    out.append(f"| Low-confidence parts (< {LOW_CONFIDENCE:.2f}) | {len(low_conf)} |")
+    out.append(f"| Duplicate labels within a piece | {len(duplicates)} |")
+    out.append("")
+
+    # Instrument coverage
+    out.append("## Instrument Coverage")
+    out.append("")
+    if family_counts:
+        out.append("### By family")
         out.append("")
-        out.append("| PDF | Predicted | Confidence | Evidence |")
-        out.append("|-----|-----------|------------|----------|")
-        review = {id(r): r for r in (unmatched + low_conf)}
-        for rec in review.values():
+        out.append("| Family | Count |")
+        out.append("| --- | --- |")
+        for family in sorted(family_counts, key=lambda k: (-family_counts[k], k)):
+            out.append(f"| {family} | {family_counts[family]} |")
+        out.append("")
+        out.append("### By instrument")
+        out.append("")
+        out.append("| Instrument | Count |")
+        out.append("| --- | --- |")
+        for canonical in sorted(instrument_counts, key=lambda k: (-instrument_counts[k], k)):
+            display = INSTRUMENT_DISPLAY.get(canonical, canonical)
+            out.append(f"| {_md_cell(display)} | {instrument_counts[canonical]} |")
+        out.append("")
+    else:
+        out.append("No documents were classified this run.")
+        out.append("")
+
+    # Confidence & evidence
+    out.append("## Confidence and Evidence")
+    out.append("")
+    out.append("| Confidence band | Documents |")
+    out.append("| --- | --- |")
+    out.append(f"| High (≥ 0.90) | {high_conf} |")
+    out.append(f"| Medium ({LOW_CONFIDENCE:.2f} – 0.90) | {med_conf} |")
+    out.append(f"| Low (< {LOW_CONFIDENCE:.2f}) | {lo_conf_all} |")
+    out.append(f"| None (0.00) | {zero_conf} |")
+    out.append("")
+    if evidence_counts:
+        out.append("| Evidence source | Documents |")
+        out.append("| --- | --- |")
+        for source in sorted(evidence_counts, key=lambda k: (-evidence_counts[k], k)):
+            out.append(f"| {source} | {evidence_counts[source]} |")
+        out.append("")
+
+    # Attention needed
+    out.append("## Attention Needed")
+    out.append("")
+    attention_added = False
+
+    if errors:
+        attention_added = True
+        out.append(f"### ❌ Classification errors ({len(errors)})")
+        out.append("")
+        out.append("| Document | Detail |")
+        out.append("| --- | --- |")
+        for rec in errors[:15]:
+            detail = (rec.get("match_details") or {}).get("matched_alias") or ""
+            out.append(f"| {_md_cell(rec.get('pdf_path'))} | {_md_cell(detail)} |")
+        if len(errors) > 15:
+            out.append(f"| … and {len(errors) - 15} more | |")
+        out.append("")
+
+    if unmatched:
+        attention_added = True
+        out.append(f"### ⚠️ Unmatched parts ({len(unmatched)})")
+        out.append("")
+        out.append("| Document | Part segment | Evidence |")
+        out.append("| --- | --- | --- |")
+        for rec in unmatched[:20]:
+            segment = (rec.get("match_details") or {}).get("part_segment") or ""
             out.append(
-                f"| {rec['pdf_filename']} | {rec['predicted_part']} | "
-                f"{rec['confidence']:.2f} | {rec['evidence_source']} |"
+                f"| {_md_cell(rec.get('pdf_filename'))} | {_md_cell(segment)} | "
+                f"{_md_cell(rec.get('evidence_source'))} |"
             )
+        if len(unmatched) > 20:
+            out.append(f"| … and {len(unmatched) - 20} more | | |")
+        out.append("")
+
+    if low_conf:
+        attention_added = True
+        out.append(f"### ⚠️ Low-confidence parts ({len(low_conf)})")
+        out.append("")
+        out.append("| Document | Predicted | Confidence | Evidence |")
+        out.append("| --- | --- | --- | --- |")
+        for rec in sorted(low_conf, key=lambda r: r["confidence"])[:20]:
+            out.append(
+                f"| {_md_cell(rec.get('pdf_filename'))} | "
+                f"{_md_cell(rec.get('predicted_part'))} | "
+                f"{rec['confidence']:.2f} | {_md_cell(rec.get('evidence_source'))} |"
+            )
+        if len(low_conf) > 20:
+            out.append(f"| … and {len(low_conf) - 20} more | | | |")
         out.append("")
 
     if duplicates:
-        out.append("## Duplicate labels within a piece")
+        attention_added = True
+        out.append(f"### ⚠️ Duplicate labels within a piece ({len(duplicates)})")
         out.append("")
-        out.append("| Piece | PDF | Predicted |")
-        out.append("|-------|-----|-----------|")
-        for rec in duplicates:
+        out.append("| Piece | Document | Predicted |")
+        out.append("| --- | --- | --- |")
+        for rec in sorted(duplicates, key=lambda r: (r.get("piece_folder") or "", r.get("predicted_part") or "")):
             out.append(
-                f"| {rec['piece_folder']} | {rec['pdf_filename']} | {rec['predicted_part']} |"
+                f"| {_md_cell(rec.get('piece_folder'))} | "
+                f"{_md_cell(rec.get('pdf_filename'))} | "
+                f"{_md_cell(rec.get('predicted_part'))} |"
             )
         out.append("")
+
+    if not attention_added:
+        out.append("✅ Nothing flagged. Every readable document matched an instrument/part "
+                   "at or above the confidence threshold, with no duplicate labels.")
+        out.append("")
+
+    # Per-piece breakdown
+    out.append("## Per-Piece Breakdown")
+    out.append("")
+    pieces: dict[str, dict[str, int]] = {}
+    for rec in records:
+        p = pieces.setdefault(
+            rec.get("piece_folder") or "",
+            {"docs": 0, "classified": 0, "scores": 0, "unmatched": 0, "low": 0, "dupes": 0},
+        )
+        p["docs"] += 1
+        if rec["processing_status"] == "success":
+            p["classified"] += 1
+            if rec["is_score"]:
+                p["scores"] += 1
+            elif rec["canonical_instrument"] is None:
+                p["unmatched"] += 1
+            elif rec["confidence"] < LOW_CONFIDENCE:
+                p["low"] += 1
+            if rec["duplicate_in_piece"]:
+                p["dupes"] += 1
+    out.append("| Piece | Docs | Classified | Scores | Unmatched | Low-conf | Duplicates |")
+    out.append("| --- | --- | --- | --- | --- | --- | --- |")
+    for name in sorted(pieces):
+        p = pieces[name]
+        out.append(
+            f"| {_md_cell(name) or '(root)'} | {p['docs']} | {p['classified']} | "
+            f"{p['scores']} | {p['unmatched']} | {p['low']} | {p['dupes']} |"
+        )
+    out.append("")
+
+    # Per-document detail
+    out.append("## Per-Document Detail")
+    out.append("")
+    limit = int(meta["detail_limit"])
+    shown = records[:limit]
+    out.append(f"<details><summary>Show {len(shown)} of {total} documents</summary>")
+    out.append("")
+    out.append("| | Document | Piece | Predicted | Family | Conf | Evidence |")
+    out.append("| --- | --- | --- | --- | --- | --- | --- |")
+    for rec in shown:
+        out.append(
+            f"| {_part_status_icon(rec)} | {_md_cell(rec.get('pdf_filename'))} | "
+            f"{_md_cell(rec.get('piece_folder'))} | "
+            f"{_md_cell(rec.get('predicted_part'))} | "
+            f"{_md_cell(rec.get('family'))} | {rec.get('confidence', 0.0):.2f} | "
+            f"{_md_cell(rec.get('evidence_source'))} |"
+        )
+    out.append("")
+    out.append("</details>")
+    out.append("")
+    if total > limit:
+        out.append(
+            f"> Showing first {limit} of {total} documents. "
+            "See `part_predictions.jsonl` for the complete dataset."
+        )
+        out.append("")
+
+    # Configuration
+    out.append("## Configuration and Environment")
+    out.append("")
+    out.append("| Setting | Value |")
+    out.append("| --- | --- |")
+    out.append(f"| Record schema version | {RECORD_VERSION} |")
+    out.append(f"| Mode | {meta['mode']} |")
+    out.append(f"| Inventory input | `{meta['inventory']}` |")
+    out.append(f"| Documents input (Script 02) | `{meta['documents']}` |")
+    out.append(f"| Pages input (Script 02) | `{meta['pages']}` |")
+    out.append(f"| Script 02 data present | {'yes' if meta['have_script02'] else 'no'} |")
+    out.append(f"| Lexicon source | {meta['rules_source']} |")
+    out.append(f"| LLM fallback | {'enabled' if meta['llm_enabled'] else 'disabled'} |")
+    out.append(f"| Predictions output | `{meta['output']}` |")
+    out.append("")
+    out.append("Status legend: ✅ matched (≥ threshold) • 🎼 score • ⚠️ unmatched/low-confidence "
+               "• ❌ error • ⏭️ skipped (unreadable).")
+    out.append("")
 
     return "\n".join(out) + "\n"
 
@@ -634,6 +857,9 @@ def main(
     write_report: bool = typer.Option(
         True, "--report/--no-report", help="Write the Markdown summary report"
     ),
+    report_detail_limit: int = typer.Option(
+        200, help="Max rows in the per-document detail table of the report"
+    ),
     mode: str = typer.Option("full", help="Processing mode: full or incremental"),
     use_llm: bool = typer.Option(
         False, "--use-llm/--no-llm", help="Enable the (unwired) LLM fallback hook"
@@ -647,6 +873,7 @@ def main(
 
     setup_logging(log_level)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    start_time = time.perf_counter()
 
     inventory = inventory.resolve()
     output = output.resolve()
@@ -723,8 +950,25 @@ def main(
     atomic_write_jsonl(output, rebuilt)
 
     if write_report:
-        report = build_report(rebuilt, run_id, rules_source, use_llm)
+        meta = {
+            "generated_at": utc_now_iso(),
+            "run_id": run_id,
+            "mode": mode,
+            "elapsed_seconds": time.perf_counter() - start_time,
+            "processed": classified_count,
+            "reused": reused_count,
+            "rules_source": rules_source,
+            "llm_enabled": use_llm,
+            "have_script02": bool(doc_map),
+            "inventory": inventory.as_posix(),
+            "documents": documents.resolve().as_posix(),
+            "pages": pages.resolve().as_posix(),
+            "output": output.as_posix(),
+            "detail_limit": report_detail_limit,
+        }
+        report = build_report(rebuilt, meta)
         atomic_write_text(output_report.resolve(), report)
+        logger.info("Wrote Markdown report: %s", output_report.resolve())
 
     new_checkpoint = {
         "record_version": RECORD_VERSION,
