@@ -32,6 +32,22 @@ In scope (enhancement items 1-8):
 7. Estimated scan DPI from embedded images (pymupdf only).
 8. Image-quality metrics: blur (Laplacian variance), skew angle, contrast (numpy/opencv).
 
+Second enhancement wave (items 1, 2, 4, 5 of the follow-up audit; RECORD_VERSION bumped to `2.1`):
+
+1. Zone/corner text extraction: bucket first-class spans into `zone_top_left`, `zone_top_center`,
+   `zone_top_right`, and `zone_bottom` using span bounding boxes (feeds part-name/composer/
+   copyright detection downstream).
+2. Copyright/identity extraction: regex over page text for `©`/`Copyright`/`(c)`, a 4-digit
+   year, `Arr.`/`arranged by`, and `by`/`music by`/`composed by`, emitted as an
+   `identity_candidates` object on the document rollup.
+4. Blank/near-blank page flag: an `is_blank` boolean per page derived from the existing
+   ink-coverage measure (`text_density`) plus embedded-text emptiness, rolled up to
+   `blank_page_count`.
+5. Staff (music notation) detection: horizontal-line projection over the grayscale render yields
+   `has_staves` and `staff_line_count` per page, rolled up to `music_page_count`.
+
+(Item 3 — fully structured title record — was intentionally not scoped in this wave.)
+
 Deferred to a later phase:
 
 - OCR via `pytesseract` (requires the Tesseract system binary; on Windows it is not added to
@@ -96,6 +112,10 @@ Fields:
 - `page_text_hash` (item 6; sha256 of whitespace-normalized lowercase text)
 - `header_text_candidates` (item 2; prominent largest-font strings)
 - `top_lines` (item 2; top-of-page text lines in reading order)
+- `zone_top_left` (wave-2 item 1; nullable; text in the top-left region)
+- `zone_top_center` (wave-2 item 1; nullable; text in the top-center region)
+- `zone_top_right` (wave-2 item 1; nullable; text in the top-right region)
+- `zone_bottom` (wave-2 item 1; nullable; text in the bottom region)
 - `processing_timestamp`
 - `processing_status` (`success` or `error`)
 - `error_message` (nullable)
@@ -133,6 +153,9 @@ Fields:
 - `contrast_std` (item 8; nullable, numpy)
 - `blur_variance` (item 8; nullable, numpy Laplacian variance)
 - `skew_angle_deg` (item 8; nullable, opencv)
+- `is_blank` (wave-2 item 4; nullable bool; low ink coverage + no embedded text)
+- `has_staves` (wave-2 item 5; nullable bool; music-notation staff lines detected)
+- `staff_line_count` (wave-2 item 5; nullable int; long horizontal lines detected)
 - `render_timestamp`
 - `processing_status` (`success` or `error`)
 - `error_message` (nullable)
@@ -152,6 +175,10 @@ Fields:
 - `image_based_fraction`
 - `first_page_text` (nullable)
 - `first_page_header_candidates` (list)
+- `blank_page_count` (wave-2 item 4; count of pages with `is_blank` true)
+- `music_page_count` (wave-2 item 5; count of pages with `has_staves` true)
+- `identity_candidates` (wave-2 item 2; object with `publisher`, `copyright_year`,
+  `arranger`, `composer`, `copyright_line`; each field nullable)
 - `processing_status` (`success` or `partial_error`)
 - `processing_timestamp`
 
@@ -163,7 +190,9 @@ the document output by `pdf_path`.
 Fields: `record_version`, `last_run_id`, `last_run_timestamp`, `inventory_input`,
 `extracted_text_output`, `pages_output`, `documents_output`, `library_root`, `fingerprints`
 (map of `pdf_path` to `file_fingerprint`), `pdf_count_processed`, `page_count_processed`,
-`reused_pdf_count`. The schema version is bumped to `2.0` for the enhanced record shape.
+`reused_pdf_count`. The schema version is bumped to `2.1` for the second-wave record shape
+(zones, identity, blank flag, staff detection); the bump invalidates prior 2.0 checkpoints so all
+PDFs are reprocessed once to populate the new fields.
 
 ### 4.5 Report `data/extraction_report.md`
 
@@ -215,6 +244,45 @@ length `< 30` characters.
 - `word_count`: whitespace-split token count.
 - `alnum_ratio`: alphanumeric chars divided by non-space chars.
 - `page_text_hash`: sha256 of the whitespace-normalized, lowercased page text.
+
+### 5.4 Zone/corner text (wave-2 item 1)
+
+Using the same `page.get_text("dict")` spans, each span's bounding-box center is bucketed by page
+fraction: the top band is `y_center <= 0.22 * page_height`, the bottom band is
+`y_center >= 0.82 * page_height`. Within the top band, `x_center < 0.38 * W` is left,
+`x_center > 0.62 * W` is right, otherwise center. Spans in each bucket are joined in reading order
+into `zone_top_left` / `zone_top_center` / `zone_top_right` / `zone_bottom` (nullable when empty).
+
+### 5.5 Copyright/identity candidates (wave-2 item 2)
+
+`extract_identity_candidates(page_texts)` scans page text (page 1 first, then later pages for a
+copyright line if page 1 lacks one) for:
+
+- `copyright_line`: first line containing `©`, `(c)`, or `copyright` (case-insensitive).
+- `copyright_year`: first 4-digit `19xx`/`20xx` in the copyright line (or page-1 text).
+- `publisher`: best-effort remainder of the copyright line after the year, trimmed of boilerplate
+  such as `all rights reserved`.
+- `arranger`: text after `arr.`/`arranged by`/`arr by`.
+- `composer`: text after `by`/`music by`/`composed by` on the first page.
+
+All fields are nullable and clearly best-effort (heuristic, for downstream ranking, not ground
+truth).
+
+### 5.6 Blank flag and ink coverage (wave-2 item 4)
+
+`text_density` (fraction of pixels `< 192`) already serves as the normalized ink-coverage measure.
+A page is `is_blank` when the render succeeded with `text_density < 0.004` and the stripped
+embedded text is empty and the page is not image-based. When rendering is disabled, `is_blank`
+falls back to embedded-text emptiness only; when the render errored, `is_blank` is `null`.
+
+### 5.7 Staff (music-notation) detection (wave-2 item 5)
+
+`detect_staves(gray_bytes, width, height)` (numpy required) computes, per image row, the fraction
+of dark pixels (`< 160`). Rows whose dark fraction exceeds `0.40` are candidate staff lines; runs
+of consecutive candidate rows are merged into single lines. `staff_line_count` is the number of
+merged long horizontal lines and `has_staves` is `staff_line_count >= 5` (at least one 5-line
+staff). Both are `null` when numpy is unavailable, rendering is disabled, or the render errored.
+The measure works on both born-digital and scanned music because it operates on the render.
 
 ## 6. Caching Strategy
 
@@ -312,6 +380,17 @@ The following gaps were identified between the originally shipped Script 02 and 
 | G10 | Incremental reuse ignored docs | 1 | Document records reused alongside text/pages |
 | G11 | No dependency guards | 8 | Optional `numpy`/`cv2` imports + `--no-image-metrics` |
 
+### 12.1 Second-wave gap analysis (follow-up audit)
+
+These gaps were identified against the shipped RECORD_VERSION 2.0 and closed by bumping to `2.1`:
+
+| # | Gap in RECORD_VERSION 2.0 | Item | Resolution |
+|---|---------------------------|------|------------|
+| G12 | No zone/corner text (x-coords discarded) | 1 | Added `zone_top_left/_center/_right` + `zone_bottom` from span bboxes |
+| G13 | No copyright/identity parsing | 2 | Added `identity_candidates` (publisher/year/arranger/composer/line) |
+| G14 | No blank-page flag or blank rollup | 4 | Added `is_blank` per page + `blank_page_count` (ink coverage = `text_density`) |
+| G15 | No music-notation signal | 5 | Added `has_staves`/`staff_line_count` per page + `music_page_count` |
+
 ## 12. Implementation Notes Log
 
 - Plan authored: 2026-07-26.
@@ -336,3 +415,20 @@ The following gaps were identified between the originally shipped Script 02 and 
   - Added `numpy` + `opencv-python` dependencies with graceful degradation and a
     `--no-image-metrics` toggle; bumped record schema to `2.0`.
   - See Section 12 for the gap analysis that drove this pass.
+- Second enhancement wave (items 1, 2, 4, 5) integrated:
+  - Item 1: `extract_header_candidates` replaced by `extract_text_structure`, which additionally
+    buckets span bounding boxes into `zone_top_left/_center/_right` and `zone_bottom`.
+  - Item 2: `extract_identity_candidates` parses publisher/year/arranger/composer/copyright-line
+    from page text (page 1 first) into `identity_candidates` on `documents.jsonl`.
+  - Item 4: `_compute_is_blank` adds a per-page `is_blank` flag (ink coverage = `text_density`),
+    rolled up to `blank_page_count`.
+  - Item 5: `detect_staves` adds per-page `has_staves`/`staff_line_count` via row-projection over
+    the grayscale render, rolled up to `music_page_count` (numpy required; degrades to `null`).
+  - Report surfaces blank pages, music pages, and identity-candidate counts.
+  - Schema bumped to `2.1` (invalidates prior 2.0 checkpoints). See Section 12.1 (G12-G15).
+  - Validation: `pytest -q` => `13 passed`; `ruff check` reports only the pre-accepted codes
+    (N999, BLE001, B008, SIM103, UP017). Added tests: `test_extract_identity_candidates`,
+    `test_detect_staves_projection`, `test_detect_staves_degrades_without_shape`,
+    `test_zone_blank_and_staff_full_run`.
+- Deferred (still open): OCR/OSD via `pytesseract` (+ Tesseract system binary) and Parquet
+  migration.

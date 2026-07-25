@@ -12,6 +12,7 @@ Extraction/rendering uses ``pymupdf``. Image-quality metrics (blur/skew/contrast
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -46,8 +47,13 @@ from scripts._common import (
     utc_now_iso,
 )
 
-RECORD_VERSION = "2.0"
+RECORD_VERSION = "2.1"
 EXTRACTION_METHOD = "pymupdf_embedded"
+
+# Wave-2 heuristic thresholds (zone/blank/staff detection).
+BLANK_INK_THRESHOLD = 0.004  # text_density below this (with no text) => blank page
+STAFF_DARK_ROW_FRACTION = 0.40  # row dark-pixel fraction to count as a staff line
+STAFF_MIN_LINES = 5  # >= one 5-line staff => has_staves
 
 # Heuristic quality thresholds used only for the human-readable report.
 # They flag pages for attention; they do not change extraction outputs.
@@ -241,13 +247,35 @@ def compute_text_signals(text: str | None) -> dict[str, Any]:
     }
 
 
-def extract_header_candidates(page: Any, limit: int = 8) -> tuple[list[str], list[str]]:
-    """Return (prominent largest-font strings, top-of-page lines) for a page."""
+def extract_text_structure(page: Any, limit: int = 8) -> dict[str, Any]:
+    """Return prominent/top-line strings plus zoned corner/bottom text for a page.
+
+    Zones are derived from each span's bounding-box center relative to the page
+    size: a top band and a bottom band, with the top band split left/center/right.
+    """
+    empty = {
+        "header_text_candidates": [],
+        "top_lines": [],
+        "zone_top_left": None,
+        "zone_top_center": None,
+        "zone_top_right": None,
+        "zone_bottom": None,
+    }
     try:
         data = page.get_text("dict")
     except Exception:
-        return [], []
+        return dict(empty)
+    try:
+        rect = page.rect
+        page_w = float(rect.width)
+        page_h = float(rect.height)
+    except Exception:
+        page_w = page_h = 0.0
+
+    # (size, y0, text) for prominence/top-line ordering.
     spans: list[tuple[float, float, str]] = []
+    # (x_center, y_center, text) for zone bucketing.
+    zoned: list[tuple[float, float, str]] = []
     for block in data.get("blocks", []):
         for line in block.get("lines", []):
             for span in line.get("spans", []):
@@ -256,10 +284,15 @@ def extract_header_candidates(page: Any, limit: int = 8) -> tuple[list[str], lis
                     continue
                 size = float(span.get("size", 0.0))
                 bbox = span.get("bbox", [0, 0, 0, 0])
+                x0 = float(bbox[0]) if len(bbox) > 0 else 0.0
                 y0 = float(bbox[1]) if len(bbox) > 1 else 0.0
+                x1 = float(bbox[2]) if len(bbox) > 2 else x0
+                y1 = float(bbox[3]) if len(bbox) > 3 else y0
                 spans.append((size, y0, text))
+                zoned.append(((x0 + x1) / 2.0, (y0 + y1) / 2.0, text))
     if not spans:
-        return [], []
+        return dict(empty)
+
     max_size = max(s[0] for s in spans)
     prominent: list[str] = []
     for size, _, text in sorted(spans, key=lambda s: -s[0]):
@@ -273,7 +306,160 @@ def extract_header_candidates(page: Any, limit: int = 8) -> tuple[list[str], lis
             top_lines.append(text)
         if len(top_lines) >= limit:
             break
-    return prominent, top_lines
+
+    top_left: list[str] = []
+    top_center: list[str] = []
+    top_right: list[str] = []
+    bottom: list[str] = []
+    if page_w > 0 and page_h > 0:
+        top_band = 0.22 * page_h
+        bottom_band = 0.82 * page_h
+        left_edge = 0.38 * page_w
+        right_edge = 0.62 * page_w
+        for xc, yc, text in sorted(zoned, key=lambda z: (z[1], z[0])):
+            if yc <= top_band:
+                if xc < left_edge:
+                    top_left.append(text)
+                elif xc > right_edge:
+                    top_right.append(text)
+                else:
+                    top_center.append(text)
+            elif yc >= bottom_band:
+                bottom.append(text)
+
+    def _join(parts: list[str]) -> str | None:
+        joined = " ".join(parts).strip()
+        return joined or None
+
+    return {
+        "header_text_candidates": prominent,
+        "top_lines": top_lines,
+        "zone_top_left": _join(top_left),
+        "zone_top_center": _join(top_center),
+        "zone_top_right": _join(top_right),
+        "zone_bottom": _join(bottom),
+    }
+
+
+# --- Copyright / identity extraction (wave-2 item 2) -----------------------
+
+_YEAR_RE = re.compile(r"\b(1[89]\d{2}|20\d{2})\b")
+_COPYRIGHT_RE = re.compile(r"(?:\u00a9|\(c\)|copyright)", re.IGNORECASE)
+_ARRANGER_RE = re.compile(
+    r"\b(?:arr\.|arranged(?:\s+by)?|arr\s+by|arranger)\s*[:\-]?\s*(.+)", re.IGNORECASE
+)
+_COMPOSER_RE = re.compile(
+    r"\b(?:words\s+and\s+music\s+by|music\s+by|composed\s+by|composer|by)\b"
+    r"\s*[:\-]?\s*(.+)",
+    re.IGNORECASE,
+)
+_BOILERPLATE_RE = re.compile(
+    r"all rights reserved|international copyright secured|printed in.*",
+    re.IGNORECASE,
+)
+
+
+def _clean_identity_value(value: str | None) -> str | None:
+    if not value:
+        return None
+    cleaned = _BOILERPLATE_RE.sub("", value)
+    cleaned = cleaned.strip(" .,-\u2013\u2014;:\t")
+    return cleaned or None
+
+
+def extract_identity_candidates(page_texts: list[str]) -> dict[str, Any]:
+    """Best-effort publisher/year/arranger/composer from page text (page 1 first)."""
+    result: dict[str, Any] = {
+        "publisher": None,
+        "copyright_year": None,
+        "arranger": None,
+        "composer": None,
+        "copyright_line": None,
+    }
+    if not page_texts:
+        return result
+
+    first_text = page_texts[0] or ""
+    first_lines = [ln.strip() for ln in first_text.splitlines() if ln.strip()]
+
+    # Arranger / composer are most reliable on page 1.
+    for line in first_lines:
+        if result["arranger"] is None:
+            m = _ARRANGER_RE.search(line)
+            if m:
+                result["arranger"] = _clean_identity_value(m.group(1))
+        if result["composer"] is None and _ARRANGER_RE.search(line) is None:
+            m = _COMPOSER_RE.search(line)
+            if m:
+                result["composer"] = _clean_identity_value(m.group(1))
+
+    # Copyright line: page 1 first, then later pages.
+    for text in page_texts:
+        for line in (ln.strip() for ln in (text or "").splitlines()):
+            if line and _COPYRIGHT_RE.search(line):
+                result["copyright_line"] = line
+                year = _YEAR_RE.search(line)
+                if year:
+                    result["copyright_year"] = int(year.group(1))
+                    remainder = line[year.end():]
+                else:
+                    remainder = _COPYRIGHT_RE.sub("", line)
+                result["publisher"] = _clean_identity_value(remainder)
+                break
+        if result["copyright_line"] is not None:
+            break
+
+    if result["copyright_year"] is None:
+        year = _YEAR_RE.search(first_text)
+        if year:
+            result["copyright_year"] = int(year.group(1))
+    return result
+
+
+# --- Staff (music-notation) detection (wave-2 item 5) ----------------------
+
+
+def detect_staves(samples: bytes, width: int, height: int) -> dict[str, Any]:
+    """Count long horizontal lines via row projection; None when numpy unavailable."""
+    arr = _gray_array(samples, width, height)
+    if arr is None:
+        return {"has_staves": None, "staff_line_count": None}
+    try:
+        dark = arr < 160
+        row_frac = dark.mean(axis=1)
+        line_rows = row_frac > STAFF_DARK_ROW_FRACTION
+        # Count runs of consecutive True rows (each run == one horizontal line).
+        staff_line_count = 0
+        prev = False
+        for is_line in line_rows.tolist():
+            if is_line and not prev:
+                staff_line_count += 1
+            prev = is_line
+        return {
+            "has_staves": bool(staff_line_count >= STAFF_MIN_LINES),
+            "staff_line_count": int(staff_line_count),
+        }
+    except Exception:
+        return {"has_staves": None, "staff_line_count": None}
+
+
+def _compute_is_blank(
+    render: dict[str, Any],
+    embedded_text: str | None,
+    image_analysis: dict[str, Any],
+) -> bool | None:
+    """Blank when render succeeded with near-zero ink and no text (and not scanned)."""
+    if render.get("status") == "error":
+        return None
+    density = render.get("text_density")
+    if density is None:
+        return None
+    text_empty = not (embedded_text or "").strip()
+    return bool(
+        density < BLANK_INK_THRESHOLD
+        and text_empty
+        and not image_analysis.get("is_image_based")
+    )
 
 
 def analyze_page_geometry(page: Any) -> dict[str, Any]:
@@ -337,10 +523,12 @@ def build_text_record(
     error_message: str | None,
     header_candidates: list[str] | None = None,
     top_lines: list[str] | None = None,
+    zones: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     text_value = embedded_text or ""
     is_searchable = bool(text_value.strip()) and any(c.isalnum() for c in text_value)
     signals = compute_text_signals(embedded_text)
+    zones = zones or {}
     return {
         "record_version": RECORD_VERSION,
         "run_id": run_id,
@@ -360,6 +548,10 @@ def build_text_record(
         "page_text_hash": signals["page_text_hash"],
         "header_text_candidates": header_candidates or [],
         "top_lines": top_lines or [],
+        "zone_top_left": zones.get("zone_top_left"),
+        "zone_top_center": zones.get("zone_top_center"),
+        "zone_top_right": zones.get("zone_top_right"),
+        "zone_bottom": zones.get("zone_bottom"),
         "processing_timestamp": utc_now_iso(),
         "processing_status": status,
         "error_message": error_message,
@@ -385,6 +577,9 @@ def build_page_record(
     contrast_std: float | None = None,
     blur_variance: float | None = None,
     skew_angle_deg: float | None = None,
+    is_blank: bool | None = None,
+    has_staves: bool | None = None,
+    staff_line_count: int | None = None,
 ) -> dict[str, Any]:
     geometry = geometry or {}
     image_analysis = image_analysis or {}
@@ -415,6 +610,9 @@ def build_page_record(
         "contrast_std": contrast_std,
         "blur_variance": blur_variance,
         "skew_angle_deg": skew_angle_deg,
+        "is_blank": is_blank,
+        "has_staves": has_staves,
+        "staff_line_count": staff_line_count,
         "render_timestamp": utc_now_iso(),
         "processing_status": status,
         "error_message": error_message,
@@ -434,6 +632,8 @@ def build_document_record(
     total_text_length = sum(int(r.get("embedded_text_length", 0)) for r in text_records)
     total_word_count = sum(int(r.get("word_count", 0)) for r in text_records)
     pages_image_based = sum(1 for r in page_records if r.get("is_image_based"))
+    blank_page_count = sum(1 for r in page_records if r.get("is_blank") is True)
+    music_page_count = sum(1 for r in page_records if r.get("has_staves") is True)
     page_count = len(text_records)
     ocr_fraction = round(pages_needing_ocr / page_count, 4) if page_count else 0.0
     image_based_fraction = round(pages_image_based / page_count, 4) if page_count else 0.0
@@ -444,6 +644,12 @@ def build_document_record(
         first = min(text_records, key=lambda r: r.get("page_num", 0))
         first_page_text = first.get("embedded_text")
         first_page_headers = first.get("header_text_candidates", []) or []
+
+    ordered_texts = [
+        r.get("embedded_text") or ""
+        for r in sorted(text_records, key=lambda r: r.get("page_num", 0))
+    ]
+    identity_candidates = extract_identity_candidates(ordered_texts)
 
     return {
         "record_version": RECORD_VERSION,
@@ -462,6 +668,9 @@ def build_document_record(
         "image_based_fraction": image_based_fraction,
         "first_page_text": first_page_text,
         "first_page_header_candidates": first_page_headers,
+        "blank_page_count": blank_page_count,
+        "music_page_count": music_page_count,
+        "identity_candidates": identity_candidates,
         "processing_status": status,
         "processing_timestamp": utc_now_iso(),
     }
@@ -494,6 +703,11 @@ def render_page(
         skew_angle = (
             compute_skew_angle(gray_bytes, width, height) if enable_image_metrics else None
         )
+        staves = (
+            detect_staves(gray_bytes, width, height)
+            if enable_image_metrics
+            else {"has_staves": None, "staff_line_count": None}
+        )
 
         if not cache_path.exists():
             pix.save(str(cache_path))
@@ -514,6 +728,8 @@ def render_page(
             "contrast_std": metrics["contrast_std"],
             "blur_variance": metrics["blur_variance"],
             "skew_angle_deg": skew_angle,
+            "has_staves": staves["has_staves"],
+            "staff_line_count": staves["staff_line_count"],
             "status": "success",
             "error_message": None,
         }
@@ -529,6 +745,8 @@ def render_page(
             "contrast_std": None,
             "blur_variance": None,
             "skew_angle_deg": None,
+            "has_staves": None,
+            "staff_line_count": None,
             "status": "error",
             "error_message": f"render failed: {exc}",
         }
@@ -558,18 +776,22 @@ def process_pdf(
             embedded_text: str | None = None
             header_candidates: list[str] = []
             top_lines: list[str] = []
+            zones: dict[str, Any] = {}
             geometry: dict[str, Any] = {}
             image_analysis: dict[str, Any] = {}
             try:
                 page = doc[page_idx]
                 embedded_text = page.get_text()
-                header_candidates, top_lines = extract_header_candidates(page)
+                structure = extract_text_structure(page)
+                header_candidates = structure["header_text_candidates"]
+                top_lines = structure["top_lines"]
+                zones = structure
                 geometry = analyze_page_geometry(page)
                 image_analysis = analyze_page_images(page, len((embedded_text or "").strip()))
                 text_records.append(
                     build_text_record(
                         item, run_id, page_num, embedded_text, "success", None,
-                        header_candidates, top_lines,
+                        header_candidates, top_lines, zones,
                     )
                 )
             except Exception as exc:
@@ -585,11 +807,16 @@ def process_pdf(
                 page = None
 
             if not enable_rendering:
+                text_empty = not (embedded_text or "").strip()
+                is_blank_no_render = bool(
+                    text_empty and not image_analysis.get("is_image_based")
+                )
                 page_records.append(
                     build_page_record(
                         item, run_id, page_num, render_dpi, None, None, -1, -1, -1,
                         None, None, "success", None,
                         geometry=geometry, image_analysis=image_analysis,
+                        is_blank=is_blank_no_render,
                     )
                 )
                 continue
@@ -639,6 +866,9 @@ def process_pdf(
                     contrast_std=render["contrast_std"],
                     blur_variance=render["blur_variance"],
                     skew_angle_deg=render["skew_angle_deg"],
+                    is_blank=_compute_is_blank(render, embedded_text, image_analysis),
+                    has_staves=render["has_staves"],
+                    staff_line_count=render["staff_line_count"],
                 )
             )
         doc_status = "partial_error" if page_errors else "success"
@@ -707,6 +937,17 @@ def build_markdown_report(
     pages_with_text = sum(1 for r in text_records if r.get("text_is_searchable"))
     pages_needing_ocr = sum(1 for r in text_records if r.get("needs_ocr"))
     pages_image_based = sum(1 for r in page_records if r.get("is_image_based"))
+    blank_pages = sum(1 for r in page_records if r.get("is_blank") is True)
+    music_pages = sum(1 for r in page_records if r.get("has_staves") is True)
+    docs_with_music = sum(1 for d in document_records if d.get("music_page_count", 0))
+    docs_with_identity = sum(
+        1
+        for d in document_records
+        if any(
+            (d.get("identity_candidates") or {}).get(k)
+            for k in ("publisher", "copyright_year", "arranger", "composer")
+        )
+    )
     render_errors = [r for r in page_records if r.get("processing_status") == "error"]
     docs_partial = [
         d for d in document_records if d.get("processing_status") == "partial_error"
@@ -793,6 +1034,8 @@ def build_markdown_report(
     )
     out.append(f"| Pages needing OCR | {pages_needing_ocr} |")
     out.append(f"| Image-based (scanned) pages | {pages_image_based} |")
+    out.append(f"| Blank / near-blank pages | {blank_pages} |")
+    out.append(f"| Pages with music staves | {music_pages} |")
     out.append(f"| Page render errors | {len(render_errors)} |")
     out.append("")
 
@@ -824,6 +1067,14 @@ def build_markdown_report(
     )
     out.append(
         f"- **{len(docs_scanned)}** documents contain scanned/image-based pages."
+    )
+    out.append(
+        f"- **{docs_with_music}** documents have at least one page with detected music "
+        f"staves ({music_pages} music pages total)."
+    )
+    out.append(
+        f"- **{docs_with_identity}** documents have a detected publisher/copyright/"
+        "arranger/composer candidate (best-effort)."
     )
     if dpi_vals:
         stats = _stats(dpi_vals)

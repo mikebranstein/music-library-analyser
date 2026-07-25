@@ -37,8 +37,11 @@ Primary outputs:
 2. `02_extract_text_and_images.py`
 - Extract embedded text per page (plus word count, alnum ratio, and a normalized text hash)
 - Capture prominent/header text candidates for part/title detection
+- Extract zoned corner/bottom text (top-left/center/right, bottom) for part-name and identity detection
 - Render page thumbnails and compute page features (text density, black/white ratio)
 - Detect page geometry (size, rotation, orientation) and born-digital vs scanned pages
+- Flag blank/near-blank pages and detect music staves (per-page `has_staves`/`staff_line_count`)
+- Parse best-effort copyright/identity candidates (publisher, year, arranger, composer)
 - Compute image-quality metrics (blur, skew, contrast) when `numpy`/`opencv-python` are available
 - Emit a per-document rollup (`data/documents.jsonl`) alongside `extracted_text.jsonl` and `pages.jsonl`
 - Write a human-readable Markdown summary (`data/extraction_report.md`) with coverage, quality, and per-folder/per-document breakdowns

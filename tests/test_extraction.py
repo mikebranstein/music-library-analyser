@@ -9,7 +9,6 @@ from typer.testing import CliRunner
 
 from scripts._common import read_json, read_jsonl
 
-
 runner = CliRunner()
 
 
@@ -317,3 +316,135 @@ def test_no_report_flag(tmp_path: Path, monkeypatch):
     )
     assert result.exit_code == 0, result.stdout
     assert not output_report.exists()
+
+
+def test_extract_identity_candidates():
+    extract = load_module("02_extract_text_and_images.py", "extract_identity")
+    page1 = (
+        "Sample March\n"
+        "by John Composer\n"
+        "Arr. Jane Arranger\n"
+        "\u00a9 2019 Acme Music Publishing\n"
+        "All Rights Reserved\n"
+    )
+    identity = extract.extract_identity_candidates([page1])
+    assert identity["copyright_year"] == 2019
+    assert identity["arranger"] == "Jane Arranger"
+    assert identity["composer"] == "John Composer"
+    assert identity["publisher"] == "Acme Music Publishing"
+    assert "\u00a9" in identity["copyright_line"]
+
+    # No identity signals => all None, never raises.
+    empty = extract.extract_identity_candidates(["Just some page text."])
+    assert empty["copyright_line"] is None
+    assert empty["copyright_year"] is None
+
+
+def test_detect_staves_projection():
+    extract = load_module("02_extract_text_and_images.py", "extract_staves")
+    if extract.np is None:
+        import pytest
+
+        pytest.skip("numpy unavailable; staff detection degrades to None")
+    width, height = 200, 100
+    buf = bytearray([255] * (width * height))
+    for row in (10, 20, 30, 40, 50):
+        start = row * width
+        buf[start : start + width] = bytes([0] * width)
+    result = extract.detect_staves(bytes(buf), width, height)
+    assert result["staff_line_count"] == 5
+    assert result["has_staves"] is True
+
+    blank = extract.detect_staves(bytes([255] * (width * height)), width, height)
+    assert blank["staff_line_count"] == 0
+    assert blank["has_staves"] is False
+
+
+def test_detect_staves_degrades_without_shape():
+    extract = load_module("02_extract_text_and_images.py", "extract_staves_none")
+    # Mismatched dimensions cannot reshape => None, never raises.
+    result = extract.detect_staves(bytes([0] * 10), -1, -1)
+    assert result["has_staves"] is None
+    assert result["staff_line_count"] is None
+
+
+def test_zone_blank_and_staff_full_run(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    extract = load_module("02_extract_text_and_images.py", "extract_wave2")
+
+    library_root = tmp_path / "library"
+    pdf_path = library_root / "Piece M" / "Score.pdf"
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((72, 72), "MARCHING SONG", fontsize=24)
+    page.insert_text((72, 760), "\u00a9 2019 Acme Music Publishing", fontsize=10)
+    for y in range(200, 260, 10):
+        page.draw_line(fitz.Point(60, y), fitz.Point(552, y), width=1.5)
+    doc.new_page(width=612, height=792)  # blank second page
+    doc.save(pdf_path)
+    doc.close()
+
+    inventory_path = tmp_path / "data" / "raw_inventory.jsonl"
+    build_inventory(library_root, inventory_path)
+
+    output_text = tmp_path / "data" / "extracted_text.jsonl"
+    output_pages = tmp_path / "data" / "pages.jsonl"
+    output_documents = tmp_path / "data" / "documents.jsonl"
+    result = runner.invoke(
+        extract.app,
+        [
+            "--library-root",
+            str(library_root),
+            "--inventory",
+            str(inventory_path),
+            "--output-text",
+            str(output_text),
+            "--output-pages",
+            str(output_pages),
+            "--output-documents",
+            str(output_documents),
+            "--cache-dir",
+            str(tmp_path / "cache"),
+            "--mode",
+            "full",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+
+    text_records = read_jsonl(output_text)
+    page_records = read_jsonl(output_pages)
+    doc_rec = read_jsonl(output_documents)[0]
+
+    page1_text = next(r for r in text_records if r["page_num"] == 1)
+    # Zone fields exist; the title sits in the top band.
+    for key in (
+        "zone_top_left",
+        "zone_top_center",
+        "zone_top_right",
+        "zone_bottom",
+    ):
+        assert key in page1_text
+    top_text = " ".join(
+        v or ""
+        for v in (
+            page1_text["zone_top_left"],
+            page1_text["zone_top_center"],
+            page1_text["zone_top_right"],
+        )
+    )
+    assert "MARCHING SONG" in top_text
+
+    page_recs = {r["page_num"]: r for r in page_records}
+    # Blank second page is flagged; music page has staves detected.
+    assert page_recs[2]["is_blank"] is True
+    if extract.np is not None:
+        assert page_recs[1]["has_staves"] is True
+        assert page_recs[1]["staff_line_count"] >= 5
+        assert doc_rec["music_page_count"] >= 1
+    assert doc_rec["blank_page_count"] >= 1
+
+    # Identity candidate parsed from the copyright line.
+    identity = doc_rec["identity_candidates"]
+    assert identity["copyright_year"] == 2019
+    assert doc_rec["record_version"] == "2.1"
