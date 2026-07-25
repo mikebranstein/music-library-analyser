@@ -38,6 +38,7 @@ except Exception:  # pragma: no cover
 from scripts._common import (
     atomic_write_json,
     atomic_write_jsonl,
+    atomic_write_text,
     normalize_rel_path,
     read_json,
     read_jsonl,
@@ -47,6 +48,14 @@ from scripts._common import (
 
 RECORD_VERSION = "2.0"
 EXTRACTION_METHOD = "pymupdf_embedded"
+
+# Heuristic quality thresholds used only for the human-readable report.
+# They flag pages for attention; they do not change extraction outputs.
+BLUR_WARN_THRESHOLD = 100.0  # Laplacian variance below this may indicate blur
+LOW_CONTRAST_THRESHOLD = 12.0  # grayscale std below this may indicate a washed page
+LOW_DPI_THRESHOLD = 150.0  # estimated scan DPI below this is low resolution
+SKEW_MIN_DEG = 1.0  # abs skew at/above this is notable
+SKEW_MAX_DEG = 45.0  # abs skew above this is treated as a sparse-page artifact
 
 app = typer.Typer(add_completion=False)
 
@@ -649,6 +658,377 @@ def sort_documents(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(records, key=lambda r: r.get("pdf_path", ""))
 
 
+def _pct(part: int, whole: int) -> float:
+    return (100.0 * part / whole) if whole else 0.0
+
+
+def _is_notable_skew(angle: float | None) -> bool:
+    return angle is not None and SKEW_MIN_DEG <= abs(angle) <= SKEW_MAX_DEG
+
+
+def _stats(values: list[float]) -> tuple[float, float, float] | None:
+    """Return (min, median, max) or None when empty."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    n = len(ordered)
+    mid = n // 2
+    median = ordered[mid] if n % 2 else (ordered[mid - 1] + ordered[mid]) / 2.0
+    return ordered[0], median, ordered[-1]
+
+
+def _count_by_pdf(records: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for r in records:
+        key = r.get("pdf_path", "")
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _doc_status_icon(doc: dict[str, Any]) -> str:
+    if doc.get("processing_status") == "partial_error":
+        return "❌"
+    if doc.get("image_based_fraction", 0.0):
+        return "🖼️"
+    if doc.get("ocr_fraction", 0.0):
+        return "🔍"
+    return "✅"
+
+
+def build_markdown_report(
+    text_records: list[dict[str, Any]],
+    page_records: list[dict[str, Any]],
+    document_records: list[dict[str, Any]],
+    meta: dict[str, Any],
+) -> str:
+    """Render a human-readable Markdown summary of the extraction outputs."""
+    total_docs = len(document_records)
+    total_pages = len(page_records)
+    pages_with_text = sum(1 for r in text_records if r.get("text_is_searchable"))
+    pages_needing_ocr = sum(1 for r in text_records if r.get("needs_ocr"))
+    pages_image_based = sum(1 for r in page_records if r.get("is_image_based"))
+    render_errors = [r for r in page_records if r.get("processing_status") == "error"]
+    docs_partial = [
+        d for d in document_records if d.get("processing_status") == "partial_error"
+    ]
+    docs_full_text = sum(1 for d in document_records if not d.get("ocr_fraction", 0.0))
+    docs_scanned = [d for d in document_records if d.get("image_based_fraction", 0.0)]
+
+    # Blur/skew/contrast/DPI are only meaningful on scanned (image-based) pages.
+    # Born-digital pages are vector-rendered and always crisp, and sheet music is
+    # mostly white space, so absolute thresholds there would be pure noise.
+    scanned_pages = [r for r in page_records if r.get("is_image_based")]
+    blur_vals = [
+        r["blur_variance"] for r in scanned_pages if r.get("blur_variance") is not None
+    ]
+    contrast_vals = [
+        r["contrast_std"] for r in scanned_pages if r.get("contrast_std") is not None
+    ]
+    dpi_vals = [
+        r["estimated_dpi"] for r in scanned_pages if r.get("estimated_dpi") is not None
+    ]
+    blurry = [
+        r
+        for r in scanned_pages
+        if r.get("blur_variance") is not None and r["blur_variance"] < BLUR_WARN_THRESHOLD
+    ]
+    low_contrast = [
+        r
+        for r in scanned_pages
+        if r.get("contrast_std") is not None and r["contrast_std"] < LOW_CONTRAST_THRESHOLD
+    ]
+    skewed = [r for r in scanned_pages if _is_notable_skew(r.get("skew_angle_deg"))]
+    low_dpi = [
+        r
+        for r in scanned_pages
+        if r.get("estimated_dpi") is not None and r["estimated_dpi"] < LOW_DPI_THRESHOLD
+    ]
+
+    text_pct = _pct(pages_with_text, total_pages)
+    overall = "✅ Healthy"
+    if docs_partial or render_errors:
+        overall = "❌ Errors present"
+    elif pages_needing_ocr or pages_image_based or blurry or low_contrast or skewed:
+        overall = "⚠️ Review recommended"
+
+    out: list[str] = []
+    out.append("# Extraction Report")
+    out.append("")
+    out.append(
+        f"_Generated {meta['generated_at']} • run `{meta['run_id']}` • "
+        f"mode **{meta['mode']}** • {meta['elapsed_seconds']:.1f}s_"
+    )
+    out.append("")
+    out.append(f"**Status:** {overall}")
+    out.append("")
+
+    # Navigation
+    out.append("## Contents")
+    out.append("")
+    out.append("- [At a Glance](#at-a-glance)")
+    out.append("- [Text Coverage](#text-coverage)")
+    out.append("- [Document Types](#document-types)")
+    out.append("- [Image Quality](#image-quality)")
+    out.append("- [Attention Needed](#attention-needed)")
+    out.append("- [Per-Folder Breakdown](#per-folder-breakdown)")
+    out.append("- [Per-Document Detail](#per-document-detail)")
+    out.append("- [Configuration and Environment](#configuration-and-environment)")
+    out.append("")
+
+    # At a Glance
+    out.append("## At a Glance")
+    out.append("")
+    out.append("| Metric | Value |")
+    out.append("| --- | --- |")
+    out.append(f"| Documents in output | {total_docs} |")
+    out.append(
+        f"| Processed this run | {meta['processed_pdfs']} "
+        f"(reused {meta['reused_pdfs']}) |"
+    )
+    out.append(f"| Skipped (unreadable in inventory) | {meta['skipped']} |")
+    out.append(f"| Document-level errors | {len(docs_partial)} |")
+    out.append(f"| Total pages | {total_pages} |")
+    out.append(
+        f"| Pages with embedded text | {pages_with_text} ({text_pct:.1f}%) |"
+    )
+    out.append(f"| Pages needing OCR | {pages_needing_ocr} |")
+    out.append(f"| Image-based (scanned) pages | {pages_image_based} |")
+    out.append(f"| Page render errors | {len(render_errors)} |")
+    out.append("")
+
+    # Text coverage
+    out.append("## Text Coverage")
+    out.append("")
+    out.append(
+        f"- **{docs_full_text}/{total_docs}** documents have embedded text on every page."
+    )
+    out.append(
+        f"- **{pages_with_text}/{total_pages}** pages ({text_pct:.1f}%) contain searchable "
+        "text; the rest are flagged `needs_ocr` for a future OCR pass."
+    )
+    words = [int(r.get("word_count", 0)) for r in text_records]
+    if words:
+        out.append(
+            f"- Word count per page: min {min(words)}, "
+            f"median {sorted(words)[len(words) // 2]}, max {max(words)}."
+        )
+    out.append("")
+
+    # Document types
+    out.append("## Document Types")
+    out.append("")
+    born_digital = total_docs - len(docs_scanned)
+    out.append(
+        f"- **{born_digital}** born-digital documents (no large full-page images with "
+        "little text)."
+    )
+    out.append(
+        f"- **{len(docs_scanned)}** documents contain scanned/image-based pages."
+    )
+    if dpi_vals:
+        stats = _stats(dpi_vals)
+        assert stats is not None
+        out.append(
+            f"- Estimated scan DPI (image pages): min {stats[0]:.0f}, "
+            f"median {stats[1]:.0f}, max {stats[2]:.0f}."
+        )
+    out.append("")
+
+    # Image quality
+    out.append("## Image Quality")
+    out.append("")
+    if not meta["enable_image_metrics"]:
+        out.append(
+            "> Image-quality metrics were disabled or unavailable "
+            "(`numpy`/`opencv` missing or `--no-image-metrics`). "
+            "Blur/skew/contrast were not computed."
+        )
+        out.append("")
+    elif not scanned_pages:
+        out.append(
+            "No scanned/image-based pages were detected. Blur, skew, contrast, and DPI "
+            "checks apply only to scanned pages — born-digital pages are vector-rendered "
+            "and crisp by construction, so they are not flagged here."
+        )
+        out.append("")
+    else:
+        out.append(
+            f"Evaluated over **{len(scanned_pages)}** scanned/image-based pages only. "
+            "Thresholds are heuristic and flag pages for review; they do not alter "
+            "extraction output."
+        )
+        out.append("")
+        out.append("| Signal | Flagged pages | Threshold | Range (min/median/max) |")
+        out.append("| --- | --- | --- | --- |")
+        b = _stats(blur_vals)
+        c = _stats(contrast_vals)
+        out.append(
+            f"| Blur (Laplacian var) | {len(blurry)} | < {BLUR_WARN_THRESHOLD:.0f} | "
+            + (f"{b[0]:.0f} / {b[1]:.0f} / {b[2]:.0f}" if b else "n/a")
+            + " |"
+        )
+        out.append(
+            f"| Low contrast (std) | {len(low_contrast)} | < {LOW_CONTRAST_THRESHOLD:.0f} | "
+            + (f"{c[0]:.1f} / {c[1]:.1f} / {c[2]:.1f}" if c else "n/a")
+            + " |"
+        )
+        out.append(
+            f"| Notable skew | {len(skewed)} | "
+            f"{SKEW_MIN_DEG:.0f}°–{SKEW_MAX_DEG:.0f}° | — |"
+        )
+        out.append(
+            f"| Low DPI | {len(low_dpi)} | < {LOW_DPI_THRESHOLD:.0f} | — |"
+        )
+        out.append("")
+
+    # Attention needed
+    out.append("## Attention Needed")
+    out.append("")
+    attention_added = False
+
+    if docs_partial:
+        attention_added = True
+        out.append(f"### ❌ Documents with processing errors ({len(docs_partial)})")
+        out.append("")
+        out.append("| Document | Pages | Status |")
+        out.append("| --- | --- | --- |")
+        for d in docs_partial[:15]:
+            out.append(
+                f"| {d.get('pdf_path', '')} | {d.get('page_count', 0)} | "
+                f"{d.get('processing_status', '')} |"
+            )
+        if len(docs_partial) > 15:
+            out.append(f"| … and {len(docs_partial) - 15} more | | |")
+        out.append("")
+
+    ocr_docs = sorted(
+        [d for d in document_records if d.get("ocr_fraction", 0.0)],
+        key=lambda d: d.get("ocr_fraction", 0.0),
+        reverse=True,
+    )
+    if ocr_docs:
+        attention_added = True
+        out.append(f"### 🔍 Documents needing OCR ({len(ocr_docs)})")
+        out.append("")
+        out.append("| Document | Pages needing OCR | Of pages |")
+        out.append("| --- | --- | --- |")
+        for d in ocr_docs[:15]:
+            out.append(
+                f"| {d.get('pdf_path', '')} | {d.get('pages_needing_ocr', 0)} | "
+                f"{d.get('page_count', 0)} ({100.0 * d.get('ocr_fraction', 0.0):.0f}%) |"
+            )
+        if len(ocr_docs) > 15:
+            out.append(f"| … and {len(ocr_docs) - 15} more | | |")
+        out.append("")
+
+    for title, records in (
+        ("⚠️ Blurry pages", blurry),
+        ("⚠️ Low-contrast pages", low_contrast),
+        ("⚠️ Skewed pages", skewed),
+    ):
+        if records:
+            attention_added = True
+            counts = _count_by_pdf(records)
+            top = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
+            out.append(f"### {title} ({len(records)} across {len(counts)} documents)")
+            out.append("")
+            out.append("| Document | Flagged pages |")
+            out.append("| --- | --- |")
+            for path, count in top[:10]:
+                out.append(f"| {path} | {count} |")
+            if len(top) > 10:
+                out.append(f"| … and {len(top) - 10} more | |")
+            out.append("")
+
+    if not attention_added:
+        out.append("✅ Nothing flagged. All documents extracted cleanly.")
+        out.append("")
+
+    # Per-folder breakdown
+    out.append("## Per-Folder Breakdown")
+    out.append("")
+    folders: dict[str, dict[str, int]] = {}
+    for d in document_records:
+        f = folders.setdefault(
+            d.get("piece_folder", ""),
+            {"docs": 0, "pages": 0, "text": 0, "ocr": 0, "scanned": 0, "errors": 0},
+        )
+        f["docs"] += 1
+        f["pages"] += int(d.get("page_count", 0))
+        f["text"] += int(d.get("pages_with_text", 0))
+        f["ocr"] += int(d.get("pages_needing_ocr", 0))
+        f["scanned"] += int(d.get("pages_image_based", 0))
+        if d.get("processing_status") == "partial_error":
+            f["errors"] += 1
+    out.append("| Folder | Docs | Pages | Text | Needs OCR | Scanned | Errors |")
+    out.append("| --- | --- | --- | --- | --- | --- | --- |")
+    for name in sorted(folders):
+        f = folders[name]
+        out.append(
+            f"| {name or '(root)'} | {f['docs']} | {f['pages']} | {f['text']} | "
+            f"{f['ocr']} | {f['scanned']} | {f['errors']} |"
+        )
+    out.append("")
+
+    # Per-document detail
+    out.append("## Per-Document Detail")
+    out.append("")
+    limit = int(meta["detail_limit"])
+    shown = document_records[:limit]
+    out.append(
+        f"<details><summary>Show {len(shown)} of {total_docs} documents</summary>"
+    )
+    out.append("")
+    out.append(
+        "| | Document | Pages | Text | OCR | Scanned | Detected header |"
+    )
+    out.append("| --- | --- | --- | --- | --- | --- | --- |")
+    for d in shown:
+        headers = d.get("first_page_header_candidates") or []
+        header = headers[0] if headers else ""
+        header = header.replace("|", "\\|")[:40]
+        out.append(
+            f"| {_doc_status_icon(d)} | {d.get('pdf_path', '')} | "
+            f"{d.get('page_count', 0)} | {d.get('pages_with_text', 0)} | "
+            f"{d.get('pages_needing_ocr', 0)} | {d.get('pages_image_based', 0)} | "
+            f"{header} |"
+        )
+    out.append("")
+    out.append("</details>")
+    out.append("")
+    if total_docs > limit:
+        out.append(
+            f"> Showing first {limit} of {total_docs} documents. "
+            "See `documents.jsonl` for the complete dataset."
+        )
+        out.append("")
+
+    # Configuration
+    out.append("## Configuration and Environment")
+    out.append("")
+    out.append("| Setting | Value |")
+    out.append("| --- | --- |")
+    out.append(f"| Record schema version | {RECORD_VERSION} |")
+    out.append(f"| Library root | `{meta['library_root']}` |")
+    out.append(f"| Inventory input | `{meta['inventory']}` |")
+    out.append(f"| Render DPI | {meta['render_dpi']} |")
+    out.append(f"| Rendering enabled | {'yes' if meta['enable_rendering'] else 'no'} |")
+    out.append(
+        f"| Image metrics enabled | {'yes' if meta['enable_image_metrics'] else 'no'} |"
+    )
+    out.append(f"| numpy available | {'yes' if meta['numpy_available'] else 'no'} |")
+    out.append(f"| opencv available | {'yes' if meta['opencv_available'] else 'no'} |")
+    out.append(f"| Text output | `{meta['output_text']}` |")
+    out.append(f"| Pages output | `{meta['output_pages']}` |")
+    out.append(f"| Documents output | `{meta['output_documents']}` |")
+    out.append("")
+    out.append("Status legend: ✅ text on every page • 🔍 needs OCR • "
+               "🖼️ scanned/image-based • ❌ processing error.")
+    out.append("")
+
+    return "\n".join(out) + "\n"
+
+
 @app.command()
 def main(
     library_root: Path = typer.Option(
@@ -666,6 +1046,15 @@ def main(
     ),
     output_documents: Path = typer.Option(
         Path("data/documents.jsonl"), help="Per-document rollup output"
+    ),
+    output_report: Path = typer.Option(
+        Path("data/extraction_report.md"), help="Human-readable Markdown summary output"
+    ),
+    write_report: bool = typer.Option(
+        True, "--report/--no-report", help="Write the Markdown summary report"
+    ),
+    report_detail_limit: int = typer.Option(
+        200, help="Max rows in the per-document detail table of the report"
     ),
     cache_dir: Path = typer.Option(Path("cache"), help="Base cache directory"),
     mode: str = typer.Option("full", help="Processing mode: full or incremental"),
@@ -710,6 +1099,7 @@ def main(
     output_text = output_text.resolve()
     output_pages = output_pages.resolve()
     output_documents = output_documents.resolve()
+    output_report = output_report.resolve()
     cache_dir = cache_dir.resolve()
     workspace_root = Path.cwd().resolve()
 
@@ -880,6 +1270,37 @@ def main(
         output_pages,
         output_documents,
     )
+
+    if write_report:
+        report_meta = {
+            "generated_at": utc_now_iso(),
+            "run_id": run_id,
+            "mode": mode,
+            "elapsed_seconds": total_elapsed,
+            "processed_pdfs": processed_pdfs,
+            "reused_pdfs": reused_pdfs,
+            "pdf_errors": pdf_errors,
+            "skipped": skipped,
+            "render_dpi": render_dpi,
+            "enable_rendering": enable_rendering,
+            "enable_image_metrics": enable_image_metrics,
+            "numpy_available": np is not None,
+            "opencv_available": cv2 is not None,
+            "detail_limit": report_detail_limit,
+            "library_root": normalize_rel_path(library_root),
+            "inventory": normalize_rel_path(inventory),
+            "output_text": normalize_rel_path(output_text),
+            "output_pages": normalize_rel_path(output_pages),
+            "output_documents": normalize_rel_path(output_documents),
+        }
+        try:
+            report_md = build_markdown_report(
+                text_records, page_records, document_records, report_meta
+            )
+            atomic_write_text(output_report, report_md)
+            logger.info("Wrote Markdown report: %s", output_report)
+        except Exception as exc:  # pragma: no cover - report is non-critical
+            logger.warning("Failed to write Markdown report: %s", exc)
 
 
 if __name__ == "__main__":

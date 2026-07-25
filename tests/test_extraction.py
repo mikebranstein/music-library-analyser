@@ -231,3 +231,89 @@ def test_gray_metrics_degrade_without_numpy():
     # Metrics are either computed (numpy present) or None (fallback); never raise.
     assert metrics["contrast_std"] is None or metrics["contrast_std"] >= 0.0
     assert metrics["blur_variance"] is None or metrics["blur_variance"] >= 0.0
+
+
+def test_markdown_report_written(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    extract = load_module("02_extract_text_and_images.py", "extract_report")
+
+    library_root = tmp_path / "library"
+    make_text_pdf(library_root / "Piece A" / "Flute 1.pdf", "FLUTE 1")
+
+    inventory_path = tmp_path / "data" / "raw_inventory.jsonl"
+    build_inventory(library_root, inventory_path)
+
+    output_report = tmp_path / "data" / "extraction_report.md"
+    result = runner.invoke(
+        extract.app,
+        [
+            "--library-root",
+            str(library_root),
+            "--inventory",
+            str(inventory_path),
+            "--output-text",
+            str(tmp_path / "data" / "extracted_text.jsonl"),
+            "--output-pages",
+            str(tmp_path / "data" / "pages.jsonl"),
+            "--output-documents",
+            str(tmp_path / "data" / "documents.jsonl"),
+            "--output-report",
+            str(output_report),
+            "--cache-dir",
+            str(tmp_path / "cache"),
+            "--mode",
+            "full",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+
+    assert output_report.exists()
+    report = output_report.read_text(encoding="utf-8")
+    assert report.startswith("# Extraction Report")
+    for heading in (
+        "## At a Glance",
+        "## Text Coverage",
+        "## Attention Needed",
+        "## Per-Folder Breakdown",
+        "## Per-Document Detail",
+        "## Configuration and Environment",
+    ):
+        assert heading in report
+    assert "Piece A/Flute 1.pdf" in report
+
+
+def test_no_report_flag(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    extract = load_module("02_extract_text_and_images.py", "extract_noreport")
+
+    library_root = tmp_path / "library"
+    make_text_pdf(library_root / "Piece A" / "Flute 1.pdf", "FLUTE 1")
+
+    inventory_path = tmp_path / "data" / "raw_inventory.jsonl"
+    build_inventory(library_root, inventory_path)
+
+    output_report = tmp_path / "data" / "extraction_report.md"
+    result = runner.invoke(
+        extract.app,
+        [
+            "--library-root",
+            str(library_root),
+            "--inventory",
+            str(inventory_path),
+            "--output-text",
+            str(tmp_path / "data" / "extracted_text.jsonl"),
+            "--output-pages",
+            str(tmp_path / "data" / "pages.jsonl"),
+            "--output-documents",
+            str(tmp_path / "data" / "documents.jsonl"),
+            "--output-report",
+            str(output_report),
+            "--cache-dir",
+            str(tmp_path / "cache"),
+            "--mode",
+            "full",
+            "--no-report",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert not output_report.exists()

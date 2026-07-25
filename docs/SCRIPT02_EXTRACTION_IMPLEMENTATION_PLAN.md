@@ -165,6 +165,20 @@ Fields: `record_version`, `last_run_id`, `last_run_timestamp`, `inventory_input`
 (map of `pdf_path` to `file_fingerprint`), `pdf_count_processed`, `page_count_processed`,
 `reused_pdf_count`. The schema version is bumped to `2.0` for the enhanced record shape.
 
+### 4.5 Report `data/extraction_report.md`
+
+A human-readable Markdown summary written after the JSONL outputs (skippable via
+`--no-report`). It is derived entirely from the in-memory records, so it never diverges from
+the data files. Sections: an anchor-linked table of contents, At-a-Glance metrics, Text
+Coverage, Document Types (born-digital vs scanned), Image Quality, Attention Needed
+(errors / needs-OCR / blurry / low-contrast / skewed), a Per-Folder breakdown, a collapsible
+Per-Document detail table (capped by `--report-detail-limit`), and a Configuration and
+Environment section. Emoji status markers (✅ 🔍 🖼️ ❌) stand in for color.
+
+Quality caveat: blur/skew/contrast/DPI flags are computed only over scanned (image-based)
+pages. Born-digital pages are vector-rendered and crisp by construction, and sheet music is
+mostly white space, so absolute thresholds there would produce false positives.
+
 ## 5. Feature Computation
 
 ### 5.1 Pixel metrics (from the grayscale render)
@@ -238,6 +252,9 @@ checkpoint is written atomically after a successful output write.
 | `--output-text` | Path | `data/extracted_text.jsonl` | Per-page text output |
 | `--output-pages` | Path | `data/pages.jsonl` | Per-page feature output |
 | `--output-documents` | Path | `data/documents.jsonl` | Per-document rollup output |
+| `--output-report` | Path | `data/extraction_report.md` | Human-readable Markdown summary |
+| `--report / --no-report` | flag | enabled | Toggle the Markdown summary report |
+| `--report-detail-limit` | int | `200` | Max rows in the per-document detail table |
 | `--cache-dir` | Path | `cache` | Base cache directory |
 | `--mode` | str | `full` | `full` or `incremental` |
 | `--render-dpi` | int | `150` | Thumbnail render DPI |

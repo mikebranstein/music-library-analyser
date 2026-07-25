@@ -61,6 +61,22 @@ def atomic_write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
         raise
 
 
+def atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        os.replace(tmp_path, path)
+    except Exception:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+        raise
+
+
 def read_json(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None

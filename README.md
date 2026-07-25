@@ -41,6 +41,7 @@ Primary outputs:
 - Detect page geometry (size, rotation, orientation) and born-digital vs scanned pages
 - Compute image-quality metrics (blur, skew, contrast) when `numpy`/`opencv-python` are available
 - Emit a per-document rollup (`data/documents.jsonl`) alongside `extracted_text.jsonl` and `pages.jsonl`
+- Write a human-readable Markdown summary (`data/extraction_report.md`) with coverage, quality, and per-folder/per-document breakdowns
 - OCR of scanned pages is deferred to a later stage
 
 3. `03_part_classifier.py`
@@ -91,6 +92,7 @@ project-root/
     extracted_text.jsonl
     pages.jsonl
     documents.jsonl
+    extraction_report.md
     part_predictions.jsonl
     expected_parts.jsonl
     quality_metrics.jsonl
