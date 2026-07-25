@@ -167,6 +167,51 @@ Each document should include:
 - Reporting: `jinja2`
 - LLM orchestration: provider SDK or `litellm`
 
+## OCR Prerequisite: Tesseract
+
+OCR of scanned pages relies on the **Tesseract OCR engine**, a native binary that must be
+installed separately — `pip install pytesseract` only provides the Python wrapper, not the engine
+itself. Tesseract is only required when OCR is enabled; the rest of the pipeline (Scripts 01-02
+embedded-text extraction, rendering, and image metrics) runs without it.
+
+### Install the engine
+
+- **Windows**: install the UB-Mannheim build from
+  <https://github.com/UB-Mannheim/tesseract/wiki> (`tesseract-ocr-w64-setup-*.exe`). During
+  setup, select any additional language packs you need (English `eng` is included by default).
+- **macOS**: `brew install tesseract`
+- **Debian/Ubuntu**: `sudo apt-get install tesseract-ocr`
+
+### Make it discoverable
+
+The code needs to find the `tesseract` executable. Either:
+
+- add the install directory to your `PATH` (on Windows, typically
+  `C:\Program Files\Tesseract-OCR`), or
+- point `pytesseract` at it explicitly in code:
+
+  ```python
+  import pytesseract
+  pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+  ```
+
+### Verify the install
+
+```powershell
+tesseract --version
+```
+
+If that prints a version (e.g. `tesseract v5.x`), the engine is ready. From Python you can also
+confirm the wrapper sees it with `pytesseract.get_tesseract_version()`.
+
+### Notes
+
+- Higher-DPI renders (~300 DPI) markedly improve OCR accuracy over the default 150-DPI thumbnails.
+- Non-English or symbol-heavy scans require the matching `traineddata` language pack installed
+  above, selected via the OCR `lang` option.
+- Orientation/script detection (OSD, for auto-rotating sideways scans) uses the same engine via
+  `pytesseract.image_to_osd`.
+
 ## Pilot-First Execution Plan
 
 Start with a pilot sample of 25 representative folders.
