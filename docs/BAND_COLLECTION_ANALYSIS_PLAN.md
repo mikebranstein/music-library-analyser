@@ -61,11 +61,12 @@ project-root/
       verify_low_confidence.txt
   data/
     raw_inventory.jsonl
-    pages.parquet
-    extracted_text.parquet
-    part_predictions.parquet
-    expected_parts.parquet
-    quality_metrics.parquet
+    extracted_text.jsonl
+    pages.jsonl
+    documents.jsonl
+    part_predictions.jsonl
+    expected_parts.jsonl
+    quality_metrics.jsonl
     piece_reports/
     collection_reports/
   cache/
@@ -92,7 +93,14 @@ Folders+PDFs
 
 ## 4. Script-by-Script Plan
 
+> Output format decision (as built): Scripts 01 and 02 emit newline-delimited JSON
+> (`.jsonl`) for streaming writes, human-auditable diffs, and parity across passes. All
+> downstream passes (03-08) should read and write `.jsonl` as well. Parquet migration is
+> deferred and optional; treat the `.parquet` names in older drafts as `.jsonl`.
+
 ## 4.1 Script 01: Inventory Pass (`01_inventory.py`)
+
+Status: implemented and tested (see `docs/BOOTSTRAP_AND_SCRIPT01_IMPLEMENTATION_PLAN.md`).
 
 Purpose:
 
@@ -103,16 +111,21 @@ Purpose:
 Outputs:
 
 - `data/raw_inventory.jsonl` (one record per PDF)
+- `data/.inventory_checkpoint.json` (fingerprints for incremental mode)
 
-Fields:
+Fields (as built):
 
-- piece_id (stable hash or folder path key)
-- piece_folder
-- pdf_path
-- file_size
-- modified_time
+- record_version, run_id
+- piece_id (stable hash key)
+- piece_folder, piece_folder_hash
+- pdf_path (relative to library root), pdf_filename
+- file_size_bytes, modified_timestamp
+- file_fingerprint (used for incremental reuse)
 - page_count
-- pdf_metadata (title, author, producer if present)
+- pdf_readable, is_encrypted
+- pdf_metadata (title, author, producer, etc. when present)
+- health_flags (includes is_malformed)
+- processing_status, error_message, processing_timestamp
 
 Checks:
 
@@ -120,32 +133,60 @@ Checks:
 - encrypted PDFs
 - zero-page or malformed documents
 
+Downstream note: Script 02 consumes this file and filters to readable records
+(`pdf_readable`, non-encrypted, `page_count >= 1`, not `is_malformed`).
+
 ## 4.2 Script 02: Extraction Pass (`02_extract_text_and_images.py`)
+
+Status: implemented and tested (see `docs/SCRIPT02_EXTRACTION_IMPLEMENTATION_PLAN.md`).
+Record schema version `2.0`.
 
 Purpose:
 
-- Pull text where embedded text exists
-- OCR where text is absent
+- Pull embedded text per page and derive text-quality signals
+- Capture prominent/header text candidates for part/title detection
 - Render low-res thumbnails for visual QA and LLM prompts
+- Compute page geometry, born-digital vs scanned signals, and image-quality metrics
+- Roll up per-page results into a per-document summary
 
-Libraries:
+OCR is deferred to a later stage (needs the Tesseract system binary). Pages with no
+searchable text are flagged `needs_ocr = true` for that future pass.
 
-- `pypdf` or `pymupdf` for PDF structure
-- `pdf2image` or `pymupdf` for page rendering
-- `pytesseract` or PaddleOCR for OCR
+Libraries (as built):
 
-Outputs:
+- `pymupdf` for PDF structure, text, and page rendering
+- `numpy` + `opencv-python(-headless)` for image-quality metrics (optional; degrade to `null`)
 
-- `data/extracted_text.parquet` (page-level text)
-- `data/pages.parquet` (render + page features)
+Outputs (three JSONL datasets + checkpoint):
 
-Useful page-level features:
+- `data/extracted_text.jsonl` (one record per page: text + text-quality signals)
+- `data/pages.jsonl` (one record per page: render + geometry + image-quality metrics)
+- `data/documents.jsonl` (one record per PDF: rollup for identity/quality/reporting stages)
+- `data/.extraction_checkpoint.json`
 
-- OCR text density
-- average contrast
-- blur estimate (Laplacian variance)
-- skew estimate
-- black/white ratio
+Key `extracted_text.jsonl` fields for downstream use:
+
+- embedded_text, embedded_text_length, extraction_method
+- text_is_searchable, needs_ocr, ocr_text (null), ocr_confidence (null)
+- word_count, alnum_ratio, page_text_hash (normalized-text dedupe key)
+- header_text_candidates (largest-font strings), top_lines (top-of-page reading order)
+
+Key `pages.jsonl` fields for downstream use:
+
+- thumbnail_path, thumbnail_hash, render_dpi, render_width_px, render_height_px
+- text_density, black_white_ratio
+- page_width_pt, page_height_pt, rotation, orientation, aspect_ratio
+- image_count, largest_image_coverage, is_image_based, estimated_dpi
+- contrast_std, blur_variance, skew_angle_deg (null when numpy/opencv absent or disabled)
+
+Key `documents.jsonl` fields for downstream use:
+
+- piece_id, piece_folder, pdf_filename, page_count
+- pages_with_text, pages_needing_ocr, ocr_fraction
+- total_text_length, total_word_count
+- pages_image_based, image_based_fraction
+- first_page_text, first_page_header_candidates
+- processing_status (`success` / `partial_error`)
 
 ## 4.3 Script 03: Part Classification (`03_part_classifier.py`)
 
@@ -158,12 +199,20 @@ Identify what each PDF likely is:
 
 Method (hybrid):
 
+Inputs (from Scripts 01/02):
+
+- `data/raw_inventory.jsonl` for `pdf_filename` and `piece_folder`
+- `data/extracted_text.jsonl` for per-page `embedded_text`, `header_text_candidates`, and
+  `top_lines`
+- `data/documents.jsonl` for `first_page_text` and `first_page_header_candidates`
+- `data/pages.jsonl` for `is_image_based` (route scanned pages to the future OCR/vision path)
+
 1. Rule-first:
-- Filename regex rules (`regex_rules.yaml`)
-- First-page text regex patterns
+- Filename regex rules (`regex_rules.yaml`) against `pdf_filename`
+- First-page text regex patterns against `first_page_header_candidates` / `header_text_candidates`
 
 2. Model fallback:
-- LLM prompt with extracted snippets + filename + optional thumbnail
+- LLM prompt with extracted snippets + filename + optional thumbnail (`thumbnail_path`)
 - Return structured JSON
 
 3. Ensemble harmonization:
@@ -171,7 +220,7 @@ Method (hybrid):
 
 Outputs:
 
-- `data/part_predictions.parquet`
+- `data/part_predictions.jsonl`
 
 Key fields:
 
@@ -187,6 +236,12 @@ Key fields:
 Purpose:
 
 Estimate which parts should exist for each piece so missing parts can be flagged.
+
+Inputs:
+
+- `data/documents.jsonl` for work-identity seeds (`first_page_text`,
+  `first_page_header_candidates`, `piece_folder`, `pdf_filename`)
+- `data/part_predictions.jsonl` for observed parts per piece
 
 Approach:
 
@@ -242,7 +297,7 @@ Identity hardening before lookup:
 
 Outputs:
 
-- `data/expected_parts.parquet`
+- `data/expected_parts.jsonl`
 
 Fields:
 
@@ -284,13 +339,24 @@ Purpose:
 
 Flag poor scan quality and likely unusable pages.
 
-Checks:
+Inputs:
 
-- Low effective resolution
-- Excessive skew
-- Extreme low contrast / washed pages
-- Heavy blur
-- OCR illegibility score
+- `data/pages.jsonl` already carries the core objective metrics from Script 02:
+  `blur_variance` (Laplacian variance), `skew_angle_deg`, `contrast_std`, `text_density`,
+  `black_white_ratio`, `estimated_dpi`, `is_image_based`, `image_count`, and geometry.
+- `data/extracted_text.jsonl` provides `alnum_ratio` and `word_count` as legibility signals.
+
+Script 05 should consume and threshold these existing metrics rather than recompute them;
+re-rendering is only needed for optional model-assisted vision checks. Thresholds live in
+`config/quality_thresholds.yaml`.
+
+Checks (mostly derived from Script 02 metrics):
+
+- Low effective resolution (`estimated_dpi`, render dimensions)
+- Excessive skew (`skew_angle_deg`)
+- Extreme low contrast / washed pages (`contrast_std`)
+- Heavy blur (`blur_variance`)
+- OCR illegibility score (future OCR pass; interim proxy: `alnum_ratio`)
 - Cropping margin loss
 - Page anomalies (blank page, mostly noise)
 - Document style classification:
@@ -316,7 +382,7 @@ Optional model-assisted checks:
 
 Outputs:
 
-- `data/quality_metrics.parquet`
+- `data/quality_metrics.jsonl`
 
 Per-document quality summary:
 
@@ -333,6 +399,11 @@ Per-document quality summary:
 Purpose:
 
 Create one report per piece folder in Markdown or JSON.
+
+Inputs (join on `piece_id`):
+
+- `data/documents.jsonl`, `data/part_predictions.jsonl`, `data/expected_parts.jsonl`,
+  `data/quality_metrics.jsonl`, and `data/pages.jsonl` (for thumbnail references)
 
 Report sections:
 
@@ -451,15 +522,17 @@ Language:
 
 Libraries:
 
-- `pymupdf` (PDF parsing + rendering)
-- `pypdf` (metadata fallback)
-- `pandas`, `pyarrow` (tabular data)
-- `opencv-python` (image quality metrics)
-- `pytesseract` or PaddleOCR (OCR)
-- `rapidfuzz` (name/title fuzzy matching)
-- `pydantic` (structured outputs)
-- `typer` (CLI)
-- `jinja2` (report templates)
+- `pymupdf` (PDF parsing + rendering) — in use (Scripts 01/02)
+- `numpy` + `opencv-python(-headless)` (image quality metrics) — in use (Script 02)
+- `typer` (CLI) — in use
+- `pytesseract` or PaddleOCR (OCR) — deferred (needs Tesseract system binary)
+- `rapidfuzz` (name/title fuzzy matching) — for Script 04
+- `pydantic` (structured outputs) — for Scripts 03/04
+- `jinja2` (report templates) — for Scripts 06/07
+- `pandas`, `pyarrow` — only if/when a Parquet migration is adopted; JSONL is the current format
+
+Data format: newline-delimited JSON (`.jsonl`) across all passes, read/written with the
+shared helpers in `scripts/_common.py`.
 
 LLM integration:
 
@@ -469,6 +542,8 @@ LLM integration:
 ## 8. Implementation Roadmap (From Zero to Working)
 
 ## Phase 1: Foundation (1-2 days)
+
+Status: done. Repo, config layout, and Script 01 inventory implemented and tested.
 
 - Initialize repo and folder structure
 - Build config files
@@ -481,7 +556,11 @@ Deliverable:
 
 ## Phase 2: Extraction + Baseline Classification (2-4 days)
 
-- Implement Script 02 extraction
+Status: extraction done (Script 02, schema `2.0`, without OCR); baseline classification
+(Script 03 rules) pending.
+
+- Implement Script 02 extraction (done: text, headers, geometry, scanned/DPI, image metrics,
+  and a per-document rollup; OCR deferred)
 - Implement rule-based section of Script 03
 - Produce first part labels without LLM
 

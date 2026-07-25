@@ -35,9 +35,13 @@ Primary outputs:
 - Capture file metadata and PDF health
 
 2. `02_extract_text_and_images.py`
-- Extract embedded text
-- OCR scanned pages
-- Render thumbnails and compute page features
+- Extract embedded text per page (plus word count, alnum ratio, and a normalized text hash)
+- Capture prominent/header text candidates for part/title detection
+- Render page thumbnails and compute page features (text density, black/white ratio)
+- Detect page geometry (size, rotation, orientation) and born-digital vs scanned pages
+- Compute image-quality metrics (blur, skew, contrast) when `numpy`/`opencv-python` are available
+- Emit a per-document rollup (`data/documents.jsonl`) alongside `extracted_text.jsonl` and `pages.jsonl`
+- OCR of scanned pages is deferred to a later stage
 
 3. `03_part_classifier.py`
 - Classify part labels and score candidates
@@ -84,11 +88,12 @@ project-root/
       verify_low_confidence.txt
   data/
     raw_inventory.jsonl
-    pages.parquet
-    extracted_text.parquet
-    part_predictions.parquet
-    expected_parts.parquet
-    quality_metrics.parquet
+    extracted_text.jsonl
+    pages.jsonl
+    documents.jsonl
+    part_predictions.jsonl
+    expected_parts.jsonl
+    quality_metrics.jsonl
     piece_reports/
     collection_reports/
   cache/
@@ -149,7 +154,7 @@ Each document should include:
 
 - PDF: `pymupdf`, `pypdf`
 - OCR: `pytesseract` (or PaddleOCR)
-- Imaging/features: `opencv-python`, `Pillow`
+- Imaging/features: `opencv-python`, `numpy`, `Pillow`
 - Data: `pandas`, `pyarrow`, `sqlite3`
 - Matching: `rapidfuzz`
 - Validation/models: `pydantic`
