@@ -11,8 +11,11 @@ Extraction/rendering uses ``pymupdf``. Image-quality metrics (blur/skew/contrast
 
 from __future__ import annotations
 
+import io
 import logging
+import os
 import re
+import shutil
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -36,6 +39,16 @@ try:
 except Exception:  # pragma: no cover
     cv2 = None
 
+try:
+    import pytesseract  # type: ignore
+except Exception:  # pragma: no cover
+    pytesseract = None
+
+try:
+    from PIL import Image  # type: ignore
+except Exception:  # pragma: no cover
+    Image = None
+
 from scripts._common import (
     atomic_write_json,
     atomic_write_jsonl,
@@ -47,13 +60,23 @@ from scripts._common import (
     utc_now_iso,
 )
 
-RECORD_VERSION = "2.1"
+RECORD_VERSION = "2.2"
 EXTRACTION_METHOD = "pymupdf_embedded"
 
 # Wave-2 heuristic thresholds (zone/blank/staff detection).
 BLANK_INK_THRESHOLD = 0.004  # text_density below this (with no text) => blank page
 STAFF_DARK_ROW_FRACTION = 0.40  # row dark-pixel fraction to count as a staff line
 STAFF_MIN_LINES = 5  # >= one 5-line staff => has_staves
+
+# OCR / OSD (Tesseract) configuration and thresholds.
+OCR_ENGINE = "tesseract"
+DEFAULT_OCR_DPI = 300  # dedicated OCR render DPI (higher than thumbnail render)
+DEFAULT_OCR_LANG = "eng"
+OCR_LOW_CONFIDENCE = 0.60  # mean word confidence (0..1) below this is flagged in the report
+_TESSERACT_COMMON_PATHS = (
+    r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+    r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+)
 
 # Heuristic quality thresholds used only for the human-readable report.
 # They flag pages for attention; they do not change extraction outputs.
@@ -76,6 +99,16 @@ class InventoryItem:
     pdf_filename: str
     page_count: int
     file_fingerprint: str
+
+
+@dataclass(frozen=True)
+class OcrConfig:
+    """Resolved OCR settings; ``enabled`` is False when Tesseract is unavailable."""
+
+    enabled: bool
+    dpi: int = DEFAULT_OCR_DPI
+    lang: str = DEFAULT_OCR_LANG
+    engine_version: str = ""
 
 
 def setup_logging(log_level: str) -> None:
@@ -462,6 +495,139 @@ def _compute_is_blank(
     )
 
 
+# --- OCR / OSD (Tesseract, wave-3) -----------------------------------------
+
+
+def resolve_tesseract_cmd(explicit: str | None) -> str | None:
+    """Locate the Tesseract binary: explicit path, then PATH, then common dirs."""
+    if explicit:
+        if Path(explicit).exists():
+            return explicit
+        logger.warning("--tesseract-cmd path not found: %s", explicit)
+    found = shutil.which("tesseract")
+    if found:
+        return found
+    candidates = list(_TESSERACT_COMMON_PATHS)
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        candidates.append(str(Path(local) / "Programs" / "Tesseract-OCR" / "tesseract.exe"))
+    for cand in candidates:
+        if Path(cand).exists():
+            return cand
+    return None
+
+
+def _empty_ocr_result(status: str) -> dict[str, Any]:
+    return {
+        "ocr_text": None,
+        "ocr_confidence": None,
+        "ocr_word_count": None,
+        "ocr_status": status,
+        "osd_rotation": None,
+        "osd_orientation_conf": None,
+        "osd_script": None,
+    }
+
+
+def run_ocr(page: Any, cfg: OcrConfig) -> dict[str, Any]:
+    """Render a page at OCR DPI, run OSD + Tesseract, and return OCR fields.
+
+    Never raises. OSD failures (common on sparse pages) are tolerated and leave the
+    page in its original orientation.
+    """
+    if pytesseract is None or Image is None:
+        return _empty_ocr_result("unavailable")
+    result = _empty_ocr_result("success")
+    try:
+        matrix = fitz.Matrix(cfg.dpi / 72.0, cfg.dpi / 72.0)  # type: ignore[attr-defined]
+        pix = page.get_pixmap(matrix=matrix)
+        img = Image.open(io.BytesIO(pix.tobytes("png")))
+    except Exception as exc:
+        return _empty_ocr_result(f"render failed: {exc}")
+
+    # Orientation/script detection: rotate upright before OCR when confident.
+    try:
+        osd = pytesseract.image_to_osd(img, output_type=pytesseract.Output.DICT)
+        rotate = int(osd.get("rotate", 0) or 0)
+        result["osd_rotation"] = rotate
+        result["osd_orientation_conf"] = round(float(osd.get("orientation_conf", 0.0)), 3)
+        result["osd_script"] = osd.get("script") or None
+        if rotate in (90, 180, 270):
+            img = img.rotate(-rotate, expand=True)
+    except Exception as exc:  # pragma: no cover - OSD fails on low-content pages
+        logger.debug("OSD skipped: %s", exc)
+
+    try:
+        data = pytesseract.image_to_data(
+            img, lang=cfg.lang, output_type=pytesseract.Output.DICT
+        )
+        words: list[str] = []
+        confs: list[float] = []
+        for txt, conf in zip(data.get("text", []), data.get("conf", []), strict=False):
+            token = (txt or "").strip()
+            if not token:
+                continue
+            words.append(token)
+            try:
+                c = float(conf)
+            except (TypeError, ValueError):
+                c = -1.0
+            if c >= 0:
+                confs.append(c)
+        text = " ".join(words)
+        result["ocr_text"] = text or None
+        result["ocr_word_count"] = len(words)
+        result["ocr_confidence"] = (
+            round(sum(confs) / len(confs) / 100.0, 4) if confs else None
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        result["ocr_status"] = f"ocr failed: {exc}"
+    return result
+
+
+def ocr_cache_path(
+    cache_dir: Path, item: InventoryItem, page_num: int, cfg: OcrConfig
+) -> Path:
+    """Content- and config-addressed cache path for a page's OCR result."""
+    key = sha256_text(
+        f"{item.pdf_path}|{item.file_fingerprint}|{page_num}|"
+        f"{cfg.dpi}|{cfg.lang}|{cfg.engine_version}"
+    )
+    prefix = hash_hex(key)[:12]
+    return cache_dir / "ocr" / f"{item.piece_id}_p{page_num:04d}_{prefix}.json"
+
+
+def ocr_page_cached(
+    page: Any,
+    cache_dir: Path,
+    item: InventoryItem,
+    page_num: int,
+    cfg: OcrConfig,
+) -> dict[str, Any]:
+    """Return a cached OCR result if present, else run OCR and cache success."""
+    path = ocr_cache_path(cache_dir, item, page_num, cfg)
+    cached = read_json(path)
+    if cached is not None:
+        return cached
+    result = run_ocr(page, cfg)
+    # Only persist deterministic successes; transient states (unavailable/errors)
+    # should be retried on the next run.
+    if result.get("ocr_status") == "success":
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(path, result)
+        except Exception:  # pragma: no cover - cache is best-effort
+            logger.debug("Failed to write OCR cache for %s p%d", item.pdf_path, page_num)
+    return result
+
+
+def _should_ocr(embedded_text: str | None, image_analysis: dict[str, Any]) -> bool:
+    """OCR pages with no searchable embedded text or that look scanned."""
+    text = embedded_text or ""
+    is_searchable = bool(text.strip()) and any(c.isalnum() for c in text)
+    return (not is_searchable) or bool(image_analysis.get("is_image_based"))
+
+
 def analyze_page_geometry(page: Any) -> dict[str, Any]:
     """Page size in points, rotation, orientation, and aspect ratio."""
     rect = page.rect
@@ -524,11 +690,16 @@ def build_text_record(
     header_candidates: list[str] | None = None,
     top_lines: list[str] | None = None,
     zones: dict[str, Any] | None = None,
+    ocr: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     text_value = embedded_text or ""
     is_searchable = bool(text_value.strip()) and any(c.isalnum() for c in text_value)
     signals = compute_text_signals(embedded_text)
     zones = zones or {}
+    ocr_applied = ocr is not None
+    ocr_d = ocr or {}
+    ocr_text = ocr_d.get("ocr_text")
+    text_source = "embedded" if is_searchable else ("ocr" if ocr_text else "none")
     return {
         "record_version": RECORD_VERSION,
         "run_id": run_id,
@@ -541,8 +712,13 @@ def build_text_record(
         "extraction_method": EXTRACTION_METHOD,
         "text_is_searchable": is_searchable,
         "needs_ocr": not is_searchable,
-        "ocr_text": None,
-        "ocr_confidence": None,
+        "ocr_text": ocr_text,
+        "ocr_confidence": ocr_d.get("ocr_confidence"),
+        "ocr_word_count": ocr_d.get("ocr_word_count"),
+        "ocr_applied": ocr_applied,
+        "ocr_status": ocr_d.get("ocr_status", "not_applied") if ocr_applied else "not_applied",
+        "ocr_engine": OCR_ENGINE if ocr_applied else None,
+        "text_source": text_source,
         "word_count": signals["word_count"],
         "alnum_ratio": signals["alnum_ratio"],
         "page_text_hash": signals["page_text_hash"],
@@ -580,9 +756,11 @@ def build_page_record(
     is_blank: bool | None = None,
     has_staves: bool | None = None,
     staff_line_count: int | None = None,
+    ocr: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     geometry = geometry or {}
     image_analysis = image_analysis or {}
+    ocr_d = ocr or {}
     return {
         "record_version": RECORD_VERSION,
         "run_id": run_id,
@@ -613,6 +791,9 @@ def build_page_record(
         "is_blank": is_blank,
         "has_staves": has_staves,
         "staff_line_count": staff_line_count,
+        "osd_rotation": ocr_d.get("osd_rotation"),
+        "osd_orientation_conf": ocr_d.get("osd_orientation_conf"),
+        "osd_script": ocr_d.get("osd_script"),
         "render_timestamp": utc_now_iso(),
         "processing_status": status,
         "error_message": error_message,
@@ -634,6 +815,10 @@ def build_document_record(
     pages_image_based = sum(1 for r in page_records if r.get("is_image_based"))
     blank_page_count = sum(1 for r in page_records if r.get("is_blank") is True)
     music_page_count = sum(1 for r in page_records if r.get("has_staves") is True)
+    pages_ocr_applied = sum(1 for r in text_records if r.get("ocr_applied"))
+    pages_ocr_recovered = sum(1 for r in text_records if r.get("ocr_text"))
+    ocr_char_count = sum(len(r.get("ocr_text") or "") for r in text_records)
+    pages_rotated = sum(1 for r in page_records if (r.get("osd_rotation") or 0))
     page_count = len(text_records)
     ocr_fraction = round(pages_needing_ocr / page_count, 4) if page_count else 0.0
     image_based_fraction = round(pages_image_based / page_count, 4) if page_count else 0.0
@@ -671,6 +856,10 @@ def build_document_record(
         "blank_page_count": blank_page_count,
         "music_page_count": music_page_count,
         "identity_candidates": identity_candidates,
+        "pages_ocr_applied": pages_ocr_applied,
+        "pages_ocr_recovered": pages_ocr_recovered,
+        "ocr_char_count": ocr_char_count,
+        "pages_rotated": pages_rotated,
         "processing_status": status,
         "processing_timestamp": utc_now_iso(),
     }
@@ -761,11 +950,13 @@ def process_pdf(
     render_dpi: int,
     enable_rendering: bool,
     enable_image_metrics: bool = True,
+    ocr_config: OcrConfig | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], int, int]:
     """Return (text_records, page_records, document_record, page_error_count, pages_total)."""
     text_records: list[dict[str, Any]] = []
     page_records: list[dict[str, Any]] = []
     page_errors = 0
+    ocr_config = ocr_config or OcrConfig(enabled=False)
 
     doc = fitz.open(abs_path)  # type: ignore[attr-defined]
     try:
@@ -779,6 +970,7 @@ def process_pdf(
             zones: dict[str, Any] = {}
             geometry: dict[str, Any] = {}
             image_analysis: dict[str, Any] = {}
+            ocr: dict[str, Any] | None = None
             try:
                 page = doc[page_idx]
                 embedded_text = page.get_text()
@@ -788,10 +980,12 @@ def process_pdf(
                 zones = structure
                 geometry = analyze_page_geometry(page)
                 image_analysis = analyze_page_images(page, len((embedded_text or "").strip()))
+                if ocr_config.enabled and _should_ocr(embedded_text, image_analysis):
+                    ocr = ocr_page_cached(page, cache_dir, item, page_num, ocr_config)
                 text_records.append(
                     build_text_record(
                         item, run_id, page_num, embedded_text, "success", None,
-                        header_candidates, top_lines, zones,
+                        header_candidates, top_lines, zones, ocr,
                     )
                 )
             except Exception as exc:
@@ -816,7 +1010,7 @@ def process_pdf(
                         item, run_id, page_num, render_dpi, None, None, -1, -1, -1,
                         None, None, "success", None,
                         geometry=geometry, image_analysis=image_analysis,
-                        is_blank=is_blank_no_render,
+                        is_blank=is_blank_no_render, ocr=ocr,
                     )
                 )
                 continue
@@ -869,6 +1063,7 @@ def process_pdf(
                     is_blank=_compute_is_blank(render, embedded_text, image_analysis),
                     has_staves=render["has_staves"],
                     staff_line_count=render["staff_line_count"],
+                    ocr=ocr,
                 )
             )
         doc_status = "partial_error" if page_errors else "success"
@@ -948,6 +1143,15 @@ def build_markdown_report(
             for k in ("publisher", "copyright_year", "arranger", "composer")
         )
     )
+    pages_ocr_applied = sum(1 for r in text_records if r.get("ocr_applied"))
+    pages_ocr_recovered = sum(1 for r in text_records if r.get("ocr_text"))
+    ocr_char_count = sum(len(r.get("ocr_text") or "") for r in text_records)
+    pages_rotated = sum(1 for r in page_records if (r.get("osd_rotation") or 0))
+    low_conf_ocr = [
+        r
+        for r in text_records
+        if r.get("ocr_confidence") is not None and r["ocr_confidence"] < OCR_LOW_CONFIDENCE
+    ]
     render_errors = [r for r in page_records if r.get("processing_status") == "error"]
     docs_partial = [
         d for d in document_records if d.get("processing_status") == "partial_error"
@@ -989,7 +1193,14 @@ def build_markdown_report(
     overall = "✅ Healthy"
     if docs_partial or render_errors:
         overall = "❌ Errors present"
-    elif pages_needing_ocr or pages_image_based or blurry or low_contrast or skewed:
+    elif (
+        pages_needing_ocr
+        or pages_image_based
+        or blurry
+        or low_contrast
+        or skewed
+        or low_conf_ocr
+    ):
         overall = "⚠️ Review recommended"
 
     out: list[str] = []
@@ -1033,6 +1244,9 @@ def build_markdown_report(
         f"| Pages with embedded text | {pages_with_text} ({text_pct:.1f}%) |"
     )
     out.append(f"| Pages needing OCR | {pages_needing_ocr} |")
+    out.append(f"| Pages OCR'd | {pages_ocr_applied} |")
+    out.append(f"| Pages with OCR text recovered | {pages_ocr_recovered} |")
+    out.append(f"| Pages auto-rotated (OSD) | {pages_rotated} |")
     out.append(f"| Image-based (scanned) pages | {pages_image_based} |")
     out.append(f"| Blank / near-blank pages | {blank_pages} |")
     out.append(f"| Pages with music staves | {music_pages} |")
@@ -1047,8 +1261,25 @@ def build_markdown_report(
     )
     out.append(
         f"- **{pages_with_text}/{total_pages}** pages ({text_pct:.1f}%) contain searchable "
-        "text; the rest are flagged `needs_ocr` for a future OCR pass."
+        "embedded text; the rest are flagged `needs_ocr`."
     )
+    if pages_ocr_applied:
+        out.append(
+            f"- OCR ran on **{pages_ocr_applied}** page(s) and recovered text on "
+            f"**{pages_ocr_recovered}** ({ocr_char_count} chars); "
+            f"**{len(low_conf_ocr)}** page(s) had low mean confidence "
+            f"(< {OCR_LOW_CONFIDENCE:.2f})."
+        )
+        if pages_rotated:
+            out.append(
+                f"- OSD detected a non-zero rotation on **{pages_rotated}** page(s) and "
+                "rotated them upright before OCR."
+            )
+    else:
+        out.append(
+            "- OCR was not run this pass (disabled or Tesseract unavailable); "
+            "`needs_ocr` pages carry no recovered text."
+        )
     words = [int(r.get("word_count", 0)) for r in text_records]
     if words:
         out.append(
@@ -1269,6 +1500,10 @@ def build_markdown_report(
     )
     out.append(f"| numpy available | {'yes' if meta['numpy_available'] else 'no'} |")
     out.append(f"| opencv available | {'yes' if meta['opencv_available'] else 'no'} |")
+    out.append(f"| OCR enabled | {'yes' if meta.get('ocr_enabled') else 'no'} |")
+    if meta.get("ocr_enabled"):
+        out.append(f"| OCR engine | tesseract {meta.get('ocr_engine_version', '')} |")
+        out.append(f"| OCR DPI / language | {meta.get('ocr_dpi')} / {meta.get('ocr_lang')} |")
     out.append(f"| Text output | `{meta['output_text']}` |")
     out.append(f"| Pages output | `{meta['output_pages']}` |")
     out.append(f"| Documents output | `{meta['output_documents']}` |")
@@ -1318,6 +1553,14 @@ def main(
         "--enable-image-metrics/--no-image-metrics",
         help="Toggle blur/skew/contrast image-quality metrics",
     ),
+    enable_ocr: bool = typer.Option(
+        True, "--ocr/--no-ocr", help="Run Tesseract OCR + OSD on scanned/no-text pages"
+    ),
+    ocr_dpi: int = typer.Option(DEFAULT_OCR_DPI, help="Dedicated OCR render DPI"),
+    ocr_lang: str = typer.Option(DEFAULT_OCR_LANG, help="Tesseract language(s), e.g. 'eng'"),
+    tesseract_cmd: str = typer.Option(
+        "", help="Path to the tesseract binary (else PATH/common dirs are searched)"
+    ),
     log_level: str = typer.Option("INFO", help="DEBUG, INFO, WARNING, ERROR"),
 ) -> None:
     """Extract per-page embedded text and render page thumbnails/features."""
@@ -1326,6 +1569,8 @@ def main(
         raise typer.BadParameter("mode must be 'full' or 'incremental'")
     if render_dpi < 24 or render_dpi > 600:
         raise typer.BadParameter("render-dpi must be between 24 and 600")
+    if ocr_dpi < 72 or ocr_dpi > 1200:
+        raise typer.BadParameter("ocr-dpi must be between 72 and 1200")
 
     setup_logging(log_level)
 
@@ -1343,6 +1588,40 @@ def main(
         logger.warning(
             "opencv-python is not installed; skew_angle_deg will be null"
         )
+
+    ocr_engine_version = ""
+    if enable_ocr:
+        if pytesseract is None or Image is None:
+            logger.warning(
+                "pytesseract/Pillow not installed; disabling OCR "
+                "(ocr_text will be null and pages stay flagged needs_ocr)"
+            )
+            enable_ocr = False
+        else:
+            cmd = resolve_tesseract_cmd(tesseract_cmd or None)
+            if cmd is None:
+                logger.warning(
+                    "Tesseract binary not found on PATH or common install dirs; "
+                    "disabling OCR. Install Tesseract or pass --tesseract-cmd"
+                )
+                enable_ocr = False
+            else:
+                pytesseract.pytesseract.tesseract_cmd = cmd
+                try:
+                    ocr_engine_version = str(pytesseract.get_tesseract_version())
+                    logger.info(
+                        "OCR enabled: tesseract %s at %s (dpi=%d lang=%s)",
+                        ocr_engine_version, cmd, ocr_dpi, ocr_lang,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Tesseract found at %s but not runnable (%s); disabling OCR",
+                        cmd, exc,
+                    )
+                    enable_ocr = False
+    ocr_config = OcrConfig(
+        enabled=enable_ocr, dpi=ocr_dpi, lang=ocr_lang, engine_version=ocr_engine_version
+    )
 
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     library_root = library_root.resolve()
@@ -1458,6 +1737,7 @@ def main(
                 render_dpi,
                 enable_rendering,
                 enable_image_metrics,
+                ocr_config,
             )
         except Exception as exc:
             pdf_errors += 1
@@ -1504,6 +1784,8 @@ def main(
         "pdf_count_processed": processed_pdfs,
         "page_count_processed": pages_done,
         "reused_pdf_count": reused_pdfs,
+        "ocr_enabled": ocr_config.enabled,
+        "ocr_engine_version": ocr_config.engine_version,
     }
     atomic_write_json(checkpoint_path, new_checkpoint)
 
@@ -1537,6 +1819,10 @@ def main(
             "enable_image_metrics": enable_image_metrics,
             "numpy_available": np is not None,
             "opencv_available": cv2 is not None,
+            "ocr_enabled": ocr_config.enabled,
+            "ocr_engine_version": ocr_config.engine_version,
+            "ocr_dpi": ocr_config.dpi,
+            "ocr_lang": ocr_config.lang,
             "detail_limit": report_detail_limit,
             "library_root": normalize_rel_path(library_root),
             "inventory": normalize_rel_path(inventory),

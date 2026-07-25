@@ -147,15 +147,18 @@ Purpose:
 - Capture prominent/header text candidates for part/title detection
 - Render low-res thumbnails for visual QA and LLM prompts
 - Compute page geometry, born-digital vs scanned signals, and image-quality metrics
+- OCR scanned/no-text pages with Tesseract (OSD auto-rotate first) and record recovered text
 - Roll up per-page results into a per-document summary
 
-OCR is deferred to a later stage (needs the Tesseract system binary). Pages with no
-searchable text are flagged `needs_ocr = true` for that future pass.
+OCR is implemented via `pytesseract` + the Tesseract system binary and runs by default on pages
+flagged `needs_ocr` or `is_image_based`. It degrades gracefully (auto-disabled with a warning)
+when the toolchain is unavailable; those pages keep `needs_ocr = true` and null OCR fields.
 
 Libraries (as built):
 
 - `pymupdf` for PDF structure, text, and page rendering
 - `numpy` + `opencv-python(-headless)` for image-quality metrics (optional; degrade to `null`)
+- `pytesseract` + `Pillow` + the Tesseract binary for OCR/OSD (optional; degrade to `null`)
 
 Outputs (three JSONL datasets + checkpoint):
 
@@ -167,7 +170,10 @@ Outputs (three JSONL datasets + checkpoint):
 Key `extracted_text.jsonl` fields for downstream use:
 
 - embedded_text, embedded_text_length, extraction_method
-- text_is_searchable, needs_ocr, ocr_text (null), ocr_confidence (null)
+- text_is_searchable, needs_ocr, ocr_text, ocr_confidence, ocr_word_count
+- ocr_applied, ocr_status, ocr_engine
+- text_source (`embedded`/`ocr`/`none`) — downstream should use embedded_text when
+  `text_source == embedded`, else fall back to ocr_text
 - word_count, alnum_ratio, page_text_hash (normalized-text dedupe key)
 - header_text_candidates (largest-font strings), top_lines (top-of-page reading order)
 
@@ -178,11 +184,13 @@ Key `pages.jsonl` fields for downstream use:
 - page_width_pt, page_height_pt, rotation, orientation, aspect_ratio
 - image_count, largest_image_coverage, is_image_based, estimated_dpi
 - contrast_std, blur_variance, skew_angle_deg (null when numpy/opencv absent or disabled)
+- osd_rotation, osd_orientation_conf, osd_script (OSD orientation; null when OCR disabled)
 
 Key `documents.jsonl` fields for downstream use:
 
 - piece_id, piece_folder, pdf_filename, page_count
 - pages_with_text, pages_needing_ocr, ocr_fraction
+- pages_ocr_applied, pages_ocr_recovered, ocr_char_count, pages_rotated
 - total_text_length, total_word_count
 - pages_image_based, image_based_fraction
 - first_page_text, first_page_header_candidates
@@ -205,7 +213,8 @@ Inputs (from Scripts 01/02):
 - `data/extracted_text.jsonl` for per-page `embedded_text`, `header_text_candidates`, and
   `top_lines`
 - `data/documents.jsonl` for `first_page_text` and `first_page_header_candidates`
-- `data/pages.jsonl` for `is_image_based` (route scanned pages to the future OCR/vision path)
+- `data/pages.jsonl` for `is_image_based` and `osd_rotation` (scanned pages already OCR'd
+  upstream; prefer `text_source`/`ocr_text` when `embedded_text` is empty)
 
 1. Rule-first:
 - Filename regex rules (`regex_rules.yaml`) against `pdf_filename`
@@ -356,7 +365,7 @@ Checks (mostly derived from Script 02 metrics):
 - Excessive skew (`skew_angle_deg`)
 - Extreme low contrast / washed pages (`contrast_std`)
 - Heavy blur (`blur_variance`)
-- OCR illegibility score (future OCR pass; interim proxy: `alnum_ratio`)
+- OCR illegibility score (from Script 02 `ocr_confidence`; interim proxy: `alnum_ratio` when OCR disabled)
 - Cropping margin loss
 - Page anomalies (blank page, mostly noise)
 - Document style classification:
@@ -525,7 +534,7 @@ Libraries:
 - `pymupdf` (PDF parsing + rendering) — in use (Scripts 01/02)
 - `numpy` + `opencv-python(-headless)` (image quality metrics) — in use (Script 02)
 - `typer` (CLI) — in use
-- `pytesseract` or PaddleOCR (OCR) — deferred (needs Tesseract system binary)
+- `pytesseract` + `Pillow` (OCR/OSD) — in use (Script 02; needs the Tesseract system binary)
 - `rapidfuzz` (name/title fuzzy matching) — for Script 04
 - `pydantic` (structured outputs) — for Scripts 03/04
 - `jinja2` (report templates) — for Scripts 06/07
@@ -556,11 +565,11 @@ Deliverable:
 
 ## Phase 2: Extraction + Baseline Classification (2-4 days)
 
-Status: extraction done (Script 02, schema `2.0`, without OCR); baseline classification
+Status: extraction done (Script 02, schema `2.2`, with OCR/OSD); baseline classification
 (Script 03 rules) pending.
 
 - Implement Script 02 extraction (done: text, headers, geometry, scanned/DPI, image metrics,
-  and a per-document rollup; OCR deferred)
+  OCR/OSD via Tesseract, and a per-document rollup)
 - Implement rule-based section of Script 03
 - Produce first part labels without LLM
 

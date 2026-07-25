@@ -408,6 +408,7 @@ def test_zone_blank_and_staff_full_run(tmp_path: Path, monkeypatch):
             str(tmp_path / "cache"),
             "--mode",
             "full",
+            "--no-ocr",
         ],
     )
     assert result.exit_code == 0, result.stdout
@@ -447,4 +448,109 @@ def test_zone_blank_and_staff_full_run(tmp_path: Path, monkeypatch):
     # Identity candidate parsed from the copyright line.
     identity = doc_rec["identity_candidates"]
     assert identity["copyright_year"] == 2019
-    assert doc_rec["record_version"] == "2.1"
+    assert doc_rec["record_version"] == "2.2"
+
+
+def _tesseract_or_skip(extract):
+    """Resolve Tesseract for OCR tests, skipping when it (or pytesseract) is absent."""
+    import pytest
+
+    if extract.pytesseract is None or extract.Image is None:
+        pytest.skip("pytesseract/Pillow not installed")
+    cmd = extract.resolve_tesseract_cmd(None)
+    if cmd is None:
+        pytest.skip("Tesseract binary not available")
+    extract.pytesseract.pytesseract.tesseract_cmd = cmd
+    return cmd
+
+
+def test_resolve_tesseract_cmd_explicit(tmp_path: Path):
+    extract = load_module("02_extract_text_and_images.py", "extract_resolve")
+    fake = tmp_path / "tesseract.exe"
+    fake.write_bytes(b"stub")
+    assert extract.resolve_tesseract_cmd(str(fake)) == str(fake)
+    # A non-existent explicit path falls back to PATH/common dirs (or None).
+    result = extract.resolve_tesseract_cmd(str(tmp_path / "missing.exe"))
+    assert result is None or Path(result).exists()
+
+
+def test_run_ocr_reads_text():
+    extract = load_module("02_extract_text_and_images.py", "extract_run_ocr")
+    _tesseract_or_skip(extract)
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((72, 120), "HELLO OCR WORLD", fontsize=36)
+    cfg = extract.OcrConfig(enabled=True, dpi=300, lang="eng")
+    result = extract.run_ocr(page, cfg)
+    doc.close()
+    assert result["ocr_status"] == "success"
+    assert "HELLO" in (result["ocr_text"] or "").upper()
+    assert result["ocr_word_count"] and result["ocr_word_count"] >= 3
+    assert result["ocr_confidence"] is None or 0.0 <= result["ocr_confidence"] <= 1.0
+
+
+def test_ocr_full_run_recovers_scanned_text(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    extract = load_module("02_extract_text_and_images.py", "extract_ocr_full")
+    _tesseract_or_skip(extract)
+    from PIL import Image, ImageDraw, ImageFont
+
+    # Build a rasterized "scanned" page: an image of text with no text layer.
+    img = Image.new("RGB", (1600, 400), "white")
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.load_default(size=120)
+    except TypeError:  # pragma: no cover - older Pillow
+        font = ImageFont.load_default()
+    draw.text((40, 120), "TROMBONE PART", fill="black", font=font)
+    img_path = tmp_path / "scan.png"
+    img.save(img_path)
+
+    library_root = tmp_path / "library"
+    pdf_path = library_root / "Piece S" / "Scan.pdf"
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_image(fitz.Rect(40, 40, 572, 200), filename=str(img_path))
+    doc.save(pdf_path)
+    doc.close()
+
+    inventory_path = tmp_path / "data" / "raw_inventory.jsonl"
+    build_inventory(library_root, inventory_path)
+
+    output_text = tmp_path / "data" / "extracted_text.jsonl"
+    output_pages = tmp_path / "data" / "pages.jsonl"
+    output_documents = tmp_path / "data" / "documents.jsonl"
+    result = runner.invoke(
+        extract.app,
+        [
+            "--library-root",
+            str(library_root),
+            "--inventory",
+            str(inventory_path),
+            "--output-text",
+            str(output_text),
+            "--output-pages",
+            str(output_pages),
+            "--output-documents",
+            str(output_documents),
+            "--cache-dir",
+            str(tmp_path / "cache"),
+            "--mode",
+            "full",
+            "--ocr",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+
+    text_rec = read_jsonl(output_text)[0]
+    doc_rec = read_jsonl(output_documents)[0]
+    assert text_rec["ocr_applied"] is True
+    assert text_rec["text_source"] == "ocr"
+    assert "TROMBONE" in (text_rec["ocr_text"] or "").upper()
+    assert doc_rec["pages_ocr_recovered"] >= 1
+    assert doc_rec["ocr_char_count"] > 0
+
+    # OCR result is cached; a rerun should reuse it without a live OCR call.
+    cache_files = list((tmp_path / "cache" / "ocr").glob("*.json"))
+    assert cache_files

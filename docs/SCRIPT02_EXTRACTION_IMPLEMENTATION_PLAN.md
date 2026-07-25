@@ -48,10 +48,23 @@ Second enhancement wave (items 1, 2, 4, 5 of the follow-up audit; RECORD_VERSION
 
 (Item 3 — fully structured title record — was intentionally not scoped in this wave.)
 
+Third enhancement wave (OCR/OSD via Tesseract; RECORD_VERSION bumped to `2.2`):
+
+- OCR of scanned/no-text pages with `pytesseract` + the Tesseract binary. Pages where
+  `needs_ocr` is true **or** `is_image_based` is true are rendered at a dedicated OCR DPI
+  (default 300) and OCR'd; results populate `ocr_text`, `ocr_confidence`, `ocr_word_count`,
+  `ocr_applied`, `ocr_status`, `ocr_engine`, and a convenience `text_source`
+  (`embedded`/`ocr`/`none`).
+- OSD (orientation/script detection) runs before OCR, auto-rotating sideways/upside-down scans
+  and recording `osd_rotation`, `osd_orientation_conf`, and `osd_script` on the page record.
+- OCR results are cached per page under `cache/ocr/` (keyed by content + DPI + language +
+  engine version) so reruns and re-processing skip live OCR calls.
+- OCR is on by default (`--ocr/--no-ocr`) and degrades gracefully: when `pytesseract`/`Pillow`
+  or the Tesseract binary are missing, OCR is disabled with a warning and pages stay flagged
+  `needs_ocr` with null OCR fields.
+
 Deferred to a later phase:
 
-- OCR via `pytesseract` (requires the Tesseract system binary; on Windows it is not added to
-  PATH automatically).
 - Migration of outputs from JSONL to Parquet via `pandas` / `pyarrow`.
 
 Format decision: use JSONL for parity with Script 01, streaming writes, and human-auditable
@@ -65,6 +78,10 @@ output. Parquet migration is a later concern.
   are `null`.
 - `opencv-python` present: `skew_angle_deg` computed; absent: `skew_angle_deg` is `null`.
 - `--no-image-metrics` disables blur/skew/contrast regardless of library availability.
+- `pytesseract` + `Pillow` present **and** the Tesseract binary resolvable (via `--tesseract-cmd`,
+  `PATH`, or common install dirs such as `C:\Program Files\Tesseract-OCR`): OCR/OSD run on
+  eligible pages. If any of these are missing, or `--no-ocr` is passed, OCR is disabled and
+  `ocr_*`/`osd_*` fields are `null` (pages remain `needs_ocr`). OCR never aborts the run.
 - Items 2-7 depend on `pymupdf` only and are always computed when the page loads.
 
 ## 3. Input Contract
@@ -105,8 +122,13 @@ Fields:
 - `extraction_method` (`pymupdf_embedded`)
 - `text_is_searchable`
 - `needs_ocr`
-- `ocr_text` (nullable; future OCR phase)
-- `ocr_confidence` (nullable; future OCR phase)
+- `ocr_text` (nullable; populated when OCR ran and recovered text)
+- `ocr_confidence` (nullable float 0..1; mean per-word Tesseract confidence / 100)
+- `ocr_word_count` (wave-3; nullable int)
+- `ocr_applied` (wave-3; bool; whether OCR was attempted on this page)
+- `ocr_status` (wave-3; `not_applied`/`success`/`unavailable`/`render failed: ...`/`ocr failed: ...`)
+- `ocr_engine` (wave-3; `tesseract` when applied, else null)
+- `text_source` (wave-3; `embedded`/`ocr`/`none` — which text a downstream stage should prefer)
 - `word_count` (item 5)
 - `alnum_ratio` (item 5; alnum chars / non-space chars)
 - `page_text_hash` (item 6; sha256 of whitespace-normalized lowercase text)
@@ -156,6 +178,9 @@ Fields:
 - `is_blank` (wave-2 item 4; nullable bool; low ink coverage + no embedded text)
 - `has_staves` (wave-2 item 5; nullable bool; music-notation staff lines detected)
 - `staff_line_count` (wave-2 item 5; nullable int; long horizontal lines detected)
+- `osd_rotation` (wave-3; nullable int; OSD-detected rotation in degrees, 0/90/180/270)
+- `osd_orientation_conf` (wave-3; nullable float; Tesseract OSD orientation confidence)
+- `osd_script` (wave-3; nullable string; OSD-detected script, e.g. `Latin`)
 - `render_timestamp`
 - `processing_status` (`success` or `error`)
 - `error_message` (nullable)
@@ -179,6 +204,10 @@ Fields:
 - `music_page_count` (wave-2 item 5; count of pages with `has_staves` true)
 - `identity_candidates` (wave-2 item 2; object with `publisher`, `copyright_year`,
   `arranger`, `composer`, `copyright_line`; each field nullable)
+- `pages_ocr_applied` (wave-3; pages OCR was attempted on)
+- `pages_ocr_recovered` (wave-3; pages where OCR produced non-empty text)
+- `ocr_char_count` (wave-3; total characters of recovered OCR text)
+- `pages_rotated` (wave-3; pages OSD auto-rotated before OCR)
 - `processing_status` (`success` or `partial_error`)
 - `processing_timestamp`
 
@@ -190,9 +219,9 @@ the document output by `pdf_path`.
 Fields: `record_version`, `last_run_id`, `last_run_timestamp`, `inventory_input`,
 `extracted_text_output`, `pages_output`, `documents_output`, `library_root`, `fingerprints`
 (map of `pdf_path` to `file_fingerprint`), `pdf_count_processed`, `page_count_processed`,
-`reused_pdf_count`. The schema version is bumped to `2.1` for the second-wave record shape
-(zones, identity, blank flag, staff detection); the bump invalidates prior 2.0 checkpoints so all
-PDFs are reprocessed once to populate the new fields.
+`reused_pdf_count`, `ocr_enabled`, `ocr_engine_version`. The schema version is bumped to `2.2`
+for the OCR/OSD record shape; the bump invalidates prior 2.0/2.1 checkpoints so all PDFs are
+reprocessed once to populate the new fields (OCR results are still served from `cache/ocr/`).
 
 ### 4.5 Report `data/extraction_report.md`
 
@@ -284,6 +313,25 @@ merged long horizontal lines and `has_staves` is `staff_line_count >= 5` (at lea
 staff). Both are `null` when numpy is unavailable, rendering is disabled, or the render errored.
 The measure works on both born-digital and scanned music because it operates on the render.
 
+### 5.8 OCR and OSD (wave-3, Tesseract)
+
+Run only when OCR is enabled and the page qualifies (`needs_ocr` **or** `is_image_based`).
+`run_ocr(page, cfg)`:
+
+1. Renders the page to a fresh pixmap at the OCR DPI (default 300, independent of the 150-DPI
+   thumbnail render) and opens it as a `PIL.Image`.
+2. OSD: `pytesseract.image_to_osd` yields `osd_rotation`, `osd_orientation_conf`, `osd_script`;
+   when the rotation is 90/180/270 the image is rotated upright before OCR. OSD failures (common
+   on sparse/low-content pages) are tolerated and leave the page unrotated.
+3. OCR: `pytesseract.image_to_data` yields per-word text and confidence. Non-empty tokens are
+   joined into `ocr_text`; `ocr_word_count` is the token count; `ocr_confidence` is the mean of
+   non-negative word confidences divided by 100 (0..1). `text_source` becomes `embedded` when the
+   page already had searchable text, else `ocr` when OCR recovered text, else `none`.
+
+The Tesseract binary is located via `--tesseract-cmd`, then `PATH`, then common install
+directories. If `pytesseract`/`Pillow` or the binary are unavailable, OCR is disabled for the run
+with a warning; `run_ocr` itself never raises.
+
 ## 6. Caching Strategy
 
 Render cache directory: `cache/render/`.
@@ -297,6 +345,19 @@ filename = f"{piece_id}_p{page_num:04d}_{content_hash_prefix12}.png"
 
 If the cache file already exists (matching key), reuse it instead of re-rendering. Because the
 key includes `file_fingerprint`, a changed PDF invalidates its cached renders automatically.
+
+OCR cache directory: `cache/ocr/`.
+
+```
+key = sha256(f"{pdf_path}|{file_fingerprint}|{page_num}|{ocr_dpi}|{ocr_lang}|{engine_version}")
+filename = f"{piece_id}_p{page_num:04d}_{key_prefix12}.json"
+```
+
+A per-page OCR result (text, confidence, word count, OSD fields) is written as JSON on first
+compute and reused on subsequent runs, so schema bumps or re-renders do not trigger a fresh
+(expensive) OCR call. The key includes DPI, language, and Tesseract version, so changing any of
+them produces a new cache entry. Only successful OCR results are cached; transient states
+(`unavailable`/errors) are retried next run.
 
 ## 7. Idempotency & Incremental Mode
 
@@ -328,10 +389,16 @@ checkpoint is written atomically after a successful output write.
 | `--render-dpi` | int | `150` | Thumbnail render DPI |
 | `--enable-rendering / --no-rendering` | flag | enabled | Toggle rendering + pixel features |
 | `--enable-image-metrics / --no-image-metrics` | flag | enabled | Toggle blur/skew/contrast (item 8) |
+| `--ocr / --no-ocr` | flag | enabled | Toggle OCR/OSD on eligible pages (wave-3) |
+| `--ocr-dpi` | int | `300` | Dedicated OCR render DPI (validated 72..1200) |
+| `--ocr-lang` | str | `eng` | Tesseract language(s) passed to OCR/OSD |
+| `--tesseract-cmd` | str | `""` | Explicit path to the Tesseract binary (else auto-detect) |
 | `--log-level` | str | `INFO` | Logging level |
 
-OCR options are intentionally omitted for now. If `--enable-image-metrics` is set but `numpy` is
-unavailable, the flag is auto-disabled with a warning.
+If `--enable-image-metrics` is set but `numpy` is unavailable, the flag is auto-disabled with a
+warning. Likewise, if `--ocr` is set but `pytesseract`/`Pillow` or the Tesseract binary cannot be
+resolved (or the binary is not runnable), OCR is auto-disabled with a warning and the run
+continues with null `ocr_*`/`osd_*` fields.
 
 ## 9. Failure Policy
 
@@ -391,6 +458,19 @@ These gaps were identified against the shipped RECORD_VERSION 2.0 and closed by 
 | G14 | No blank-page flag or blank rollup | 4 | Added `is_blank` per page + `blank_page_count` (ink coverage = `text_density`) |
 | G15 | No music-notation signal | 5 | Added `has_staves`/`staff_line_count` per page + `music_page_count` |
 
+### 12.2 Third-wave gap analysis (OCR/OSD audit)
+
+Audit of RECORD_VERSION 2.1 against the newly available Tesseract binary. The `ocr_text` /
+`ocr_confidence` placeholders and the `needs_ocr` flag existed, but no code ever populated them.
+Closed by bumping to `2.2`:
+
+| # | Gap in RECORD_VERSION 2.1 | Resolution |
+|---|---------------------------|------------|
+| G16 | `pytesseract` never imported; OCR placeholders always null even for scanned pages | Optional `pytesseract`/`Pillow` imports + `run_ocr` populate `ocr_text`/`ocr_confidence`/`ocr_word_count`/`ocr_status`/`text_source` |
+| G17 | No orientation handling; sideways/upside-down scans OCR poorly | Added OSD (`image_to_osd`) with auto-rotate + `osd_rotation`/`osd_orientation_conf`/`osd_script` on pages |
+| G18 | No OCR trigger logic or CLI surface | `_should_ocr` (needs_ocr OR image-based) gated by `--ocr/--no-ocr`, `--ocr-dpi`, `--ocr-lang`, `--tesseract-cmd`; binary auto-resolved |
+| G19 | No OCR caching or rollups; every run would re-OCR | Per-page JSON cache under `cache/ocr/` + document rollups `pages_ocr_applied`/`pages_ocr_recovered`/`ocr_char_count`/`pages_rotated` |
+
 ## 12. Implementation Notes Log
 
 - Plan authored: 2026-07-26.
@@ -430,5 +510,23 @@ These gaps were identified against the shipped RECORD_VERSION 2.0 and closed by 
     (N999, BLE001, B008, SIM103, UP017). Added tests: `test_extract_identity_candidates`,
     `test_detect_staves_projection`, `test_detect_staves_degrades_without_shape`,
     `test_zone_blank_and_staff_full_run`.
-- Deferred (still open): OCR/OSD via `pytesseract` (+ Tesseract system binary) and Parquet
-  migration.
+- Third enhancement wave (OCR/OSD via Tesseract) integrated:
+  - Added optional `pytesseract` + `Pillow` imports and `pytesseract>=0.3.10` / `Pillow>=10.0.0`
+    dependencies; installed into `.venv`. Verified Tesseract v5.5.3 at
+    `C:\Program Files\Tesseract-OCR\tesseract.exe` (not on PATH) via `resolve_tesseract_cmd`.
+  - `run_ocr` renders eligible pages at `--ocr-dpi` (default 300, separate from the 150-DPI
+    thumbnail), runs OSD (auto-rotate + `osd_*` fields) then `image_to_data` OCR; populates
+    `ocr_text`/`ocr_confidence`/`ocr_word_count`/`ocr_applied`/`ocr_status`/`ocr_engine`/
+    `text_source`. It never raises.
+  - `_should_ocr` triggers on `needs_ocr` OR `is_image_based`; gated by `--ocr/--no-ocr`
+    (default on) with `--ocr-lang` and `--tesseract-cmd`. OCR auto-disables with a warning when
+    the toolchain is missing.
+  - Per-page OCR results cached under `cache/ocr/` (keyed by content + DPI + lang + engine
+    version); document rollups `pages_ocr_applied`/`pages_ocr_recovered`/`ocr_char_count`/
+    `pages_rotated`; checkpoint gains `ocr_enabled`/`ocr_engine_version`. Report surfaces OCR'd,
+    recovered, and auto-rotated page counts plus an OCR configuration block.
+  - Schema bumped to `2.2` (invalidates prior 2.1 checkpoints). See Section 12.2 (G16-G19).
+  - Validation: `pytest -q` => `16 passed`; `ruff check` reports only the pre-accepted codes
+    (N999, BLE001, B008, SIM103, UP017). Added tests: `test_resolve_tesseract_cmd_explicit`,
+    `test_run_ocr_reads_text`, `test_ocr_full_run_recovers_scanned_text`.
+- Deferred (still open): Parquet output migration via `pandas`/`pyarrow`.
