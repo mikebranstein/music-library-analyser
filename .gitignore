@@ -169,6 +169,9 @@ venv.bak/
 /outputs/
 /test_fixtures/
 
+# Local, developer-only scripts and scratch files
+/local/
+
 # Spyder project settings
 .spyderproject
 .spyproject
