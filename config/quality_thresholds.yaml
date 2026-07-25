@@ -1,0 +1,3 @@
+confidence_tiers:
+  auto_accept_min: 0.85
+  review_queue_min: 0.60

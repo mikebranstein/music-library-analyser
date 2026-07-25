@@ -1,0 +1,4 @@
+part_patterns: {}
+filename_normalization:
+  lowercase: true
+  remove_whitespace_variants: true
