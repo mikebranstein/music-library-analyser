@@ -198,6 +198,9 @@ Key `documents.jsonl` fields for downstream use:
 
 ## 4.3 Script 03: Part Classification (`03_part_classifier.py`)
 
+Status: implemented (`record_version 1.0`). See
+`docs/SCRIPT03_PART_CLASSIFICATION_IMPLEMENTATION_PLAN.md` for the full design.
+
 Purpose:
 
 Identify what each PDF likely is:
@@ -205,40 +208,57 @@ Identify what each PDF likely is:
 - Part name (Trumpet 1, Clarinet 2, Flute, Timpani, etc.)
 - Whether document is likely score, condensed score, or single part
 
-Method (hybrid):
+Method (rule-first, deterministic; LLM fallback deferred):
 
 Inputs (from Scripts 01/02):
 
-- `data/raw_inventory.jsonl` for `pdf_filename` and `piece_folder`
-- `data/extracted_text.jsonl` for per-page `embedded_text`, `header_text_candidates`, and
-  `top_lines`
+- `data/raw_inventory.jsonl` for `pdf_filename`, `piece_folder`, `piece_id`, `file_fingerprint`,
+  and `pdf_readable`
 - `data/documents.jsonl` for `first_page_text` and `first_page_header_candidates`
-- `data/pages.jsonl` for `is_image_based` and `osd_rotation` (scanned pages already OCR'd
-  upstream; prefer `text_source`/`ocr_text` when `embedded_text` is empty)
+- `data/pages.jsonl` for page-1 `zone_top_left`/`zone_top_center`/`zone_top_right`
+- Script 02 datasets are optional; when absent the classifier runs filename-only
 
-1. Rule-first:
-- Filename regex rules (`regex_rules.yaml`) against `pdf_filename`
-- First-page text regex patterns against `first_page_header_candidates` / `header_text_candidates`
+Rules and vocabulary live in `config/regex_rules.yaml` (instrument lexicon, clef/transposition
+markers, score keywords), with an identical built-in fallback baked into the script so it runs
+even without the file or PyYAML.
 
-2. Model fallback:
-- LLM prompt with extracted snippets + filename + optional thumbnail (`thumbnail_path`)
-- Return structured JSON
+1. Filename-first (primary):
+- Isolate the part segment by stripping the known `piece_folder` prefix (handles dashes inside a
+  part such as `Basses - Tuba` and both `-`/`_` separators).
+- Longest-alias-wins instrument match with word-boundary regex (so `Bass Trombone`, `Bass
+  Clarinet`, `Alto Saxophone` are not shadowed, and short aliases like `cl`/`fl` never match
+  inside words).
+- Extract clef (`(BC)`/`(TC)`/`(Bass)`), transposition (`in F/Bb/Eb`), part index, and score type.
+
+2. Text confirmation/recovery (secondary):
+- Confirm the filename instrument against page-1 text (boosts confidence to `combined`); recover a
+  label from page text when the filename is ambiguous (`text` evidence, lower confidence).
 
 3. Ensemble harmonization:
-- If two docs both claim "Trumpet 1", resolve conflicts with confidence logic
+- Within a piece, documents sharing an `(instrument, part_index, clef)` signature are flagged
+  `duplicate_in_piece` (a signal for Scripts 04/05, not an automatic edit).
+
+4. Model fallback (deferred):
+- A disabled-by-default `--use-llm` hook exists but no provider is wired in this offline repo;
+  enabling it logs a warning and changes nothing (no fabricated predictions).
 
 Outputs:
 
-- `data/part_predictions.jsonl`
+- `data/part_predictions.jsonl` (one record per readable PDF)
+- `data/part_classification_report.md` (Markdown summary)
+- `data/.part_classifier_checkpoint.json` (checkpoint; supports `--mode incremental`)
 
 Key fields:
 
-- predicted_part
-- family (woodwind/brass/percussion/score/other)
-- part_index (e.g., 1,2,3)
-- is_score
-- confidence
-- evidence_source (`filename`, `ocr`, `llm`, `combined`)
+- predicted_part (human label, e.g. `Horn in F 2`, `Baritone (BC)`, `Full Score`; nullable)
+- canonical_instrument (snake_case key, e.g. `baritone_horn`, `tuba`; nullable)
+- family (woodwind/brass/percussion/strings/score/unknown)
+- part_index (e.g., 1,2,3; nullable)
+- clef (`bass`/`treble`; nullable), transposition (`F`/`Bb`/`Eb`; nullable)
+- is_score, score_type (`full`/`condensed`/`short`/`conductor`; nullable)
+- confidence (0..1), evidence_source (`filename`/`text`/`combined`/`none`/`llm`)
+- alternates (top-2 other instrument candidates), match_details, duplicate_in_piece
+
 
 ## 4.4 Script 04: Expected Parts Inference (`04_expected_parts_inference.py`)
 
@@ -249,8 +269,10 @@ Estimate which parts should exist for each piece so missing parts can be flagged
 Inputs:
 
 - `data/documents.jsonl` for work-identity seeds (`first_page_text`,
-  `first_page_header_candidates`, `piece_folder`, `pdf_filename`)
-- `data/part_predictions.jsonl` for observed parts per piece
+  `first_page_header_candidates`, `piece_folder`, `pdf_filename`, `identity_candidates`)
+- `data/part_predictions.jsonl` for observed parts per piece (group by `piece_id`; use
+  `canonical_instrument` + `part_index` + `clef` as the observed-part key, and `confidence` /
+  `duplicate_in_piece` to weight or flag entries)
 
 Approach:
 
@@ -535,8 +557,9 @@ Libraries:
 - `numpy` + `opencv-python(-headless)` (image quality metrics) — in use (Script 02)
 - `typer` (CLI) — in use
 - `pytesseract` + `Pillow` (OCR/OSD) — in use (Script 02; needs the Tesseract system binary)
+- `PyYAML` (instrument lexicon / rule config) — in use (Script 03; degrades to a built-in lexicon)
 - `rapidfuzz` (name/title fuzzy matching) — for Script 04
-- `pydantic` (structured outputs) — for Scripts 03/04
+- `pydantic` (structured outputs) — for Script 04 (Script 03 uses plain dict records)
 - `jinja2` (report templates) — for Scripts 06/07
 - `pandas`, `pyarrow` — only if/when a Parquet migration is adopted; JSONL is the current format
 
@@ -565,13 +588,14 @@ Deliverable:
 
 ## Phase 2: Extraction + Baseline Classification (2-4 days)
 
-Status: extraction done (Script 02, schema `2.2`, with OCR/OSD); baseline classification
-(Script 03 rules) pending.
+Status: extraction done (Script 02, schema `2.2`, with OCR/OSD); rule-based classification done
+(Script 03, schema `1.0`).
 
 - Implement Script 02 extraction (done: text, headers, geometry, scanned/DPI, image metrics,
   OCR/OSD via Tesseract, and a per-document rollup)
-- Implement rule-based section of Script 03
-- Produce first part labels without LLM
+- Implement rule-based section of Script 03 (done: filename-first instrument/part/score
+  classification with page-text confirmation, per-piece duplicate flagging, and a report)
+- Produce first part labels without LLM (done: all 26 documents in the sample library classified)
 
 Deliverable:
 

@@ -1,14 +1,756 @@
-"""Script 03 stub: classify part labels and score candidates."""
+"""Script 03: classify each PDF's instrument/part and whether it is a score.
+
+Consumes the Script 01 inventory and the Script 02 extraction datasets and writes one
+prediction record per readable PDF to ``data/part_predictions.jsonl`` plus a Markdown report.
+
+The classifier is rule-first and deterministic: the filename is the primary signal (its part
+segment is isolated by stripping the known ``piece_folder`` prefix), and Script 02 page text is
+used to confirm or recover a label. An instrument lexicon lives in ``config/regex_rules.yaml``
+(with a built-in fallback so the script runs even without the file or PyYAML).
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
 
 import typer
 
+try:
+    import yaml  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    yaml = None
 
-app = typer.Typer()
+from scripts._common import (
+    atomic_write_json,
+    atomic_write_jsonl,
+    atomic_write_text,
+    read_json,
+    read_jsonl,
+    utc_now_iso,
+)
+
+RECORD_VERSION = "1.0"
+
+app = typer.Typer(add_completion=False)
+
+logger = logging.getLogger("script03.classify")
+
+# --- Built-in lexicon (authoritative default; YAML overrides/extends it) ---------------------
+
+DEFAULT_LEXICON: dict[str, Any] = {
+    "families": {
+        "piccolo": "woodwind", "flute": "woodwind", "oboe": "woodwind",
+        "english_horn": "woodwind", "bassoon": "woodwind", "eb_clarinet": "woodwind",
+        "clarinet": "woodwind", "alto_clarinet": "woodwind", "bass_clarinet": "woodwind",
+        "contrabass_clarinet": "woodwind", "soprano_sax": "woodwind", "alto_sax": "woodwind",
+        "tenor_sax": "woodwind", "baritone_sax": "woodwind", "bass_sax": "woodwind",
+        "soprano_cornet": "brass", "cornet": "brass", "trumpet": "brass",
+        "flugelhorn": "brass", "horn": "brass", "tenor_horn": "brass", "trombone": "brass",
+        "bass_trombone": "brass", "baritone_horn": "brass", "euphonium": "brass", "tuba": "brass",
+        "string_bass": "strings", "timpani": "percussion", "mallet_percussion": "percussion",
+        "snare_drum": "percussion", "bass_drum": "percussion", "cymbals": "percussion",
+        "percussion": "percussion", "drum_set": "percussion",
+    },
+    "instruments": {
+        "piccolo": ["piccolo", "picc"],
+        "flute": ["flute", "flutes", "fl", "c flute"],
+        "oboe": ["oboe", "ob"],
+        "english_horn": ["english horn", "cor anglais"],
+        "bassoon": ["bassoon", "bsn", "fagotto"],
+        "eb_clarinet": ["eb clarinet", "e flat clarinet", "clarinet in eb", "clarinet in e flat"],
+        "clarinet": ["bb clarinet", "b flat clarinet", "clarinet in bb", "clarinet", "clar", "cl"],
+        "alto_clarinet": ["alto clarinet", "eb alto clarinet"],
+        "bass_clarinet": ["bass clarinet", "b cl", "bass cl"],
+        "contrabass_clarinet": [
+            "contrabass clarinet", "contra bass clarinet",
+            "contra alto clarinet", "contralto clarinet",
+        ],
+        "soprano_sax": ["soprano saxophone", "soprano sax", "sop sax"],
+        "alto_sax": ["alto saxophone", "alto sax", "eb alto sax", "e flat alto saxophone"],
+        "tenor_sax": ["tenor saxophone", "tenor sax", "bb tenor sax"],
+        "baritone_sax": [
+            "baritone saxophone", "baritone sax", "bari sax", "eb baritone saxophone",
+        ],
+        "bass_sax": ["bass saxophone", "bass sax"],
+        "soprano_cornet": ["soprano cornet", "eb soprano cornet", "sop cornet", "eb cornet"],
+        "cornet": ["solo cornet", "repiano cornet", "ripieno cornet", "bb cornet", "cornet", "cornets"],
+        "trumpet": ["bb trumpet", "b flat trumpet", "trumpet", "trumpets", "tpt", "tpts"],
+        "flugelhorn": ["flugelhorn", "flugel horn", "flugel", "fluegelhorn"],
+        "horn": ["horn in f", "f horn", "french horn", "horn", "horns", "hn"],
+        "tenor_horn": ["tenor horn", "eb tenor horn", "eb horn", "alto horn"],
+        "trombone": ["tenor trombone", "trombone", "trombones", "tbn", "tbns", "tbne"],
+        "bass_trombone": ["bass trombone", "bass tbn"],
+        "baritone_horn": ["baritone horn", "baritone", "bari horn"],
+        "euphonium": ["euphonium", "euph", "eupho"],
+        "tuba": [
+            "tuba", "tubas", "basses", "bass tuba", "eb bass", "bb bass",
+            "bbb", "sousaphone", "contrabass tuba",
+        ],
+        "string_bass": [
+            "string bass", "double bass", "contrabass", "acoustic bass", "upright bass",
+        ],
+        "timpani": ["timpani", "timp", "timpano", "kettle drums"],
+        "mallet_percussion": [
+            "mallet percussion", "mallets", "xylophone", "glockenspiel", "bells",
+            "orchestra bells", "vibraphone", "vibes", "marimba", "chimes", "tubular bells",
+        ],
+        "snare_drum": ["snare drum", "snare"],
+        "bass_drum": ["bass drum"],
+        "cymbals": ["cymbals", "crash cymbals", "suspended cymbal"],
+        "percussion": ["percussion", "perc", "battery", "aux percussion", "auxiliary percussion"],
+        "drum_set": ["drum set", "drum kit", "drums", "trap set"],
+    },
+    "clef_markers": {
+        "(bc)": "bass", "(tc)": "treble", "(bass)": "bass", "(treble)": "treble",
+        "bass clef": "bass", "treble clef": "treble",
+    },
+    "transposition_markers": {
+        "in f": "F", "in bb": "Bb", "in b flat": "Bb", "in eb": "Eb",
+        "in e flat": "Eb", "in c": "C", "in a": "A", "in d": "D",
+    },
+    "score_keywords": [
+        ["full score", "full"], ["condensed score", "condensed"], ["short score", "short"],
+        ["conductor score", "conductor"], ["conductor", "conductor"], ["score", "full"],
+    ],
+    "separators": ["-", "_"],
+}
+
+# Display names used to compose the human-readable ``predicted_part`` label.
+INSTRUMENT_DISPLAY: dict[str, str] = {
+    "piccolo": "Piccolo", "flute": "Flute", "oboe": "Oboe", "english_horn": "English Horn",
+    "bassoon": "Bassoon", "eb_clarinet": "Eb Clarinet", "clarinet": "Clarinet",
+    "alto_clarinet": "Alto Clarinet", "bass_clarinet": "Bass Clarinet",
+    "contrabass_clarinet": "Contrabass Clarinet", "soprano_sax": "Soprano Saxophone",
+    "alto_sax": "Alto Saxophone", "tenor_sax": "Tenor Saxophone",
+    "baritone_sax": "Baritone Saxophone", "bass_sax": "Bass Saxophone",
+    "soprano_cornet": "Soprano Cornet", "cornet": "Cornet", "trumpet": "Trumpet",
+    "flugelhorn": "Flugelhorn", "horn": "Horn", "tenor_horn": "Tenor Horn",
+    "trombone": "Trombone", "bass_trombone": "Bass Trombone", "baritone_horn": "Baritone",
+    "euphonium": "Euphonium", "tuba": "Tuba", "string_bass": "String Bass",
+    "timpani": "Timpani", "mallet_percussion": "Mallet Percussion", "snare_drum": "Snare Drum",
+    "bass_drum": "Bass Drum", "cymbals": "Cymbals", "percussion": "Percussion",
+    "drum_set": "Drum Set",
+}
+
+SCORE_DISPLAY: dict[str, str] = {
+    "full": "Full Score", "condensed": "Condensed Score",
+    "short": "Short Score", "conductor": "Conductor",
+}
+
+CLEF_ABBREV: dict[str, str] = {"bass": "BC", "treble": "TC"}
+
+LOW_CONFIDENCE = 0.75
+
+
+def setup_logging(log_level: str) -> None:
+    logging.basicConfig(
+        level=getattr(logging, log_level.upper(), logging.INFO),
+        format="%(asctime)s | %(levelname)s | %(message)s",
+    )
+
+
+def get_checkpoint_path(output: Path) -> Path:
+    return output.parent / ".part_classifier_checkpoint.json"
+
+
+# --- Lexicon loading -------------------------------------------------------------------------
+
+
+def load_lexicon(rules_path: Path) -> tuple[dict[str, Any], str]:
+    """Return (lexicon, source) merging YAML overrides over the built-in defaults."""
+    lexicon = {
+        "families": dict(DEFAULT_LEXICON["families"]),
+        "instruments": {k: list(v) for k, v in DEFAULT_LEXICON["instruments"].items()},
+        "clef_markers": dict(DEFAULT_LEXICON["clef_markers"]),
+        "transposition_markers": dict(DEFAULT_LEXICON["transposition_markers"]),
+        "score_keywords": [list(pair) for pair in DEFAULT_LEXICON["score_keywords"]],
+        "separators": list(DEFAULT_LEXICON["separators"]),
+    }
+    if yaml is None:
+        logger.warning("PyYAML unavailable; using built-in instrument lexicon.")
+        return lexicon, "builtin"
+    if not rules_path.exists():
+        logger.warning("Rules file %s not found; using built-in lexicon.", rules_path)
+        return lexicon, "builtin"
+    try:
+        with rules_path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except Exception as exc:
+        logger.warning("Failed to parse %s (%s); using built-in lexicon.", rules_path, exc)
+        return lexicon, "builtin"
+
+    if isinstance(data.get("families"), dict):
+        lexicon["families"].update(data["families"])
+    if isinstance(data.get("instruments"), dict):
+        for canonical, aliases in data["instruments"].items():
+            if isinstance(aliases, list):
+                lexicon["instruments"][canonical] = list(aliases)
+    if isinstance(data.get("clef_markers"), dict):
+        lexicon["clef_markers"].update(data["clef_markers"])
+    if isinstance(data.get("transposition_markers"), dict):
+        lexicon["transposition_markers"].update(data["transposition_markers"])
+    if isinstance(data.get("score_keywords"), list) and data["score_keywords"]:
+        lexicon["score_keywords"] = [list(pair) for pair in data["score_keywords"]]
+    if isinstance(data.get("separators"), list) and data["separators"]:
+        lexicon["separators"] = list(data["separators"])
+    return lexicon, "yaml"
+
+
+def compile_aliases(lexicon: dict[str, Any]) -> list[tuple[str, str]]:
+    """Return (canonical, normalized_alias) pairs sorted by alias length descending."""
+    entries: list[tuple[str, str]] = []
+    for canonical, aliases in lexicon["instruments"].items():
+        for alias in aliases:
+            entries.append((canonical, normalize(alias)))
+    entries.sort(key=lambda e: len(e[1]), reverse=True)
+    return entries
+
+
+# --- Text helpers ----------------------------------------------------------------------------
+
+
+def normalize(text: str) -> str:
+    lowered = (text or "").lower()
+    lowered = re.sub(r"[-_]", " ", lowered)
+    lowered = re.sub(r"\s+", " ", lowered)
+    return lowered.strip()
+
+
+def _word_search(needle: str, haystack: str) -> bool:
+    if not needle:
+        return False
+    pattern = r"(?<![a-z0-9])" + re.escape(needle) + r"(?![a-z0-9])"
+    return re.search(pattern, haystack) is not None
+
+
+def isolate_part_segment(pdf_filename: str, piece_folder: str) -> str:
+    """Strip the piece_folder (and any leading catalog number) to isolate the part text."""
+    stem = Path(pdf_filename).stem
+    folder = piece_folder.split("/")[-1] if piece_folder else ""
+    matched = False
+    remainder = stem
+    if folder and stem.lower().startswith(folder.lower()):
+        remainder = stem[len(folder):]
+        matched = True
+    remainder = remainder.strip().strip("-_").strip()
+    if not matched:
+        remainder = re.sub(r"^\d{1,5}[\s._-]+", "", remainder).strip().strip("-_").strip()
+    if not remainder:
+        remainder = stem.strip()
+    return remainder
+
+
+# --- Matching --------------------------------------------------------------------------------
+
+
+def match_instrument(
+    text_norm: str,
+    compiled: list[tuple[str, str]],
+    min_alias_len: int = 1,
+) -> tuple[str | None, str | None, list[dict[str, Any]]]:
+    """Return (canonical, matched_alias, alternates) using longest-alias-wins."""
+    matches: list[tuple[str, str]] = []
+    for canonical, alias in compiled:
+        if len(alias) < min_alias_len:
+            continue
+        if _word_search(alias, text_norm):
+            matches.append((canonical, alias))
+    if not matches:
+        return None, None, []
+    best_canonical, best_alias = matches[0]
+    alternates: list[dict[str, Any]] = []
+    seen = {best_canonical}
+    for canonical, alias in matches:
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        alternates.append(
+            {
+                "canonical_instrument": canonical,
+                "score": round(len(alias) / max(len(best_alias), 1), 3),
+            }
+        )
+        if len(alternates) >= 2:
+            break
+    return best_canonical, best_alias, alternates
+
+
+def detect_score(text_norm: str, lexicon: dict[str, Any]) -> str | None:
+    for keyword, score_type in lexicon["score_keywords"]:
+        if _word_search(normalize(keyword), text_norm):
+            return score_type
+    return None
+
+
+def extract_clef(text_norm: str, lexicon: dict[str, Any]) -> str | None:
+    for marker, clef in lexicon["clef_markers"].items():
+        if marker in text_norm:
+            return clef
+    return None
+
+
+def extract_transposition(text_norm: str, lexicon: dict[str, Any]) -> str | None:
+    for marker, pitch in lexicon["transposition_markers"].items():
+        if _word_search(marker, text_norm):
+            return pitch
+    return None
+
+
+def extract_part_index(text_norm: str) -> int | None:
+    found = re.findall(r"(?<![a-z0-9])(\d{1,2})(?![a-z0-9])", text_norm)
+    if found:
+        return int(found[0])
+    return None
+
+
+def compose_label(
+    canonical: str | None,
+    transposition: str | None,
+    part_index: int | None,
+    clef: str | None,
+    is_score: bool,
+    score_type: str | None,
+) -> str | None:
+    if is_score:
+        return SCORE_DISPLAY.get(score_type or "full", "Score")
+    if canonical is None:
+        return None
+    parts = [INSTRUMENT_DISPLAY.get(canonical, canonical.replace("_", " ").title())]
+    if transposition and transposition.lower() not in parts[0].lower():
+        parts.append(f"in {transposition}")
+    if part_index is not None:
+        parts.append(str(part_index))
+    label = " ".join(parts)
+    if clef in CLEF_ABBREV:
+        label = f"{label} ({CLEF_ABBREV[clef]})"
+    return label
+
+
+# --- Text signal gathering -------------------------------------------------------------------
+
+
+def gather_text_signals(
+    doc_record: dict[str, Any] | None,
+    page1_zones: dict[str, Any] | None,
+) -> str:
+    """Concatenate the most reliable page-1 text sources for confirmation/recovery."""
+    fragments: list[str] = []
+    if doc_record:
+        header = doc_record.get("first_page_header_candidates") or []
+        if isinstance(header, list):
+            fragments.extend(str(h) for h in header)
+        first_text = doc_record.get("first_page_text") or ""
+        # Only the head of the (noisy) page text, where the part label usually sits.
+        fragments.append(str(first_text)[:200])
+    if page1_zones:
+        for key in ("zone_top_left", "zone_top_center", "zone_top_right"):
+            value = page1_zones.get(key)
+            if value:
+                fragments.append(str(value))
+    return normalize(" ".join(fragments))
+
+
+# --- Classification --------------------------------------------------------------------------
+
+
+def classify_document(
+    inv_record: dict[str, Any],
+    doc_record: dict[str, Any] | None,
+    page1_zones: dict[str, Any] | None,
+    lexicon: dict[str, Any],
+    compiled: list[tuple[str, str]],
+    run_id: str,
+) -> dict[str, Any]:
+    pdf_filename = inv_record.get("pdf_filename", "")
+    piece_folder = inv_record.get("piece_folder", "")
+    part_segment = isolate_part_segment(pdf_filename, piece_folder)
+    seg_norm = normalize(part_segment)
+
+    score_type = detect_score(seg_norm, lexicon)
+    text_norm = gather_text_signals(doc_record, page1_zones)
+
+    clef = extract_clef(seg_norm, lexicon)
+    transposition = extract_transposition(seg_norm, lexicon)
+
+    canonical: str | None = None
+    matched_alias: str | None = None
+    alternates: list[dict[str, Any]] = []
+    filename_match = False
+    text_match = False
+    is_score = False
+
+    if score_type is not None:
+        is_score = True
+        family = "score"
+        confidence = 0.90
+        evidence = "filename"
+        part_index = None
+        clef = None
+        transposition = None
+    else:
+        canonical, matched_alias, alternates = match_instrument(seg_norm, compiled)
+        part_index = extract_part_index(seg_norm)
+        if canonical is not None:
+            filename_match = True
+            # Confirm with page text: does any alias of this canonical appear?
+            text_match = any(
+                _word_search(alias, text_norm)
+                for c, alias in compiled
+                if c == canonical
+            )
+            if text_match:
+                confidence = 0.90
+                if clef or transposition:
+                    confidence = min(0.98, confidence + 0.05)
+                evidence = "combined"
+            else:
+                confidence = 0.75
+                evidence = "filename"
+            family = lexicon["families"].get(canonical, "other")
+        else:
+            # Filename gave nothing usable; try to recover from page text.
+            t_canonical, t_alias, t_alts = match_instrument(
+                text_norm, compiled, min_alias_len=4
+            )
+            if t_canonical is not None:
+                canonical = t_canonical
+                matched_alias = t_alias
+                alternates = t_alts
+                text_match = True
+                confidence = 0.50
+                evidence = "text"
+                family = lexicon["families"].get(canonical, "other")
+            else:
+                confidence = 0.0
+                evidence = "none"
+                family = "unknown"
+
+    predicted_part = compose_label(
+        canonical, transposition, part_index, clef, is_score, score_type
+    )
+
+    return {
+        "record_version": RECORD_VERSION,
+        "run_id": run_id,
+        "pdf_path": inv_record.get("pdf_path"),
+        "piece_id": inv_record.get("piece_id"),
+        "piece_folder": piece_folder,
+        "pdf_filename": pdf_filename,
+        "predicted_part": predicted_part,
+        "canonical_instrument": canonical,
+        "family": family,
+        "part_index": part_index,
+        "clef": clef,
+        "transposition": transposition,
+        "is_score": is_score,
+        "score_type": score_type,
+        "confidence": round(confidence, 3),
+        "evidence_source": evidence,
+        "alternates": alternates,
+        "match_details": {
+            "part_segment": part_segment,
+            "matched_alias": matched_alias,
+            "filename_match": filename_match,
+            "text_match": text_match,
+        },
+        "duplicate_in_piece": False,
+        "file_fingerprint": inv_record.get("file_fingerprint"),
+        "processing_status": "success",
+        "processing_timestamp": utc_now_iso(),
+    }
+
+
+def build_skipped_record(inv_record: dict[str, Any], run_id: str) -> dict[str, Any]:
+    return {
+        "record_version": RECORD_VERSION,
+        "run_id": run_id,
+        "pdf_path": inv_record.get("pdf_path"),
+        "piece_id": inv_record.get("piece_id"),
+        "piece_folder": inv_record.get("piece_folder", ""),
+        "pdf_filename": inv_record.get("pdf_filename", ""),
+        "predicted_part": None,
+        "canonical_instrument": None,
+        "family": "unknown",
+        "part_index": None,
+        "clef": None,
+        "transposition": None,
+        "is_score": False,
+        "score_type": None,
+        "confidence": 0.0,
+        "evidence_source": "none",
+        "alternates": [],
+        "match_details": {
+            "part_segment": None,
+            "matched_alias": None,
+            "filename_match": False,
+            "text_match": False,
+        },
+        "duplicate_in_piece": False,
+        "file_fingerprint": inv_record.get("file_fingerprint"),
+        "processing_status": "skipped_unreadable",
+        "processing_timestamp": utc_now_iso(),
+    }
+
+
+def apply_ensemble(records: list[dict[str, Any]]) -> None:
+    """Flag documents that share an instrument signature within the same piece."""
+    signatures: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for rec in records:
+        if rec.get("is_score") or rec.get("canonical_instrument") is None:
+            continue
+        key = (
+            rec.get("piece_id"),
+            rec.get("canonical_instrument"),
+            rec.get("part_index"),
+            rec.get("clef"),
+        )
+        signatures.setdefault(key, []).append(rec)
+    for group in signatures.values():
+        if len(group) > 1:
+            for rec in group:
+                rec["duplicate_in_piece"] = True
+
+
+# --- Reporting -------------------------------------------------------------------------------
+
+
+def build_report(
+    records: list[dict[str, Any]],
+    run_id: str,
+    rules_source: str,
+    llm_enabled: bool,
+) -> str:
+    classified = [r for r in records if r["processing_status"] == "success"]
+    skipped = [r for r in records if r["processing_status"] != "success"]
+    family_counts: dict[str, int] = {}
+    instrument_counts: dict[str, int] = {}
+    for rec in classified:
+        family_counts[rec["family"]] = family_counts.get(rec["family"], 0) + 1
+        canonical = rec["canonical_instrument"] or "(unmatched)"
+        instrument_counts[canonical] = instrument_counts.get(canonical, 0) + 1
+    scores = [r for r in classified if r["is_score"]]
+    unmatched = [r for r in classified if r["canonical_instrument"] is None and not r["is_score"]]
+    low_conf = [r for r in classified if r["confidence"] < LOW_CONFIDENCE and not r["is_score"]]
+    duplicates = [r for r in classified if r["duplicate_in_piece"]]
+
+    out: list[str] = []
+    out.append("# Part Classification Report")
+    out.append("")
+    out.append(f"- Run ID: `{run_id}`")
+    out.append(f"- Documents classified: {len(classified)}")
+    out.append(f"- Skipped (unreadable): {len(skipped)}")
+    out.append(f"- Scores detected: {len(scores)}")
+    out.append(f"- Unmatched parts: {len(unmatched)}")
+    out.append(f"- Low-confidence (<{LOW_CONFIDENCE:.2f}): {len(low_conf)}")
+    out.append(f"- Duplicate labels within a piece: {len(duplicates)}")
+    out.append(f"- Rules source: {rules_source}")
+    out.append(f"- LLM fallback: {'enabled' if llm_enabled else 'disabled'}")
+    out.append("")
+
+    out.append("## By family")
+    out.append("")
+    out.append("| Family | Count |")
+    out.append("|--------|-------|")
+    for family in sorted(family_counts):
+        out.append(f"| {family} | {family_counts[family]} |")
+    out.append("")
+
+    out.append("## By instrument")
+    out.append("")
+    out.append("| Instrument | Count |")
+    out.append("|------------|-------|")
+    for canonical in sorted(instrument_counts):
+        out.append(f"| {canonical} | {instrument_counts[canonical]} |")
+    out.append("")
+
+    if unmatched or low_conf:
+        out.append("## Review recommended")
+        out.append("")
+        out.append("| PDF | Predicted | Confidence | Evidence |")
+        out.append("|-----|-----------|------------|----------|")
+        review = {id(r): r for r in (unmatched + low_conf)}
+        for rec in review.values():
+            out.append(
+                f"| {rec['pdf_filename']} | {rec['predicted_part']} | "
+                f"{rec['confidence']:.2f} | {rec['evidence_source']} |"
+            )
+        out.append("")
+
+    if duplicates:
+        out.append("## Duplicate labels within a piece")
+        out.append("")
+        out.append("| Piece | PDF | Predicted |")
+        out.append("|-------|-----|-----------|")
+        for rec in duplicates:
+            out.append(
+                f"| {rec['piece_folder']} | {rec['pdf_filename']} | {rec['predicted_part']} |"
+            )
+        out.append("")
+
+    return "\n".join(out) + "\n"
+
+
+# --- Incremental helpers ---------------------------------------------------------------------
+
+
+def load_previous_record_map(output: Path) -> dict[str, dict[str, Any]]:
+    previous = read_jsonl(output)
+    return {rec["pdf_path"]: rec for rec in previous if "pdf_path" in rec}
+
+
+def should_reuse_record(
+    prior_record: dict[str, Any] | None,
+    current_fingerprint: str | None,
+) -> bool:
+    if prior_record is None or current_fingerprint is None:
+        return False
+    return prior_record.get("file_fingerprint") == current_fingerprint
 
 
 @app.command()
-def main() -> None:
-    raise NotImplementedError("Script 03 is not implemented yet.")
+def main(
+    inventory: Path = typer.Option(
+        Path("data/raw_inventory.jsonl"), help="Script 01 inventory JSONL input"
+    ),
+    documents: Path = typer.Option(
+        Path("data/documents.jsonl"), help="Script 02 per-document rollups (optional)"
+    ),
+    pages: Path = typer.Option(
+        Path("data/pages.jsonl"), help="Script 02 per-page features (optional)"
+    ),
+    rules: Path = typer.Option(
+        Path("config/regex_rules.yaml"), help="Instrument lexicon YAML (optional)"
+    ),
+    output: Path = typer.Option(
+        Path("data/part_predictions.jsonl"), help="Prediction output JSONL"
+    ),
+    output_report: Path = typer.Option(
+        Path("data/part_classification_report.md"), help="Markdown summary output"
+    ),
+    write_report: bool = typer.Option(
+        True, "--report/--no-report", help="Write the Markdown summary report"
+    ),
+    mode: str = typer.Option("full", help="Processing mode: full or incremental"),
+    use_llm: bool = typer.Option(
+        False, "--use-llm/--no-llm", help="Enable the (unwired) LLM fallback hook"
+    ),
+    log_level: str = typer.Option("INFO", help="DEBUG, INFO, WARNING, ERROR"),
+) -> None:
+    """Classify each PDF's instrument/part and whether it is a score."""
+    mode = mode.lower().strip()
+    if mode not in {"full", "incremental"}:
+        raise typer.BadParameter("mode must be 'full' or 'incremental'")
+
+    setup_logging(log_level)
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+    inventory = inventory.resolve()
+    output = output.resolve()
+
+    inv_records = read_jsonl(inventory)
+    if not inv_records:
+        raise typer.BadParameter(f"No inventory records found at {inventory}")
+
+    if use_llm:
+        logger.warning(
+            "LLM fallback requested but no provider is wired; "
+            "rule-based predictions are emitted unchanged."
+        )
+
+    lexicon, rules_source = load_lexicon(rules.resolve())
+    compiled = compile_aliases(lexicon)
+
+    # Optional Script 02 datasets, indexed by pdf_path.
+    doc_map = {r["pdf_path"]: r for r in read_jsonl(documents.resolve()) if "pdf_path" in r}
+    page1_map: dict[str, dict[str, Any]] = {}
+    for rec in read_jsonl(pages.resolve()):
+        if rec.get("page_num") == 1 and "pdf_path" in rec:
+            page1_map.setdefault(rec["pdf_path"], rec)
+    if not doc_map:
+        logger.warning("No Script 02 documents found; classifying filename-only.")
+
+    checkpoint_path = get_checkpoint_path(output)
+    checkpoint = read_json(checkpoint_path) or {}
+    if checkpoint and checkpoint.get("record_version") != RECORD_VERSION:
+        logger.warning(
+            "Checkpoint version mismatch (found=%s expected=%s). Ignoring checkpoint.",
+            checkpoint.get("record_version"),
+            RECORD_VERSION,
+        )
+        checkpoint = {}
+    previous_records_map = load_previous_record_map(output)
+
+    rebuilt: list[dict[str, Any]] = []
+    classified_count = 0
+    reused_count = 0
+    skipped_count = 0
+
+    for inv in inv_records:
+        pdf_path = inv.get("pdf_path")
+        if not pdf_path:
+            continue
+        if not inv.get("pdf_readable", True):
+            rebuilt.append(build_skipped_record(inv, run_id))
+            skipped_count += 1
+            continue
+
+        current_fingerprint = inv.get("file_fingerprint")
+        prior = previous_records_map.get(pdf_path)
+        if mode == "incremental" and should_reuse_record(prior, current_fingerprint):
+            rebuilt.append(prior)
+            reused_count += 1
+            continue
+
+        try:
+            record = classify_document(
+                inv, doc_map.get(pdf_path), page1_map.get(pdf_path),
+                lexicon, compiled, run_id,
+            )
+        except Exception as exc:
+            logger.exception("Unexpected classification error on %s", pdf_path)
+            record = build_skipped_record(inv, run_id)
+            record["processing_status"] = "error"
+            record["match_details"]["matched_alias"] = f"error: {exc}"
+        rebuilt.append(record)
+        classified_count += 1
+
+    apply_ensemble(rebuilt)
+    rebuilt.sort(key=lambda rec: rec.get("pdf_path") or "")
+    atomic_write_jsonl(output, rebuilt)
+
+    if write_report:
+        report = build_report(rebuilt, run_id, rules_source, use_llm)
+        atomic_write_text(output_report.resolve(), report)
+
+    new_checkpoint = {
+        "record_version": RECORD_VERSION,
+        "last_run_id": run_id,
+        "last_run_timestamp": utc_now_iso(),
+        "inventory_input": inventory.as_posix(),
+        "output": output.as_posix(),
+        "rules_source": rules_source,
+        "llm_enabled": use_llm,
+        "fingerprints": {
+            rec["pdf_path"]: rec.get("file_fingerprint")
+            for rec in rebuilt
+            if rec.get("pdf_path")
+        },
+        "record_count": len(rebuilt),
+    }
+    atomic_write_json(checkpoint_path, new_checkpoint)
+
+    logger.info(
+        "Part classification completed: total=%d classified=%d reused=%d skipped=%d output=%s",
+        len(rebuilt),
+        classified_count,
+        reused_count,
+        skipped_count,
+        output,
+    )
 
 
 if __name__ == "__main__":

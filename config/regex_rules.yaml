@@ -1,3 +1,122 @@
+# Instrument lexicon and filename rules for Script 03 (part classifier).
+#
+# This file OVERRIDES/EXTENDS the built-in defaults baked into
+# scripts/03_part_classifier.py. If PyYAML is unavailable or this file is
+# missing/empty, the built-in defaults are used and classification still runs.
+#
+# Matching notes:
+# - Aliases are matched case-insensitively against the normalized part segment.
+# - Longest alias wins, so "bass clarinet" beats "clarinet".
+# - Canonical instrument keys are snake_case.
+
+# canonical instrument key -> family
+families:
+  piccolo: woodwind
+  flute: woodwind
+  oboe: woodwind
+  english_horn: woodwind
+  bassoon: woodwind
+  eb_clarinet: woodwind
+  clarinet: woodwind
+  alto_clarinet: woodwind
+  bass_clarinet: woodwind
+  contrabass_clarinet: woodwind
+  soprano_sax: woodwind
+  alto_sax: woodwind
+  tenor_sax: woodwind
+  baritone_sax: woodwind
+  bass_sax: woodwind
+  soprano_cornet: brass
+  cornet: brass
+  trumpet: brass
+  flugelhorn: brass
+  horn: brass
+  tenor_horn: brass
+  trombone: brass
+  bass_trombone: brass
+  baritone_horn: brass
+  euphonium: brass
+  tuba: brass
+  string_bass: strings
+  timpani: percussion
+  mallet_percussion: percussion
+  snare_drum: percussion
+  bass_drum: percussion
+  cymbals: percussion
+  percussion: percussion
+  drum_set: percussion
+
+# canonical instrument key -> aliases (order does not matter; the classifier
+# sorts all aliases by length descending so specific names win).
+instruments:
+  piccolo: ["piccolo", "picc"]
+  flute: ["flute", "flutes", "fl", "c flute"]
+  oboe: ["oboe", "ob"]
+  english_horn: ["english horn", "cor anglais"]
+  bassoon: ["bassoon", "bsn", "fagotto"]
+  eb_clarinet: ["eb clarinet", "e flat clarinet", "clarinet in eb", "clarinet in e flat"]
+  clarinet: ["bb clarinet", "b flat clarinet", "clarinet in bb", "clarinet", "clar", "cl"]
+  alto_clarinet: ["alto clarinet", "eb alto clarinet"]
+  bass_clarinet: ["bass clarinet", "b cl", "bass cl"]
+  contrabass_clarinet: ["contrabass clarinet", "contra bass clarinet", "contra alto clarinet", "contralto clarinet"]
+  soprano_sax: ["soprano saxophone", "soprano sax", "sop sax"]
+  alto_sax: ["alto saxophone", "alto sax", "eb alto sax", "e flat alto saxophone"]
+  tenor_sax: ["tenor saxophone", "tenor sax", "bb tenor sax"]
+  baritone_sax: ["baritone saxophone", "baritone sax", "bari sax", "eb baritone saxophone"]
+  bass_sax: ["bass saxophone", "bass sax"]
+  soprano_cornet: ["soprano cornet", "eb soprano cornet", "sop cornet", "eb cornet"]
+  cornet: ["solo cornet", "repiano cornet", "ripieno cornet", "bb cornet", "cornet", "cornets"]
+  trumpet: ["bb trumpet", "b flat trumpet", "trumpet", "trumpets", "tpt", "tpts"]
+  flugelhorn: ["flugelhorn", "flugel horn", "flugel", "fluegelhorn"]
+  horn: ["horn in f", "f horn", "french horn", "horn", "horns", "hn"]
+  tenor_horn: ["tenor horn", "eb tenor horn", "eb horn", "alto horn"]
+  trombone: ["tenor trombone", "trombone", "trombones", "tbn", "tbns", "tbne"]
+  bass_trombone: ["bass trombone", "bass tbn"]
+  baritone_horn: ["baritone horn", "baritone", "bari horn"]
+  euphonium: ["euphonium", "euph", "eupho"]
+  tuba: ["tuba", "tubas", "basses", "bass tuba", "eb bass", "bb bass", "bbb", "sousaphone", "contrabass tuba"]
+  string_bass: ["string bass", "double bass", "contrabass", "acoustic bass", "upright bass"]
+  timpani: ["timpani", "timp", "timpano", "kettle drums"]
+  mallet_percussion: ["mallet percussion", "mallets", "xylophone", "glockenspiel", "bells", "orchestra bells", "vibraphone", "vibes", "marimba", "chimes", "tubular bells"]
+  snare_drum: ["snare drum", "snare"]
+  bass_drum: ["bass drum"]
+  cymbals: ["cymbals", "crash cymbals", "suspended cymbal"]
+  percussion: ["percussion", "perc", "battery", "aux percussion", "auxiliary percussion"]
+  drum_set: ["drum set", "drum kit", "drums", "trap set"]
+
+# token (normalized, lowercase) -> clef
+clef_markers:
+  "(bc)": bass
+  "(tc)": treble
+  "(bass)": bass
+  "(treble)": treble
+  "bass clef": bass
+  "treble clef": treble
+
+# token (normalized, lowercase) -> transposition pitch label
+transposition_markers:
+  "in f": F
+  "in bb": Bb
+  "in b flat": Bb
+  "in eb": Eb
+  "in e flat": Eb
+  "in c": C
+  "in a": A
+  "in d": D
+
+# keyword (normalized, lowercase) -> score_type. Order = priority (first wins).
+score_keywords:
+  - ["full score", "full"]
+  - ["condensed score", "condensed"]
+  - ["short score", "short"]
+  - ["conductor score", "conductor"]
+  - ["conductor", "conductor"]
+  - ["score", "full"]
+
+# characters that separate the piece title from the part in a filename
+separators: ["-", "_"]
+
+# legacy keys retained for backward compatibility with earlier drafts
 part_patterns: {}
 filename_normalization:
   lowercase: true

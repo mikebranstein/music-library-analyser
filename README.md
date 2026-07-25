@@ -45,11 +45,13 @@ Primary outputs:
 - Compute image-quality metrics (blur, skew, contrast) when `numpy`/`opencv-python` are available
 - Emit a per-document rollup (`data/documents.jsonl`) alongside `extracted_text.jsonl` and `pages.jsonl`
 - Write a human-readable Markdown summary (`data/extraction_report.md`) with coverage, quality, and per-folder/per-document breakdowns
-- OCR of scanned pages is deferred to a later stage
+- OCR scanned/no-text pages with Tesseract (OSD auto-rotate first); runs by default and degrades gracefully when the toolchain is unavailable
 
 3. `03_part_classifier.py`
-- Classify part labels and score candidates
-- Combine regex/rules with model fallback
+- Classify each PDF's instrument/part and whether it is a score (filename-first, deterministic)
+- Isolate the part segment from the filename, match against an instrument lexicon (`config/regex_rules.yaml`), and confirm/recover with Script 02 page text
+- Extract clef, transposition, and part index; flag duplicate labels within a piece
+- Emit `data/part_predictions.jsonl` and a Markdown report (`data/part_classification_report.md`); an LLM fallback hook exists but is disabled/unwired
 
 4. `04_expected_parts_inference.py`
 - Build work identity fingerprint

@@ -1,0 +1,293 @@
+from __future__ import annotations
+
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+from typer.testing import CliRunner
+
+from scripts._common import read_json, read_jsonl
+
+runner = CliRunner()
+
+
+def load_module(script_name: str, module_name: str):
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / script_name
+    spec = importlib.util.spec_from_file_location(module_name, script_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Failed to load {script_name}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+classifier = load_module("03_part_classifier.py", "part_classifier_under_test")
+
+
+def _lexicon_and_compiled():
+    lexicon, _ = classifier.load_lexicon(Path("does/not/exist.yaml"))
+    return lexicon, classifier.compile_aliases(lexicon)
+
+
+# --- Unit tests -----------------------------------------------------------------------------
+
+
+def test_isolate_part_segment_strips_folder_prefix():
+    seg = classifier.isolate_part_segment(
+        "241 Chick Corea Ole - Cornet 1.pdf", "241 Chick Corea Ole"
+    )
+    assert seg == "Cornet 1"
+
+
+def test_isolate_part_segment_dash_inside_part():
+    seg = classifier.isolate_part_segment(
+        "241 Chick Corea Ole - Basses - Tuba.pdf", "241 Chick Corea Ole"
+    )
+    assert seg == "Basses - Tuba"
+
+
+def test_isolate_part_segment_underscore_separator():
+    seg = classifier.isolate_part_segment(
+        "681 A Night On A Lonely Moor_Horn in F 1.pdf", "681 A Night On A Lonely Moor"
+    )
+    assert seg == "Horn in F 1"
+
+
+def test_longest_alias_wins_bass_trombone():
+    _, compiled = _lexicon_and_compiled()
+    canonical, alias, _ = classifier.match_instrument(
+        classifier.normalize("Bass Trombone"), compiled
+    )
+    assert canonical == "bass_trombone"
+    assert alias == "bass trombone"
+
+
+def test_plain_trombone_not_bass():
+    _, compiled = _lexicon_and_compiled()
+    canonical, _, _ = classifier.match_instrument(
+        classifier.normalize("Trombone 3 (Bass)"), compiled
+    )
+    assert canonical == "trombone"
+
+
+def test_short_alias_does_not_match_inside_word():
+    _, compiled = _lexicon_and_compiled()
+    # "cl" must not match inside "clarinet"; "clarinet" should win.
+    canonical, alias, _ = classifier.match_instrument(
+        classifier.normalize("Clarinet 2"), compiled
+    )
+    assert canonical == "clarinet"
+    assert alias == "clarinet"
+
+
+def test_clef_and_transposition_and_index():
+    lexicon, _ = _lexicon_and_compiled()
+    assert classifier.extract_clef(classifier.normalize("Baritone (BC)"), lexicon) == "bass"
+    assert classifier.extract_clef(classifier.normalize("Baritone (TC)"), lexicon) == "treble"
+    assert classifier.extract_transposition(
+        classifier.normalize("Horn in F 2"), lexicon
+    ) == "F"
+    assert classifier.extract_part_index(classifier.normalize("Cornet 3")) == 3
+
+
+def test_detect_score():
+    lexicon, _ = _lexicon_and_compiled()
+    assert classifier.detect_score(classifier.normalize("Full Score"), lexicon) == "full"
+    assert classifier.detect_score(classifier.normalize("Conductor"), lexicon) == "conductor"
+    assert classifier.detect_score(classifier.normalize("Trumpet 1"), lexicon) is None
+
+
+def test_compose_label_variants():
+    assert classifier.compose_label("horn", "F", 2, None, False, None) == "Horn in F 2"
+    assert classifier.compose_label("baritone_horn", None, None, "bass", False, None) == (
+        "Baritone (BC)"
+    )
+    assert classifier.compose_label("cornet", None, 1, None, False, None) == "Cornet 1"
+    assert classifier.compose_label(None, None, None, None, True, "full") == "Full Score"
+
+
+def test_classify_filename_only_confidence():
+    lexicon, compiled = _lexicon_and_compiled()
+    inv = {
+        "pdf_path": "P/Song - Cornet 2.pdf",
+        "pdf_filename": "Song - Cornet 2.pdf",
+        "piece_folder": "Song",
+        "piece_id": "abc",
+        "file_fingerprint": "fp1",
+    }
+    rec = classifier.classify_document(inv, None, None, lexicon, compiled, "run1")
+    assert rec["canonical_instrument"] == "cornet"
+    assert rec["part_index"] == 2
+    assert rec["evidence_source"] == "filename"
+    assert rec["confidence"] == 0.75
+
+
+def test_classify_combined_confidence_with_text():
+    lexicon, compiled = _lexicon_and_compiled()
+    inv = {
+        "pdf_path": "P/Song - Trumpet 1.pdf",
+        "pdf_filename": "Song - Trumpet 1.pdf",
+        "piece_folder": "Song",
+        "piece_id": "abc",
+        "file_fingerprint": "fp1",
+    }
+    doc = {"first_page_header_candidates": ["Trumpet"], "first_page_text": "Trumpet in Bb"}
+    rec = classifier.classify_document(inv, doc, None, lexicon, compiled, "run1")
+    assert rec["canonical_instrument"] == "trumpet"
+    assert rec["evidence_source"] == "combined"
+    assert rec["confidence"] >= 0.90
+
+
+def test_text_only_recovery():
+    lexicon, compiled = _lexicon_and_compiled()
+    inv = {
+        "pdf_path": "P/scan001.pdf",
+        "pdf_filename": "scan001.pdf",
+        "piece_folder": "P",
+        "piece_id": "abc",
+        "file_fingerprint": "fp1",
+    }
+    doc = {"first_page_header_candidates": ["Flute"], "first_page_text": "Flute solo"}
+    rec = classifier.classify_document(inv, doc, None, lexicon, compiled, "run1")
+    assert rec["canonical_instrument"] == "flute"
+    assert rec["evidence_source"] == "text"
+    assert rec["confidence"] == 0.50
+
+
+def test_no_match_is_unknown():
+    lexicon, compiled = _lexicon_and_compiled()
+    inv = {
+        "pdf_path": "P/mystery.pdf",
+        "pdf_filename": "mystery.pdf",
+        "piece_folder": "P",
+        "piece_id": "abc",
+        "file_fingerprint": "fp1",
+    }
+    rec = classifier.classify_document(inv, None, None, lexicon, compiled, "run1")
+    assert rec["canonical_instrument"] is None
+    assert rec["family"] == "unknown"
+    assert rec["evidence_source"] == "none"
+
+
+def test_apply_ensemble_flags_duplicates():
+    records = [
+        {"piece_id": "p", "canonical_instrument": "trumpet", "part_index": 1,
+         "clef": None, "is_score": False, "duplicate_in_piece": False},
+        {"piece_id": "p", "canonical_instrument": "trumpet", "part_index": 1,
+         "clef": None, "is_score": False, "duplicate_in_piece": False},
+        {"piece_id": "p", "canonical_instrument": "flute", "part_index": 1,
+         "clef": None, "is_score": False, "duplicate_in_piece": False},
+    ]
+    classifier.apply_ensemble(records)
+    assert records[0]["duplicate_in_piece"] is True
+    assert records[1]["duplicate_in_piece"] is True
+    assert records[2]["duplicate_in_piece"] is False
+
+
+# --- End-to-end test ------------------------------------------------------------------------
+
+
+def _write_jsonl(path: Path, records: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="\n") as f:
+        for rec in records:
+            f.write(json.dumps(rec) + "\n")
+
+
+def test_full_run_end_to_end(tmp_path: Path):
+    inventory = tmp_path / "raw_inventory.jsonl"
+    documents = tmp_path / "documents.jsonl"
+    pages = tmp_path / "pages.jsonl"
+    output = tmp_path / "part_predictions.jsonl"
+    report = tmp_path / "part_classification_report.md"
+
+    inv_records = [
+        {"pdf_path": "Song/Song - Cornet 1.pdf", "pdf_filename": "Song - Cornet 1.pdf",
+         "piece_folder": "Song", "piece_id": "p1", "file_fingerprint": "f1",
+         "pdf_readable": True},
+        {"pdf_path": "Song/Song - Cornet 1 dup.pdf", "pdf_filename": "Song - Cornet 1.pdf",
+         "piece_folder": "Song", "piece_id": "p1", "file_fingerprint": "f2",
+         "pdf_readable": True},
+        {"pdf_path": "Song/Song - Baritone (BC).pdf", "pdf_filename": "Song - Baritone (BC).pdf",
+         "piece_folder": "Song", "piece_id": "p1", "file_fingerprint": "f3",
+         "pdf_readable": True},
+        {"pdf_path": "Song/Song - Full Score.pdf", "pdf_filename": "Song - Full Score.pdf",
+         "piece_folder": "Song", "piece_id": "p1", "file_fingerprint": "f4",
+         "pdf_readable": True},
+        {"pdf_path": "Song/broken.pdf", "pdf_filename": "broken.pdf",
+         "piece_folder": "Song", "piece_id": "p1", "file_fingerprint": "f5",
+         "pdf_readable": False},
+    ]
+    _write_jsonl(inventory, inv_records)
+    _write_jsonl(documents, [])
+    _write_jsonl(pages, [])
+
+    result = runner.invoke(
+        classifier.app,
+        [
+            "--inventory", str(inventory),
+            "--documents", str(documents),
+            "--pages", str(pages),
+            "--output", str(output),
+            "--output-report", str(report),
+            "--mode", "full",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    records = read_jsonl(output)
+    assert len(records) == 5
+    by_path = {r["pdf_path"]: r for r in records}
+
+    cornet = by_path["Song/Song - Cornet 1.pdf"]
+    assert cornet["canonical_instrument"] == "cornet"
+    assert cornet["part_index"] == 1
+    assert cornet["duplicate_in_piece"] is True  # two Cornet 1 in the piece
+
+    baritone = by_path["Song/Song - Baritone (BC).pdf"]
+    assert baritone["canonical_instrument"] == "baritone_horn"
+    assert baritone["clef"] == "bass"
+    assert baritone["predicted_part"] == "Baritone (BC)"
+
+    score = by_path["Song/Song - Full Score.pdf"]
+    assert score["is_score"] is True
+    assert score["family"] == "score"
+
+    broken = by_path["Song/broken.pdf"]
+    assert broken["processing_status"] == "skipped_unreadable"
+
+    assert report.exists()
+    checkpoint = read_json(tmp_path / ".part_classifier_checkpoint.json")
+    assert checkpoint is not None
+    assert checkpoint["record_count"] == 5
+
+
+def test_incremental_reuse(tmp_path: Path):
+    inventory = tmp_path / "raw_inventory.jsonl"
+    output = tmp_path / "part_predictions.jsonl"
+
+    inv_records = [
+        {"pdf_path": "Song/Song - Tuba.pdf", "pdf_filename": "Song - Tuba.pdf",
+         "piece_folder": "Song", "piece_id": "p1", "file_fingerprint": "f1",
+         "pdf_readable": True},
+    ]
+    _write_jsonl(inventory, inv_records)
+    _write_jsonl(tmp_path / "documents.jsonl", [])
+    _write_jsonl(tmp_path / "pages.jsonl", [])
+
+    base_args = [
+        "--inventory", str(inventory),
+        "--documents", str(tmp_path / "documents.jsonl"),
+        "--pages", str(tmp_path / "pages.jsonl"),
+        "--output", str(output),
+        "--no-report",
+    ]
+    assert runner.invoke(classifier.app, [*base_args, "--mode", "full"]).exit_code == 0
+    first = read_jsonl(output)[0]
+
+    result = runner.invoke(classifier.app, [*base_args, "--mode", "incremental"])
+    assert result.exit_code == 0
+    second = read_jsonl(output)[0]
+    assert second["run_id"] == first["run_id"]  # reused, not reclassified
