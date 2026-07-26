@@ -55,9 +55,11 @@ Primary outputs:
 - Write `data/part_predictions.jsonl`, a per-piece `data/observed_parts_by_piece.jsonl` rollup, and a Markdown report (`data/part_classification_report.md`); an LLM fallback hook exists but is disabled/unwired
 
 4. `04_expected_parts_inference.py`
-- Build work identity fingerprint
-- Retrieve authoritative instrumentation sources
-- Reconcile sources and infer expected parts with evidence
+- Look up each piece's *actual published edition* online via the GitHub Copilot CLI (`copilot -p ...`, config in `config/score_lookup.yaml`, prompt in `config/llm_prompts/lookup_instrumentation.txt`); the ensemble type is inferred per piece from the found score rather than assumed
+- Reconcile the looked-up part slots against observed parts (count-based, robust to null part indices) into present / missing / unexpected sets
+- Score required-part completeness + tier, flag `score_missing` and `needs_review`, and record `evidence_sources` + resolved work identity
+- Degrade conservatively (`--no-lookup`, CLI missing/error, `no_match`, or `low_confidence`): declare no missing parts, set `completeness_score: null`, and flag for review — never fabricate a missing part
+- Emit `data/expected_parts.jsonl` (schema 2.0) and a Markdown report (`data/expected_parts_report.md`); `--mode incremental` caches per-piece results by fingerprint to avoid re-spending AI credits
 
 5. `05_quality_checks.py`
 - Score scan quality
@@ -87,11 +89,12 @@ project-root/
     08_manual_review_pack.py
   config/
     authority_sources.yaml
+    score_lookup.yaml
     regex_rules.yaml
     quality_thresholds.yaml
     llm_prompts/
       classify_part.txt
-      infer_expected_parts.txt
+      lookup_instrumentation.txt
       verify_low_confidence.txt
   data/
     raw_inventory.jsonl
@@ -102,6 +105,7 @@ project-root/
     part_predictions.jsonl
     observed_parts_by_piece.jsonl
     expected_parts.jsonl
+    expected_parts_report.md
     quality_metrics.jsonl
     piece_reports/
     collection_reports/
@@ -119,7 +123,6 @@ project-root/
 Expected-parts inference methods:
 
 - `authority_lookup`
-- `authority_plus_llm`
 - `fallback_conservative`
 
 Confidence threshold guidance:

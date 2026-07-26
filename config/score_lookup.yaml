@@ -1,0 +1,32 @@
+# Score-instrumentation lookup config for Script 04.
+#
+# Script 04's primary path asks the GitHub Copilot CLI to look up the ACTUAL published score for
+# each piece online and return its real instrumentation. There are no hardcoded ensemble templates;
+# when lookup is disabled or unsuccessful, the script falls back to a conservative, observed-only
+# record and flags the piece for review.
+
+# Master switch. Also toggled at runtime by --lookup / --no-lookup.
+enabled: true
+
+# Copilot CLI binary (name on PATH, or an absolute path).
+command: copilot
+
+# AI model for the CLI. Empty string uses the CLI's default model.
+model: ""
+
+# Per-piece subprocess timeout, in seconds.
+timeout_seconds: 300
+
+# Identity-match confidence below which a returned match is downgraded to a conservative
+# fallback (evidence is still recorded, but expected parts are not asserted).
+confidence_threshold: 0.5
+
+# Domains the lookup is permitted to fetch. Empty list => allow all URLs (--allow-all-urls).
+# Otherwise a --allow-url allowlist is passed. web_fetch still blocks localhost/private IPs.
+allowed_domains: []
+
+# Prompt template rendered with the per-piece work-identity query.
+prompt_template_path: config/llm_prompts/lookup_instrumentation.txt
+
+# Extra arguments appended verbatim to the copilot invocation.
+extra_args: []

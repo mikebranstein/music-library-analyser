@@ -53,11 +53,12 @@ project-root/
     08_manual_review_pack.py
   config/
     authority_sources.yaml
+    score_lookup.yaml
     regex_rules.yaml
     quality_thresholds.yaml
     llm_prompts/
       classify_part.txt
-      infer_expected_parts.txt
+      lookup_instrumentation.txt
       verify_low_confidence.txt
   data/
     raw_inventory.jsonl
@@ -67,6 +68,7 @@ project-root/
     part_predictions.jsonl
     observed_parts_by_piece.jsonl
     expected_parts.jsonl
+    expected_parts_report.md
     quality_metrics.jsonl
     piece_reports/
     collection_reports/
@@ -298,93 +300,79 @@ Inputs:
 
 Approach:
 
-1. Authority-first metadata lookup (primary path):
-- Build a search query from normalized work identity fields:
-  - piece title
-  - composer
-  - arranger
-  - publisher
-  - edition/revision label
-  - catalog number / item number / SKU
-  - series name (for publisher series-based catalogs)
-  - publication year or copyright year
-  - subtitle / movement name (when folder naming is partial)
-  - alternate title spellings and punctuation-normalized variants
-  - known duration and grade level (if printed on cover/score)
-- Retrieve candidate source pages from authoritative catalogs/listings first:
-  - publisher product pages
-  - publisher catalog PDFs
-  - distributor listings that reproduce publisher instrumentation fields
-  - library records with explicit instrumentation notes
-- Parse and normalize instrumentation text from those sources into canonical part keys.
+Status: implemented (Script 04, schema `2.0`) as an **online score-lookup engine driven by the
+GitHub Copilot CLI**. Rather than assuming an ensemble template, it looks up the *actual published
+edition* per piece and reports that edition's real instrumentation; the ensemble type is inferred
+from whatever score is found. When lookup is disabled or fails, the piece degrades to a
+conservative, observed-only record flagged for review — it never fabricates a "missing" part
+without an authoritative source. See
+`docs/SCRIPT04_EXPECTED_PARTS_INFERENCE_IMPLEMENTATION_PLAN.md` for the full design.
 
-Identity hardening before lookup:
-- Build a `work_identity_fingerprint` using weighted fields (title, composer, publisher, catalog no., year).
-- Use fuzzy matching for OCR noise and typographical variants.
-- Reject low-similarity candidates unless catalog number or publisher item code matches.
+1. Online score lookup (implemented primary path):
+- For each piece, build a work-identity query from the observed instruments, `catalog_number`,
+  `piece_title_guess`, and Script 02 `identity_candidates`, then render the prompt template at
+  `config/llm_prompts/lookup_instrumentation.txt`.
+- Invoke the GitHub Copilot CLI headlessly (`copilot -p <prompt> --allow-all-tools -s
+  --no-ask-user ...`, with `--allow-all-urls` or a restricted `--allow-url` list from
+  `config/score_lookup.yaml`). The model searches authoritative web sources (publisher, distributor,
+  library catalog) and returns exactly one JSON object between the
+  `<<<SCORE_JSON>>>` / `<<<END_SCORE_JSON>>>` sentinels.
+- The returned edition provides `ensemble_type`, `ensemble_display_name`, `work_identity`,
+  `evidence_sources`, and `expected_parts[{canonical_instrument, part_index, label, section,
+  required}]`. No instrumentation families are hardcoded; the parts come from the found score.
+- Reconcile the looked-up part slots against the piece's observed parts. Matching is count-based per
+  canonical instrument (robust to null `part_index`), preferring explicit index matches, then
+  consuming slots in order. Produces `present` / `missing` / `unexpected` sets.
+- Compute a required-part completeness score + tier, and `needs_review` when required parts are
+  missing, the score is missing, unexpected parts appear, or the Script 03 rollup already flagged
+  the piece.
 
-2. Multi-source reconciliation:
-- Compare instrumentation extracted from multiple sources.
-- Prefer sources in this order when conflicts occur:
-  - official publisher page
-  - official publisher catalog
-  - major distributor listing
-  - secondary library/catalog listing
-- Keep source URLs, snippets, and retrieval timestamps as evidence.
+2. Conservative fallback (per-piece degradation):
+- `--no-lookup` (or `enabled: false` in `config/score_lookup.yaml`) → `lookup_status: disabled`.
+- The Copilot CLI is not on `PATH`, times out, or exits non-zero → `lookup_status: error`.
+- The model reports `match_found: false` → `lookup_status: no_match`.
+- Match confidence below `confidence_threshold` → `lookup_status: low_confidence`.
+- In every fallback case the record declares no expected/missing parts, sets
+  `completeness_score: null` and `completeness_tier: unknown`, and is flagged `needs_review: true`.
+  Any evidence, notes, and resolved identity returned before the fallback are retained.
 
-3. LLM as extraction and adjudication layer (not primary truth source):
-- Use LLM to:
-  - extract structured instrumentation from messy listing text
-  - resolve aliasing and shorthand into canonical part names
-  - explain conflict resolution when two sources disagree
-  - distinguish optional/doubled parts from required core parts
-  - detect transposition-specific variants (e.g., clarinet in Bb vs A)
-  - preserve publisher wording alongside normalized labels
-- Constrain the prompt to only use retrieved evidence.
-- Require structured output with evidence references for each expected part.
-
-4. Fallback path when no authoritative listing is found:
-- Mark piece as `authority_not_found`.
-- Use observed parts plus conservative inference for a temporary expected set.
-- Downgrade confidence and force manual review.
+Note: lookup accuracy is bounded by what the model can find online and is network- and
+AI-credit-dependent and nondeterministic. `--mode incremental` caches per-piece results by
+fingerprint (observed parts + `has_score` + model + confidence threshold + prompt-template hash) to
+avoid re-spending credits on unchanged pieces.
 
 Outputs:
 
-- `data/expected_parts.jsonl`
+- `data/expected_parts.jsonl` (one record per piece)
+- `data/expected_parts_report.md` (Markdown summary)
+- `data/.expected_parts_checkpoint.json` (checkpoint; supports `--mode incremental`)
 
-Fields:
+Fields (`expected_parts.jsonl`, schema 2.0):
 
-- expected_parts (list)
-- missing_parts (list)
-- inference_method (`authority_lookup`, `authority_plus_llm`, `fallback_conservative`)
-- confidence
-- evidence_sources (list of URL/title/date/snippet)
-- authority_coverage (`full`, `partial`, `none`)
-- work_identity:
-  - title_normalized
-  - title_variants
-  - composer
-  - arranger
-  - publisher
-  - catalog_number
-  - edition
-  - series
-  - publication_year
-- source_match_diagnostics:
-  - candidate_count
-  - accepted_source_count
-  - rejected_candidates (with rejection reason)
-  - identity_match_score
-- instrumentation_structure:
-  - required_parts
-  - optional_parts
-  - alternate_substitutions (e.g., bassoon optional if bass clarinet present)
-  - doubles_and_cues
-  - transposition_requirements
-- completeness_flags:
-  - missing_required_parts
-  - missing_optional_parts
-  - ambiguous_equivalency_parts
+- `ensemble_type`, `ensemble_display_name` (inferred per piece from the found score)
+- `detection_method` (`authority_lookup` | `conservative_fallback` | `error`)
+- `inference_method` (`authority_lookup` | `fallback_conservative`)
+- `lookup_status` (`matched` | `low_confidence` | `no_match` | `disabled` | `error`)
+- `lookup_model`, `lookup_notes`, `identity_match_confidence`
+- `authority_coverage` (`full` when evidence sources were returned, else `none`),
+  `evidence_sources` (list of `{url, title, snippet, retrieved}`)
+- `expected_parts` (list of `{canonical_instrument, part_index, label, section, required, present}`)
+- `missing_parts`, `missing_required_parts`, `missing_optional_parts`
+- `unexpected_parts` (observed parts with no expected slot)
+- `has_score`, `score_expected`, `score_missing`
+- `completeness_score` (0..1, or `null` on fallback), `completeness_tier`
+  (`complete`/`near_complete`/`incomplete`/`severely_incomplete`/`unknown`)
+- `needs_review`, plus counts: `observed_instrument_count`, `expected_part_count`,
+  `missing_required_count`, `unexpected_part_count`
+- `work_identity` (`title_guess`, `catalog_number`, `identity_candidates` from Script 02, plus the
+  `resolved` edition identity returned by the lookup)
+- `catalog_number`, `piece_title_guess`, `piece_id`, `piece_folder`
+
+Deferred fields (populated once the authority path is wired): `source_match_diagnostics`
+(candidate/accepted counts, rejected candidates, identity_match_score), richer
+`instrumentation_structure` (optional/alternate substitutions, doubles/cues, transposition
+requirements), and normalized multi-field `work_identity` (title_variants, composer, publisher,
+edition, series, publication_year).
 
 ## 4.5 Script 05: Quality Checks (`05_quality_checks.py`)
 
@@ -634,9 +622,15 @@ Deliverable:
 
 ## Phase 3: Expected Parts + Missing Detection (2-4 days)
 
-- Implement Script 04 with authority-first source lookup
-- Add multi-source reconciliation and evidence scoring
-- Create first missing-parts outputs
+Status: implemented (Script 04, schema `2.0`) as an online score-lookup engine driven by the GitHub
+Copilot CLI: per piece it looks up the actual published edition, infers the ensemble type from that
+score, and reconciles the edition's real parts against the observed parts (present/missing/
+unexpected + completeness scoring + `needs_review`). Lookup is the primary path; disabled/failed/
+no-match/low-confidence pieces degrade to a conservative observed-only record flagged for review.
+
+- Implemented Script 04 lookup-based expected-parts inference + missing detection (done)
+- Copilot-CLI online lookup of the published edition + evidence sources (done)
+- First missing-parts outputs (done: `data/expected_parts.jsonl` + report)
 
 Deliverable:
 
