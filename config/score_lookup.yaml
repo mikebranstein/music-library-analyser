@@ -28,5 +28,10 @@ allowed_domains: []
 # Prompt template rendered with the per-piece work-identity query.
 prompt_template_path: config/llm_prompts/lookup_instrumentation.txt
 
+# Stream the Copilot CLI's output live to the log while it works, so a long-running lookup does
+# not look frozen. Also toggled at runtime by --stream-lookup / --no-stream-lookup. Set false to
+# run the CLI silently (only the final response is captured).
+stream_output: true
+
 # Extra arguments appended verbatim to the copilot invocation.
 extra_args: []

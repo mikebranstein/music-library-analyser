@@ -18,6 +18,7 @@ import json
 import logging
 import shutil
 import subprocess
+import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable
@@ -66,6 +67,7 @@ DEFAULT_LOOKUP_CONFIG: dict[str, Any] = {
     "confidence_threshold": 0.5,
     "allowed_domains": [],
     "prompt_template_path": "config/llm_prompts/lookup_instrumentation.txt",
+    "stream_output": True,
     "extra_args": [],
 }
 
@@ -206,11 +208,13 @@ def build_cli_args(config: dict[str, Any], prompt: str) -> list[str]:
         command,
         "-p", prompt,
         "--allow-all-tools",
-        "-s",
         "--no-color",
-        "--log-level", "none",
         "--no-ask-user",
     ]
+    # When streaming, leave the CLI verbose so its progress is visible; otherwise run silent so
+    # only the final response reaches stdout.
+    if not config.get("stream_output", True):
+        args += ["-s", "--log-level", "none"]
     domains = config.get("allowed_domains") or []
     if domains:
         args.append("--allow-url=" + ",".join(str(d) for d in domains))
@@ -248,27 +252,69 @@ def parse_lookup_response(stdout: str) -> dict[str, Any]:
 def run_copilot_lookup(prompt: str, config: dict[str, Any]) -> dict[str, Any]:
     """Invoke the Copilot CLI headlessly and return the parsed JSON result.
 
-    Isolated so tests can monkeypatch it; never called when lookup is disabled. Raises on a missing
-    binary, non-zero exit, timeout, or unparseable output.
+    Streams the CLI's output live to the log so a long-running lookup does not look frozen, while
+    still capturing the full text for parsing. Isolated so tests can monkeypatch it; never called
+    when lookup is disabled. Raises on a missing binary, non-zero exit, timeout, or unparseable
+    output.
     """
-    if not shutil.which(config.get("command", "copilot")):
-        raise FileNotFoundError(
-            f"Copilot CLI '{config.get('command', 'copilot')}' not found on PATH."
-        )
+    command = config.get("command", "copilot")
+    if not shutil.which(command):
+        raise FileNotFoundError(f"Copilot CLI '{command}' not found on PATH.")
     args = build_cli_args(config, prompt)
     timeout = float(config.get("timeout_seconds", 300) or 300)
-    proc = subprocess.run(
-        args,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
+    stream = bool(config.get("stream_output", True))
+
+    logger.info(
+        "Invoking Copilot CLI (model=%s); this can take up to %.0fs...",
+        config.get("model") or "CLI default",
+        timeout,
     )
+    start = time.perf_counter()
+
+    proc = subprocess.Popen(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+
+    timed_out = threading.Event()
+
+    def _kill_on_timeout() -> None:
+        timed_out.set()
+        proc.kill()
+
+    watchdog = threading.Timer(timeout, _kill_on_timeout)
+    watchdog.start()
+
+    captured: list[str] = []
+    try:
+        assert proc.stdout is not None
+        for raw_line in proc.stdout:
+            captured.append(raw_line)
+            line = raw_line.rstrip()
+            if stream and line:
+                logger.info("  copilot | %s", line)
+            elif not stream:
+                logger.debug("  copilot | %s", line)
+        proc.wait()
+    finally:
+        watchdog.cancel()
+
+    elapsed = time.perf_counter() - start
+    stdout = "".join(captured)
+
+    if timed_out.is_set():
+        raise TimeoutError(f"Copilot CLI timed out after {timeout:.0f}s.")
     if proc.returncode != 0:
         raise RuntimeError(
-            f"Copilot CLI exited {proc.returncode}: {(proc.stderr or '').strip()[:500]}"
+            f"Copilot CLI exited {proc.returncode} after {elapsed:.1f}s: "
+            f"{stdout.strip()[-500:]}"
         )
-    return parse_lookup_response(proc.stdout)
+
+    logger.info("Copilot CLI completed in %.1fs (%d chars captured).", elapsed, len(stdout))
+    return parse_lookup_response(stdout)
 
 
 # --- Expected-part normalization + reconciliation --------------------------------------------
@@ -824,6 +870,10 @@ def main(
     ),
     model: str = typer.Option("", help="Override the Copilot CLI model (blank = config/default)"),
     timeout: int = typer.Option(0, help="Override per-piece subprocess timeout in seconds (0=cfg)"),
+    stream_lookup: bool = typer.Option(
+        True, "--stream-lookup/--no-stream-lookup",
+        help="Stream the Copilot CLI's output live so long lookups don't look frozen",
+    ),
     log_level: str = typer.Option("INFO", help="DEBUG, INFO, WARNING, ERROR"),
 ) -> None:
     """Infer expected parts per piece via online score lookup and flag missing parts."""
@@ -849,6 +899,7 @@ def main(
         config["model"] = model.strip()
     if timeout > 0:
         config["timeout_seconds"] = timeout
+    config["stream_output"] = stream_lookup
 
     template_path = Path(config.get("prompt_template_path", "")).resolve()
     prompt_template, prompt_source = load_prompt_template(template_path)
@@ -888,12 +939,25 @@ def main(
     reused = 0
     fingerprints: dict[str, str] = {}
 
+    total_pieces = sum(1 for p in piece_records if p.get("piece_id"))
+    logger.info(
+        "Processing %d piece(s) in %s mode (lookup %s).",
+        total_pieces,
+        mode,
+        "enabled" if lookup_enabled else "disabled",
+    )
+
+    seen = 0
     for piece in piece_records:
         piece_id = piece.get("piece_id")
         if not piece_id:
             continue
+        seen += 1
         fingerprint = piece_fingerprint(piece, cfg_fp)
         fingerprints[piece_id] = fingerprint
+
+        title = piece.get("piece_title_guess") or piece.get("piece_folder") or piece_id
+        catalog = piece.get("catalog_number") or "?"
 
         prior = previous_records.get(piece_id)
         if (
@@ -904,8 +968,13 @@ def main(
         ):
             rebuilt.append(prior)
             reused += 1
+            logger.info("[%d/%d] Reusing cached result: %s (cat %s)", seen, total_pieces,
+                        title, catalog)
             continue
 
+        logger.info("[%d/%d] %s: %s (cat %s)", seen, total_pieces,
+                    "Looking up" if lookup_enabled else "Recording (no lookup)", title, catalog)
+        piece_start = time.perf_counter()
         try:
             record = infer_piece(
                 piece,
@@ -919,6 +988,12 @@ def main(
         except Exception as exc:
             logger.exception("Unexpected inference error on piece %s", piece_id)
             record = build_error_record(piece, run_id, str(exc))
+        logger.info(
+            "[%d/%d] Done: %s -> status=%s tier=%s (%.1fs)",
+            seen, total_pieces, title,
+            record.get("lookup_status"), record.get("completeness_tier"),
+            time.perf_counter() - piece_start,
+        )
         rebuilt.append(record)
         processed += 1
 

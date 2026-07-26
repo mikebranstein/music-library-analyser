@@ -174,6 +174,15 @@ def test_build_cli_args_allow_all_urls():
     assert "--no-ask-user" in args
     assert "--allow-all-urls" in args
     assert not any(a.startswith("--allow-url") for a in args)
+    # Streaming is the default, so the CLI is not run in silent mode.
+    assert "-s" not in args
+
+
+def test_build_cli_args_silent_when_not_streaming():
+    config = {**expected.DEFAULT_LOOKUP_CONFIG, "stream_output": False}
+    args = expected.build_cli_args(config, "PROMPT")
+    assert "-s" in args
+    assert "--log-level" in args and args[args.index("--log-level") + 1] == "none"
 
 
 def test_build_cli_args_allow_specific_urls_and_model():
