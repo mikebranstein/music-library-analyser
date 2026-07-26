@@ -1674,10 +1674,36 @@ def main(
     pdf_errors = 0
     page_error_total = 0
     pages_done = 0
+    processed_fingerprints: dict[str, str] = {}
 
     start_time = time.monotonic()
     current_folder: str | None = None
     folder_index = 0
+
+    def _flush_progress() -> None:
+        # Persist after each PDF so an interrupted run keeps finished work (page renders/OCR are
+        # already cached) and can resume via --mode incremental. All three JSONLs and the
+        # checkpoint are rewritten atomically; the checkpoint carries only completed fingerprints
+        # so a resumed run reuses done PDFs and retries the rest.
+        atomic_write_jsonl(output_text, sort_records(text_records))
+        atomic_write_jsonl(output_pages, sort_records(page_records))
+        atomic_write_jsonl(output_documents, sort_documents(document_records))
+        checkpoint_now = build_checkpoint(
+            RECORD_VERSION,
+            run_id,
+            dict(processed_fingerprints),
+            inventory_input=normalize_rel_path(inventory),
+            extracted_text_output=normalize_rel_path(output_text),
+            pages_output=normalize_rel_path(output_pages),
+            documents_output=normalize_rel_path(output_documents),
+            library_root=normalize_rel_path(library_root),
+            pdf_count_processed=processed_pdfs,
+            page_count_processed=pages_done,
+            reused_pdf_count=reused_pdfs,
+            ocr_enabled=ocr_config.enabled,
+            ocr_engine_version=ocr_config.engine_version,
+        )
+        atomic_write_json(checkpoint_path, checkpoint_now)
 
     for idx, item in enumerate(items, start=1):
         if item.piece_folder != current_folder:
@@ -1706,7 +1732,9 @@ def main(
             if item.pdf_path in prior_documents_by_path:
                 document_records.append(prior_documents_by_path[item.pdf_path])
             reused_pdfs += 1
+            processed_fingerprints[item.pdf_path] = item.file_fingerprint
             logger.info("%s reused (unchanged)", label)
+            _flush_progress()
             continue
 
         abs_path = (library_root / item.pdf_path).resolve()
@@ -1739,6 +1767,7 @@ def main(
         page_error_total += page_errs
         pages_done += page_total
         processed_pdfs += 1
+        processed_fingerprints[item.pdf_path] = item.file_fingerprint
 
         pdf_elapsed = time.monotonic() - pdf_start
         error_note = f", {page_errs} page errors" if page_errs else ""
@@ -1752,30 +1781,12 @@ def main(
             reused_pdfs,
             pages_done,
         )
+        _flush_progress()
 
     text_records = sort_records(text_records)
     page_records = sort_records(page_records)
     document_records = sort_documents(document_records)
-    atomic_write_jsonl(output_text, text_records)
-    atomic_write_jsonl(output_pages, page_records)
-    atomic_write_jsonl(output_documents, document_records)
-
-    new_checkpoint = build_checkpoint(
-        RECORD_VERSION,
-        run_id,
-        {item.pdf_path: item.file_fingerprint for item in items},
-        inventory_input=normalize_rel_path(inventory),
-        extracted_text_output=normalize_rel_path(output_text),
-        pages_output=normalize_rel_path(output_pages),
-        documents_output=normalize_rel_path(output_documents),
-        library_root=normalize_rel_path(library_root),
-        pdf_count_processed=processed_pdfs,
-        page_count_processed=pages_done,
-        reused_pdf_count=reused_pdfs,
-        ocr_enabled=ocr_config.enabled,
-        ocr_engine_version=ocr_config.engine_version,
-    )
-    atomic_write_json(checkpoint_path, new_checkpoint)
+    _flush_progress()
 
     total_elapsed = time.monotonic() - start_time
     logger.info(

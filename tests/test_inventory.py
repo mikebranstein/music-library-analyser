@@ -91,3 +91,80 @@ def test_inventory_full_and_incremental_reuse(tmp_path: Path) -> None:
     incremental_output_text = output_path.read_text(encoding="utf-8")
     assert incremental_output_text == full_output_text
     assert (output_path.parent / ".inventory_checkpoint.json").exists()
+
+
+def test_inventory_persists_incrementally_during_run(tmp_path: Path, monkeypatch) -> None:
+    """Records + checkpoint are written per PDF, not only once at the end."""
+    inventory = load_inventory_module()
+
+    library_root = tmp_path / "library"
+    make_one_page_pdf(library_root / "Piece A" / "Flute 1.pdf")
+    make_one_page_pdf(library_root / "Piece B" / "Oboe 1.pdf")
+
+    output_path = tmp_path / "data" / "raw_inventory.jsonl"
+
+    jsonl_writes = {"count": 0}
+    real_write_jsonl = inventory.atomic_write_jsonl
+
+    def counting_write_jsonl(path, records):
+        if Path(path).name == "raw_inventory.jsonl":
+            jsonl_writes["count"] += 1
+        return real_write_jsonl(path, records)
+
+    monkeypatch.setattr(inventory, "atomic_write_jsonl", counting_write_jsonl)
+
+    result = runner.invoke(
+        inventory.app,
+        [
+            "--library-root",
+            str(library_root),
+            "--output",
+            str(output_path),
+            "--mode",
+            "full",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert len(read_jsonl(output_path)) == 2
+    # One write per PDF (2) plus the final canonical write (>= 3): output is not written once.
+    assert jsonl_writes["count"] >= 3
+
+
+def test_inventory_resumes_from_partial_output(tmp_path: Path) -> None:
+    """An interrupted run leaves a partial output that --mode incremental reuses."""
+    inventory = load_inventory_module()
+
+    library_root = tmp_path / "library"
+    make_one_page_pdf(library_root / "Piece A" / "Flute 1.pdf")
+    make_one_page_pdf(library_root / "Piece B" / "Oboe 1.pdf")
+
+    output_path = tmp_path / "data" / "raw_inventory.jsonl"
+
+    # Simulate a crash after only the first PDF was persisted: a one-record output file.
+    full = runner.invoke(
+        inventory.app,
+        ["--library-root", str(library_root), "--output", str(output_path), "--mode", "full"],
+    )
+    assert full.exit_code == 0, full.stdout
+    all_records = read_jsonl(output_path)
+    inventory.atomic_write_jsonl(output_path, all_records[:1])
+
+    # Resuming in incremental mode reuses the surviving record and fills in the rest.
+    resumed = runner.invoke(
+        inventory.app,
+        [
+            "--library-root",
+            str(library_root),
+            "--output",
+            str(output_path),
+            "--mode",
+            "incremental",
+        ],
+    )
+    assert resumed.exit_code == 0, resumed.stdout
+    resumed_records = read_jsonl(output_path)
+    assert {r["pdf_path"] for r in resumed_records} == {
+        "Piece A/Flute 1.pdf",
+        "Piece B/Oboe 1.pdf",
+    }
+

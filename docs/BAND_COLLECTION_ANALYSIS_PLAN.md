@@ -709,6 +709,32 @@ convention Scripts 05-08 should follow whenever a run is long, expensive, or int
   longer correspond to a current piece are removed. Only `*.md` files inside the managed subfolder
   are touched.
 
+### Extension to Scripts 01-02 (as built)
+
+The same durability gap (finding A) existed in Scripts 01 and 03 (write output + checkpoint only
+after the full loop) and in Script 02, the most expensive stage (render + OCR + image metrics per
+PDF). Incremental persistence has been extended to **Scripts 01 and 02** (the ones whose runs are
+long enough for an interruption to be costly). Script 03 was intentionally left as end-only: its
+per-record work is trivial regex classification, and `observed_parts_by_piece.jsonl` plus
+`apply_ensemble` are cross-record aggregates that can only be finalized at the end.
+
+- **Script 01 (`01_inventory.py`):** after each PDF is recorded (processed, reused, or errored) it
+  atomically rewrites the sorted `raw_inventory.jsonl` and `.inventory_checkpoint.json` via a
+  local `_flush_progress()` helper. A final flush guarantees a canonical write even when no PDFs
+  are found. Resume works from the partial `raw_inventory.jsonl` (incremental reuse is driven by
+  per-record `file_fingerprint`).
+- **Script 02 (`02_extract_text_and_images.py`):** after each PDF completes (processed or reused)
+  it atomically rewrites all three outputs (`extracted_text.jsonl`, `pages.jsonl`,
+  `documents.jsonl`) and `.extraction_checkpoint.json`. The checkpoint now carries **only completed
+  fingerprints** (finding D fix — it previously wrote fingerprints for *all* inventory items
+  upfront), so a resumed `--mode incremental` run reuses finished PDFs (the dual guard: fingerprint
+  match **and** record present in the output) and retries the rest. The expensive per-page OCR was
+  already cached under `cache/ocr/`; incremental persistence adds durable resume for the assembled
+  records and checkpoint on top of that.
+- Both loops are single-threaded, so persistence is inline at the end of each iteration rather than
+  via `run_with_progress`'s `on_result` hook. No report splitting applies: Script 01 has no report
+  and Script 02's report is an end-of-run aggregate summary, not per-piece detail.
+
 ### Implications for Scripts 05-08
 
 - Script 05 (quality checks) already scores documents through `run_with_progress`; if its runs get

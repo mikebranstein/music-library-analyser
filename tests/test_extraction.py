@@ -340,6 +340,109 @@ def test_extract_identity_candidates():
     assert empty["copyright_year"] is None
 
 
+def test_extraction_persists_incrementally_during_run(tmp_path: Path, monkeypatch):
+    """The three JSONLs + checkpoint are written per PDF, not only once at the end."""
+    monkeypatch.chdir(tmp_path)
+    extract = load_module("02_extract_text_and_images.py", "extract_incremental_persist")
+
+    library_root = tmp_path / "library"
+    make_text_pdf(library_root / "Piece A" / "Flute 1.pdf", "FLUTE 1")
+    make_text_pdf(library_root / "Piece B" / "Oboe 1.pdf", "OBOE 1")
+
+    inventory_path = tmp_path / "data" / "raw_inventory.jsonl"
+    build_inventory(library_root, inventory_path)
+
+    output_text = tmp_path / "data" / "extracted_text.jsonl"
+
+    text_writes = {"count": 0}
+    real_write_jsonl = extract.atomic_write_jsonl
+
+    def counting_write_jsonl(path, records):
+        if Path(path).name == "extracted_text.jsonl":
+            text_writes["count"] += 1
+        return real_write_jsonl(path, records)
+
+    monkeypatch.setattr(extract, "atomic_write_jsonl", counting_write_jsonl)
+
+    result = runner.invoke(
+        extract.app,
+        [
+            "--library-root",
+            str(library_root),
+            "--inventory",
+            str(inventory_path),
+            "--output-text",
+            str(output_text),
+            "--output-pages",
+            str(tmp_path / "data" / "pages.jsonl"),
+            "--output-documents",
+            str(tmp_path / "data" / "documents.jsonl"),
+            "--cache-dir",
+            str(tmp_path / "cache"),
+            "--mode",
+            "full",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert len(read_jsonl(output_text)) == 2
+    # One write per PDF (2) plus the final canonical write (>= 3).
+    assert text_writes["count"] >= 3
+
+
+def test_extraction_resumes_after_partial_run(tmp_path: Path, monkeypatch):
+    """A run interrupted after one PDF resumes: the done PDF is reused, the rest processed."""
+    monkeypatch.chdir(tmp_path)
+    extract = load_module("02_extract_text_and_images.py", "extract_resume")
+
+    library_root = tmp_path / "library"
+    make_text_pdf(library_root / "Piece A" / "Flute 1.pdf", "FLUTE 1")
+    make_text_pdf(library_root / "Piece B" / "Oboe 1.pdf", "OBOE 1")
+
+    inventory_path = tmp_path / "data" / "raw_inventory.jsonl"
+    build_inventory(library_root, inventory_path)
+
+    output_text = tmp_path / "data" / "extracted_text.jsonl"
+    output_pages = tmp_path / "data" / "pages.jsonl"
+    output_documents = tmp_path / "data" / "documents.jsonl"
+    cache_dir = tmp_path / "cache"
+    args = [
+        "--library-root", str(library_root),
+        "--inventory", str(inventory_path),
+        "--output-text", str(output_text),
+        "--output-pages", str(output_pages),
+        "--output-documents", str(output_documents),
+        "--cache-dir", str(cache_dir),
+    ]
+
+    # Full run produces both PDFs; then simulate a crash after only "Piece A" was persisted by
+    # trimming every output + the checkpoint fingerprints down to that first PDF.
+    full = runner.invoke(extract.app, [*args, "--mode", "full"])
+    assert full.exit_code == 0, full.stdout
+    keep = "Piece A/Flute 1.pdf"
+    for path in (output_text, output_pages, output_documents):
+        extract.atomic_write_jsonl(
+            path, [r for r in read_jsonl(path) if r.get("pdf_path") == keep]
+        )
+    ckpt_path = output_text.parent / ".extraction_checkpoint.json"
+    checkpoint = read_json(ckpt_path)
+    checkpoint["fingerprints"] = {
+        k: v for k, v in checkpoint["fingerprints"].items() if k == keep
+    }
+    extract.atomic_write_json(ckpt_path, checkpoint)
+
+    resumed = runner.invoke(extract.app, [*args, "--mode", "incremental"])
+    assert resumed.exit_code == 0, resumed.stdout
+
+    after = read_json(ckpt_path)
+    assert after["reused_pdf_count"] == 1
+    assert after["pdf_count_processed"] == 1
+    assert {r["pdf_path"] for r in read_jsonl(output_documents)} == {
+        "Piece A/Flute 1.pdf",
+        "Piece B/Oboe 1.pdf",
+    }
+
+
+
 def test_detect_staves_projection():
     extract = load_module("02_extract_text_and_images.py", "extract_staves")
     if extract.np is None:

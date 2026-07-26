@@ -334,6 +334,22 @@ def main(
     error_count = 0
     reused_count = 0
 
+    def _flush_progress() -> None:
+        # Persist after each PDF so an interrupted run keeps finished work and can resume via
+        # --mode incremental: both the JSONL and checkpoint are rewritten atomically from the
+        # records completed so far (crash-safe temp-file + os.replace).
+        snapshot = sorted(rebuilt_records, key=lambda rec: rec["pdf_path"])
+        atomic_write_jsonl(output, snapshot)
+        checkpoint = build_checkpoint(
+            RECORD_VERSION,
+            run_id,
+            {rec["pdf_path"]: rec["file_fingerprint"] for rec in snapshot},
+            library_root=normalize_rel_path(library_root),
+            output=normalize_rel_path(output),
+            record_count=len(snapshot),
+        )
+        atomic_write_json(checkpoint_path, checkpoint)
+
     for entry in entries:
         try:
             stat = entry.abs_path.stat()
@@ -347,18 +363,21 @@ def main(
             rebuilt_records.append(record)
             error_count += 1
             logging.warning("Error on %s: %s", entry.rel_path, record["error_message"])
+            _flush_progress()
             continue
         except PermissionError:
             record = build_error_record(entry, run_id, "Permission denied")
             rebuilt_records.append(record)
             error_count += 1
             logging.warning("Error on %s: %s", entry.rel_path, record["error_message"])
+            _flush_progress()
             continue
 
         prior_record = previous_records_map.get(entry.rel_path)
         if mode == "incremental" and should_reuse_record(prior_record, current_fingerprint):
             rebuilt_records.append(prior_record)
             reused_count += 1
+            _flush_progress()
             continue
 
         try:
@@ -384,18 +403,10 @@ def main(
             error_count += 1
             logging.warning("Error on %s: %s", entry.rel_path, record["error_message"])
 
-    rebuilt_records.sort(key=lambda rec: rec["pdf_path"])
-    atomic_write_jsonl(output, rebuilt_records)
+        _flush_progress()
 
-    new_checkpoint = build_checkpoint(
-        RECORD_VERSION,
-        run_id,
-        {rec["pdf_path"]: rec["file_fingerprint"] for rec in rebuilt_records},
-        library_root=normalize_rel_path(library_root),
-        output=normalize_rel_path(output),
-        record_count=len(rebuilt_records),
-    )
-    atomic_write_json(checkpoint_path, new_checkpoint)
+    # Final canonical write (also guarantees an output + empty checkpoint when no PDFs exist).
+    _flush_progress()
 
     logging.info(
         "Inventory completed: total=%d reused=%d success=%d warnings=%d errors=%d output=%s",
