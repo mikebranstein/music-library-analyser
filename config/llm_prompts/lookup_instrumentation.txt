@@ -70,34 +70,34 @@ If sources conflict:
 
 ***
 
-## Using digitized score images and OCR
+## Digitized score images (report URLs; do NOT OCR them yourself)
 
-Some catalog records and distributor/archive pages link to images of the score, title page, instrumentation page, contents page, or individual parts.
+Some catalog records and distributor/archive pages link to images of the score, title page,
+instrumentation page, contents page, or individual parts. These images are valuable because they
+often show the exact instrumentation.
 
-When such images are available and accessible:
+**Do not OCR or visually read these images yourself, and do not derive `expected_parts` from
+them.** A separate local step downloads and OCRs these images. Your job is only to **find and
+report their URLs** so that step can read them.
 
-* Open or fetch the image or image page.
-* If OCR or visual text extraction is available, use it to read relevant text.
-* Prioritize OCR from pages that show:
-  * Title page
-  * Publisher or plate/catalog information
-  * Composer/arranger credits
-  * Instrumentation or “Besetzung” / “Instrumentation” / “Stimmen” / “Orchestration” lists
-  * Score first page with staff labels
-  * Part covers or part-name lists
-* Use OCR text only when it is legible enough to support the claim.
-* Quote the OCR-derived text in `evidence_sources[].snippet` when it supports identity or instrumentation.
-* In `notes`, mention when instrumentation was derived from OCR or visible score staff labels.
+When you find such an image (or an image-viewer page that exposes a direct image URL):
 
-Do **not** overread unclear images:
+* Collect the **direct image URL** (the URL that returns the actual image bytes, e.g. a
+  `.jpg`/`.png`/`.tif` or a viewer's full-resolution image endpoint), not just the HTML page.
+* Add one entry per image to `candidate_score_images` (see the contract), classifying each with a
+  `kind` of `title_page`, `instrumentation_page`, `contents_page`, `score_first_page`,
+  `part_list`, or `other`.
+* Prefer images that are most likely to show instrumentation: title pages, explicit
+  instrumentation / "Besetzung" / "Instrumentation" / "Stimmen" lists, contents pages, the score's
+  first page with staff labels, and part-cover/part-name lists.
+* If an image URL is temporary, signed, or expiring, still report the exact URL you found, and
+  include the stable catalog/parent page in `source_url` so the local step can refresh it if
+  needed.
+* Do not fabricate image URLs. Only report URLs you actually located.
 
-* If OCR is partial, noisy, cropped, low-resolution, or ambiguous, use it only as supporting evidence.
-* Do not infer missing instruments from incomplete staff systems unless the visible source clearly represents a full instrumentation list.
-* Do not treat a single visible score page as proof of the complete instrumentation unless it clearly shows the complete score layout or instrumentation list.
-* Do not use OCR from a different edition, reprint, arrangement, or unrelated item.
-* If the image cannot be fetched, cannot be OCR’d, or is illegible, say so in `notes` and do not cite it as supporting unavailable details.
-
-If an image URL is temporary, signed, or expiring, still cite the exact consulted URL if it was opened successfully. If the stable catalog record page also identifies the image, include the stable catalog page as an additional evidence source when consulted.
+You may still report `expected_parts` when an authoritative **text** source (publisher page,
+distributor listing, catalog record, printed instrumentation text) explicitly lists the
+instrumentation. Do not populate `expected_parts` from images.
 
 ***
 
@@ -110,13 +110,15 @@ Use all supplied clues:
 * Source folder name
 * Identity candidates, even if noisy or partial
 * Observed instruments only to disambiguate plausible editions and sanity-check ensemble type
-* OCR text from consulted score images, if available and legible
 
 Do **not** let `{observed_summary}` supply missing expected parts.
 
-The `expected_parts` list must come from the identified published edition, an authoritative source’s instrumentation text, or legible OCR/visible text from a score image belonging to the identified edition.
+The `expected_parts` list must come from the identified published edition or an authoritative
+source's instrumentation **text**. Report score-image URLs for the local OCR step instead of
+reading images yourself.
 
-If the observed parts strongly disagree with the found edition, lower confidence or set `match_found=false` unless the evidence explains the discrepancy.
+If the observed parts strongly disagree with the found edition, lower confidence or set
+`match_found=false` unless the evidence explains the discrepancy.
 
 ***
 
@@ -210,12 +212,12 @@ Set `part_index` to the printed part number when the edition numbers or ranks pa
 * For split/divisi within a single printed part, do not create extra entries unless separate printed parts are listed.
 * For doublings, use the primary printed part as `canonical_instrument` and describe the doubling in `label` or `notes` if needed.
 
-When deriving parts from score images or OCR:
+When reporting instrumentation from **text** sources:
 
-* Use printed part names, instrumentation lists, or visible staff labels.
+* Use printed part names and instrumentation lists exactly as the source states them.
 * Preserve the source’s printed label in `label`.
 * Do not create extra parts from temporary cue staves, ossia staves, condensed score reductions, or short-term divisi unless they correspond to separately named printed parts.
-* If a score page displays condensed or transposed system labels, use them only when they clearly identify the edition’s instrumentation.
+* Do not derive `expected_parts` from images — report those images in `candidate_score_images` for the local OCR step instead.
 
 Set `required` as follows:
 
@@ -255,10 +257,9 @@ Do not cite a source for claims it does not explicitly support.
 
 For image or OCR evidence:
 
-* Include the image URL if the image itself was consulted.
-* Include the stable catalog or parent page URL if it was consulted and helps identify the image.
-* Do not cite an image as evidence for instrumentation unless the relevant text or staff labels were actually visible or OCR-readable.
-* If OCR is uncertain, reflect that uncertainty in both `snippet` and `notes`.
+* Report score/instrumentation image URLs in `candidate_score_images`, not as OCR-derived instrumentation.
+* Include the stable catalog or parent page URL in `evidence_sources` if it was consulted and helps identify the image or edition.
+* Do not OCR images yourself; the local step reads them.
 
 ***
 
@@ -326,6 +327,14 @@ Keep the field names, nesting, and value types exactly as shown.
 "label": "Solo Cornet",
 "section": "cornets\_trumpets",
 "required": true
+}
+],
+"candidate\_score\_images": \[
+{
+"url": "direct\_image\_url\_returning\_image\_bytes",
+"kind": "instrumentation\_page",
+"source\_url": "stable\_catalog\_or\_parent\_page\_url",
+"notes": "why this image is likely to show instrumentation"
 }
 ],
 "evidence\_sources": \[

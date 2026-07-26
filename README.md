@@ -58,11 +58,11 @@ Primary outputs:
 - Write `data/part_predictions.jsonl`, a per-piece `data/observed_parts_by_piece.jsonl` rollup, and a Markdown report (`data/part_classification_report.md`); an LLM fallback hook exists but is disabled/unwired
 
 4. `04_expected_parts_inference.py`
-- Look up each piece's *actual published edition* online via the GitHub Copilot CLI (`copilot -p ...`, config in `config/score_lookup.yaml`, prompt in `config/llm_prompts/lookup_instrumentation.txt`); the ensemble type is inferred per piece from the found score rather than assumed
-- Reconcile the looked-up part slots against observed parts (count-based, robust to null part indices) into present / missing / unexpected sets
-- Score required-part completeness + tier, flag `score_missing` and `needs_review`, and record `evidence_sources` + resolved work identity
-- Degrade conservatively (`--no-lookup`, CLI missing/error, `no_match`, or `low_confidence`): declare no missing parts, set `completeness_score: null`, and flag for review — never fabricate a missing part
-- Emit `data/expected_parts.jsonl` (schema 2.0), a summary report (`data/expected_parts_report.md`), and a per-piece instrumentation report listing each piece's expected parts (`data/expected_instrumentation.md`); `--mode incremental` caches per-piece results by fingerprint to avoid re-spending AI credits
+- Establish each piece's *actual published edition* instrumentation via a three-stage engine that stops at the first confident result: **Stage A** OCR a local score (from `part_predictions.jsonl` + `extracted_text.jsonl`, re-OCR via PyMuPDF/Tesseract only if the reused text is thin) and summarize it with the Copilot CLI; **Stage B** online authority lookup via the Copilot CLI (`copilot -p ...`, config in `config/score_lookup.yaml`, prompt in `config/llm_prompts/lookup_instrumentation.txt`); **Stage C** download + OCR any score images the lookup returns, then summarize (prompt in `config/llm_prompts/summarize_score_instrumentation.txt`). The ensemble type is inferred per piece from the found score rather than assumed
+- Reconcile the resulting part slots against observed parts (count-based, robust to null part indices) into present / missing / unexpected sets
+- Score required-part completeness + tier, flag `score_missing` and `needs_review`, and record `detection_method`, `ocr_source`, `local_score_path`, `evidence_sources`, `candidate_score_images`, and resolved work identity
+- Toggle stages with `--local-score/--no-local-score`, `--lookup/--no-lookup`, and `--image-ocr/--no-image-ocr`; degrade conservatively (all stages off/failed, CLI missing/error, `no_match`, or `low_confidence`): declare no missing parts, set `completeness_score: null`, and flag for review — never fabricate a missing part
+- Emit `data/expected_parts.jsonl` (schema 2.1), a summary report (`data/expected_parts_report.md`), and a per-piece instrumentation report listing each piece's expected parts (`data/expected_instrumentation.md`); `--mode incremental` caches per-piece results by fingerprint to avoid re-spending AI credits or re-OCR
 
 5. `05_quality_checks.py`
 - Score scan quality
@@ -98,6 +98,7 @@ project-root/
     llm_prompts/
       classify_part.txt
       lookup_instrumentation.txt
+      summarize_score_instrumentation.txt
       verify_low_confidence.txt
   data/
     raw_inventory.jsonl
@@ -126,7 +127,9 @@ project-root/
 
 Expected-parts inference methods:
 
+- `local_score_ocr`
 - `authority_lookup`
+- `score_image_ocr`
 - `fallback_conservative`
 
 Confidence threshold guidance:

@@ -29,6 +29,31 @@ allowed_domains: []
 # Prompt template rendered with the per-piece work-identity query.
 prompt_template_path: config/llm_prompts/lookup_instrumentation.txt
 
+# --- Local score OCR (Stage A, tried before the online lookup) ------------------------------
+# When a piece has a local score PDF (flagged is_score by Script 03), Script 04 reads that score's
+# text (reusing Script 02's extracted/OCR text) and asks the CLI to summarize it into the
+# instrumentation contract. Also toggled at runtime by --local-score / --no-local-score.
+local_score_enabled: true
+
+# Prompt template used to summarize local-score / image OCR text into the instrumentation contract.
+summarize_prompt_template_path: config/llm_prompts/summarize_score_instrumentation.txt
+
+# Number of leading score pages whose text is concatenated for summarization (instrumentation is
+# usually on the first page or two).
+max_score_pages: 2
+
+# If the reused Script 02 text for the score is shorter than this many characters, Script 04
+# re-renders and re-OCRs the score's leading pages at reocr_dpi (requires pymupdf + pytesseract;
+# degrades gracefully when unavailable or the PDF cannot be resolved).
+min_score_text_chars: 200
+reocr_dpi: 300
+
+# --- Remote image OCR (Stage C, fallback when the online lookup returns no instrumentation) --
+# When the online lookup returns candidate_score_images but no instrumentation, Script 04
+# downloads each image into a per-piece temp folder, OCRs it locally, and summarizes the text.
+# Also toggled at runtime by --image-ocr / --no-image-ocr.
+image_ocr_enabled: true
+
 # Stream the Copilot CLI's output live to the log while it works, so a long-running lookup does
 # not look frozen. Also toggled at runtime by --stream-lookup / --no-stream-lookup. Set false to
 # run the CLI silently (only the final response is captured).

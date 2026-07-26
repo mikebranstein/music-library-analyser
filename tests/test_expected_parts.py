@@ -393,6 +393,163 @@ def test_infer_piece_lookup_error_conservative():
     assert rec["needs_review"] is True
 
 
+# --- Stage A: local score OCR ----------------------------------------------------------------
+
+
+_LONG_SCORE_TEXT = (
+    "Full Score - Solo Cornet in Bb - Euphonium - "
+    + ("staff labels and instrumentation list. " * 20)
+)
+
+
+def test_infer_piece_stage_a_local_score_ocr():
+    piece = _piece(observed=[_observed("cornet", 1), _observed("euphonium", 1)])
+    parts = [
+        {"canonical_instrument": "cornet", "part_index": 1, "label": "Cornet 1", "required": True},
+        {"canonical_instrument": "euphonium", "part_index": 1, "label": "Euph", "required": True},
+    ]
+
+    def summarize(prompt: str, config: dict[str, Any]) -> dict[str, Any]:
+        return _score_result(parts)
+
+    def lookup(prompt: str, config: dict[str, Any]) -> dict[str, Any]:
+        raise AssertionError("online lookup must not run when local score OCR succeeds")
+
+    def score_provider(p: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
+        return _LONG_SCORE_TEXT, {"pdf_path": "band/p1/full_score.pdf", "score_type": "full"}
+
+    rec = expected.infer_piece(
+        piece, None, "run1",
+        config=dict(expected.DEFAULT_LOOKUP_CONFIG),
+        prompt_template="{title_guess}",
+        lookup_enabled=True,
+        lookup_fn=lookup,
+        summarize_fn=summarize,
+        summarize_template="{score_text}",
+        score_text_provider=score_provider,
+    )
+    assert rec["lookup_status"] == "matched"
+    assert rec["detection_method"] == "local_score_ocr"
+    assert rec["inference_method"] == "local_score_ocr"
+    assert rec["ocr_source"] == "local_score"
+    assert rec["local_score_path"] == "band/p1/full_score.pdf"
+    assert rec["completeness_tier"] == "complete"
+
+
+def test_infer_piece_stage_a_thin_text_falls_through_to_lookup():
+    piece = _piece(observed=[_observed("cornet", 1)])
+    parts = [
+        {"canonical_instrument": "cornet", "part_index": 1, "label": "Cornet 1", "required": True},
+    ]
+
+    def score_provider(p: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
+        # Below min_score_text_chars, so Stage A must skip and defer to the online lookup.
+        return "tiny", {"pdf_path": "band/p1/full_score.pdf", "score_type": "full"}
+
+    rec = expected.infer_piece(
+        piece, None, "run1",
+        config=dict(expected.DEFAULT_LOOKUP_CONFIG),
+        prompt_template="{title_guess}",
+        lookup_enabled=True,
+        lookup_fn=lambda p, c: _score_result(parts),
+        summarize_fn=lambda p, c: _score_result(parts),
+        summarize_template="{score_text}",
+        score_text_provider=score_provider,
+    )
+    assert rec["lookup_status"] == "matched"
+    assert rec["detection_method"] == "authority_lookup"
+    assert rec["ocr_source"] is None
+
+
+def test_infer_piece_stage_a_no_score_defers_to_lookup():
+    piece = _piece(observed=[_observed("cornet", 1)])
+    parts = [
+        {"canonical_instrument": "cornet", "part_index": 1, "label": "Cornet 1", "required": True},
+    ]
+
+    def score_provider(p: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
+        return None, None  # no local score found for this piece
+
+    rec = expected.infer_piece(
+        piece, None, "run1",
+        config=dict(expected.DEFAULT_LOOKUP_CONFIG),
+        prompt_template="{title_guess}",
+        lookup_enabled=True,
+        lookup_fn=lambda p, c: _score_result(parts),
+        summarize_fn=lambda p, c: _score_result(parts),
+        summarize_template="{score_text}",
+        score_text_provider=score_provider,
+    )
+    assert rec["lookup_status"] == "matched"
+    assert rec["detection_method"] == "authority_lookup"
+
+
+# --- Stage C: remote image OCR ---------------------------------------------------------------
+
+
+def test_infer_piece_stage_c_image_ocr():
+    piece = _piece(observed=[_observed("cornet", 1), _observed("euphonium", 1)])
+    parts = [
+        {"canonical_instrument": "cornet", "part_index": 1, "label": "Cornet 1", "required": True},
+        {"canonical_instrument": "euphonium", "part_index": 1, "label": "Euph", "required": True},
+    ]
+    # Online lookup matches an edition but returns no expected parts, only candidate images.
+    lookup_result = _score_result([], match_found=True, confidence=0.9)
+    lookup_result["candidate_score_images"] = [
+        {"url": "https://libris.kb.se/score_page1.jpg", "kind": "score_page"},
+    ]
+
+    fetched: list[str] = []
+
+    def image_fetch(url: str, dest_dir: Path, index: int) -> Path:
+        fetched.append(url)
+        p = dest_dir / f"image_{index:02d}.jpg"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"fake")
+        return p
+
+    def image_ocr(path: Path) -> str:
+        return _LONG_SCORE_TEXT
+
+    rec = expected.infer_piece(
+        piece, None, "run1",
+        config=dict(expected.DEFAULT_LOOKUP_CONFIG),
+        prompt_template="{title_guess}",
+        lookup_enabled=True,
+        lookup_fn=lambda p, c: lookup_result,
+        summarize_fn=lambda p, c: _score_result(parts),
+        summarize_template="{score_text}",
+        image_fetch_fn=image_fetch,
+        image_ocr_fn=image_ocr,
+    )
+    assert rec["lookup_status"] == "matched"
+    assert rec["detection_method"] == "score_image_ocr"
+    assert rec["inference_method"] == "score_image_ocr"
+    assert rec["ocr_source"] == "score_image"
+    assert fetched == ["https://libris.kb.se/score_page1.jpg"]
+
+
+def test_infer_piece_stage_c_no_images_stays_conservative():
+    piece = _piece(observed=[_observed("cornet", 1)])
+    # Matched edition, no parts, and no candidate images -> conservative NO_MATCH.
+    lookup_result = _score_result([], match_found=True, confidence=0.9)
+
+    rec = expected.infer_piece(
+        piece, None, "run1",
+        config=dict(expected.DEFAULT_LOOKUP_CONFIG),
+        prompt_template="{title_guess}",
+        lookup_enabled=True,
+        lookup_fn=lambda p, c: lookup_result,
+        summarize_fn=lambda p, c: _score_result([]),
+        summarize_template="{score_text}",
+        image_fetch_fn=lambda u, d, i: None,
+        image_ocr_fn=lambda p: "",
+    )
+    assert rec["lookup_status"] == "no_match"
+    assert rec["expected_parts"] == []
+    assert rec["ocr_source"] is None
+
+
 # --- Instrumentation report ------------------------------------------------------------------
 
 
@@ -477,6 +634,107 @@ def _run_cli(tmp_path: Path, monkeypatch, results_by_piece: dict[str, dict[str, 
         args += extra
     result = runner.invoke(expected.app, args)
     return result, out_path, report_path, calls
+
+
+def test_e2e_local_score_stage_a(tmp_path: Path, monkeypatch):
+    """End-to-end: a piece with a local score is inferred via Stage A (no online lookup)."""
+    pieces = [_piece("p1", observed=[_observed("cornet", 1), _observed("euphonium", 1)])]
+    _write_jsonl(tmp_path / "pieces.jsonl", pieces)
+    _write_jsonl(tmp_path / "documents.jsonl", [])
+    _write_jsonl(tmp_path / "part_predictions.jsonl", [
+        {
+            "pdf_path": "band/p1/full_score.pdf",
+            "piece_id": "p1",
+            "is_score": True,
+            "score_type": "full",
+            "file_fingerprint": "abc123",
+            "piece_folder": "folder_p1",
+        },
+    ])
+    _write_jsonl(tmp_path / "extracted_text.jsonl", [
+        {
+            "pdf_path": "band/p1/full_score.pdf",
+            "piece_id": "p1",
+            "page_num": 1,
+            "embedded_text": _LONG_SCORE_TEXT,
+            "ocr_text": "",
+            "text_source": "embedded",
+            "header_text_candidates": ["Full Score"],
+            "word_count": 120,
+        },
+    ])
+
+    parts = [
+        {"canonical_instrument": "cornet", "part_index": 1, "label": "Cornet 1", "required": True},
+        {"canonical_instrument": "euphonium", "part_index": 1, "label": "Euph", "required": True},
+    ]
+    results = {"p1": _score_result(parts)}
+
+    result, out_path, _report, calls = _run_cli(
+        tmp_path, monkeypatch, results,
+        extra=[
+            "--part-predictions", str(tmp_path / "part_predictions.jsonl"),
+            "--extracted-text", str(tmp_path / "extracted_text.jsonl"),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    records = [json.loads(line) for line in out_path.read_text().splitlines() if line.strip()]
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["detection_method"] == "local_score_ocr"
+    assert rec["ocr_source"] == "local_score"
+    assert rec["local_score_path"] == "band/p1/full_score.pdf"
+    # Stage A succeeded, so the summarize call ran but the online lookup (Stage B) did not; both
+    # go through the same monkeypatched fake, so exactly one call is expected.
+    assert calls["count"] == 1
+
+
+def test_e2e_no_local_score_flag_skips_stage_a(tmp_path: Path, monkeypatch):
+    """With --no-local-score, a local score is ignored and the online lookup is used instead."""
+    pieces = [_piece("p1", observed=[_observed("cornet", 1)])]
+    _write_jsonl(tmp_path / "pieces.jsonl", pieces)
+    _write_jsonl(tmp_path / "documents.jsonl", [])
+    _write_jsonl(tmp_path / "part_predictions.jsonl", [
+        {
+            "pdf_path": "band/p1/full_score.pdf",
+            "piece_id": "p1",
+            "is_score": True,
+            "score_type": "full",
+            "file_fingerprint": "abc123",
+            "piece_folder": "folder_p1",
+        },
+    ])
+    _write_jsonl(tmp_path / "extracted_text.jsonl", [
+        {
+            "pdf_path": "band/p1/full_score.pdf",
+            "piece_id": "p1",
+            "page_num": 1,
+            "embedded_text": _LONG_SCORE_TEXT,
+            "ocr_text": "",
+            "text_source": "embedded",
+            "header_text_candidates": [],
+            "word_count": 120,
+        },
+    ])
+
+    parts = [
+        {"canonical_instrument": "cornet", "part_index": 1, "label": "Cornet 1", "required": True},
+    ]
+    results = {"p1": _score_result(parts)}
+
+    result, out_path, _report, _calls = _run_cli(
+        tmp_path, monkeypatch, results,
+        extra=[
+            "--no-local-score",
+            "--part-predictions", str(tmp_path / "part_predictions.jsonl"),
+            "--extracted-text", str(tmp_path / "extracted_text.jsonl"),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    records = [json.loads(line) for line in out_path.read_text().splitlines() if line.strip()]
+    assert records[0]["detection_method"] == "authority_lookup"
 
 
 def test_e2e_full_run(tmp_path: Path, monkeypatch):

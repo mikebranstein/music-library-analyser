@@ -4,12 +4,23 @@ Consumes the Script 03 per-piece observed-parts rollup (``data/observed_parts_by
 and writes one expected-parts record per piece to ``data/expected_parts.jsonl`` plus a Markdown
 report.
 
-The primary inference path is an online lookup of the *actual published score*: for each piece the
-script builds a work-identity query and asks the GitHub Copilot CLI (``copilot -p ...``) to search
-authoritative web sources and return that edition's real instrumentation. The ensemble type is not
-hardcoded; it is whatever the found score is. When lookup is disabled, finds no confident match, or
-fails, the piece degrades to a conservative, observed-only record flagged for review -- it never
-fabricates a "missing" part without an authoritative source.
+Inference runs in up to three stages, stopping at the first that yields a confident
+instrumentation contract:
+
+1. **Local score OCR** (``local_score_ocr``): if Script 03 flagged a local score PDF for the
+   piece, read that score's text (reusing Script 02's extracted/OCR text, re-OCRing the leading
+   pages only when that text is too thin) and ask the LLM to summarize it into the instrumentation
+   contract.
+2. **Online authority lookup** (``authority_lookup``): ask the GitHub Copilot CLI to find the
+   *actual published score* online and return its real instrumentation from authoritative text
+   sources, plus candidate score-image URLs. This is the previous behavior.
+3. **Remote image OCR** (``score_image_ocr``): when the online lookup returns candidate score
+   images but no instrumentation, download those images into a per-piece temp folder, OCR them
+   locally, and summarize the OCR text into the contract.
+
+When every stage is disabled, finds no confident match, or fails, the piece degrades to a
+conservative, observed-only record flagged for review -- it never fabricates a "missing" part
+without an authoritative source.
 """
 
 from __future__ import annotations
@@ -18,8 +29,11 @@ import json
 import logging
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
+import urllib.parse
+import urllib.request
 from collections import defaultdict
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -32,6 +46,20 @@ try:
     import yaml  # type: ignore
 except Exception:  # pragma: no cover - optional dependency
     yaml = None
+
+# Optional imaging/OCR deps used only by the local-score re-OCR and remote-image OCR fallbacks.
+# They degrade gracefully: when unavailable, those stages are skipped with a logged warning.
+try:  # pragma: no cover - exercised only when the toolchain is installed
+    import fitz  # type: ignore  # PyMuPDF, for rendering score PDF pages
+except Exception:  # pragma: no cover - optional dependency
+    fitz = None
+
+try:  # pragma: no cover - exercised only when the toolchain is installed
+    import pytesseract  # type: ignore
+    from PIL import Image  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    pytesseract = None
+    Image = None
 
 from scripts._common import (
     COMPLETENESS_TIER_ORDER as TIER_ORDER,
@@ -60,7 +88,7 @@ from scripts._common import (
     utc_now_iso,
 )
 
-RECORD_VERSION = "2.0"
+RECORD_VERSION = "2.1"
 
 CHECKPOINT_FILENAME = ".expected_parts_checkpoint.json"
 
@@ -71,6 +99,15 @@ logger = logging.getLogger("script04.expected")
 # Completeness tier thresholds (fraction of required parts present).
 NEAR_COMPLETE = 0.85
 INCOMPLETE = 0.5
+
+# detection_method / inference_method values for the four resolution paths.
+METHOD_LOCAL_SCORE = "local_score_ocr"
+METHOD_AUTHORITY = "authority_lookup"
+METHOD_SCORE_IMAGE = "score_image_ocr"
+METHOD_FALLBACK = "conservative_fallback"
+
+# Order Script 03 score types are preferred when picking a piece's best local score to OCR.
+SCORE_TYPE_PREFERENCE = {"full": 0, "conductor": 1, "condensed": 2, "short": 3}
 
 # Sentinels the lookup prompt wraps its JSON result in.
 RESULT_START = "<<<SCORE_JSON>>>"
@@ -88,6 +125,14 @@ DEFAULT_LOOKUP_CONFIG: dict[str, Any] = {
     "prompt_template_path": "config/llm_prompts/lookup_instrumentation.txt",
     "stream_output": True,
     "extra_args": [],
+    # Local score OCR (Stage A).
+    "local_score_enabled": True,
+    "summarize_prompt_template_path": "config/llm_prompts/summarize_score_instrumentation.txt",
+    "max_score_pages": 2,
+    "min_score_text_chars": 200,
+    "reocr_dpi": 300,
+    # Remote image OCR (Stage C).
+    "image_ocr_enabled": True,
 }
 
 DEFAULT_PROMPT_TEMPLATE = (
@@ -103,6 +148,34 @@ DEFAULT_PROMPT_TEMPLATE = (
     "named printed part with a lowercase snake_case canonical_instrument, a part_index (or null),\n"
     "a label, a section, and a required flag. If you cannot confidently identify the edition, set\n"
     "match_found to false and explain in notes. Never invent an edition or a source URL.\n\n"
+    "Report score/instrumentation image URLs you find in candidate_score_images (do NOT OCR them\n"
+    "yourself; a local step reads them). Only populate expected_parts from authoritative text.\n\n"
+    "Respond with exactly one JSON object between the sentinel lines and nothing else:\n"
+    f"{RESULT_START}\n"
+    '{{"match_found": true, "identity_match_confidence": 0.0, "ensemble_type": "",\n'
+    '  "ensemble_display_name": "", "score_expected": true,\n'
+    '  "work_identity": {{"title": null, "composer": null, "arranger": null,\n'
+    '    "publisher": null, "catalog_number": null, "year": null}},\n'
+    '  "expected_parts": [], "candidate_score_images": [], "evidence_sources": [], "notes": ""}}\n'
+    f"{RESULT_END}\n"
+)
+
+
+DEFAULT_SUMMARIZE_TEMPLATE = (
+    "You are a music librarian assistant. Read the score text below (OCR or embedded text from a\n"
+    "score's first page(s)) and report the piece's instrumentation as one JSON object. Do not\n"
+    "search the web; treat the supplied text as the authoritative source.\n\n"
+    "Piece context (disambiguation only):\n"
+    "- Title guess: {title_guess}\n"
+    "- Catalog / item number: {catalog_number}\n"
+    "- Source folder name: {piece_folder}\n"
+    "- Observed instruments: {observed_summary}\n\n"
+    "Score text:\n"
+    "{score_text}\n\n"
+    "Report one expected_parts entry per named printed part with a lowercase snake_case\n"
+    "canonical_instrument, a part_index (or null), a label, a section, and a required flag. Infer\n"
+    "ensemble_type from the instrumentation you read. If the text does not clearly show\n"
+    "instrumentation, set match_found to false and explain in notes. Never invent instruments.\n\n"
     "Respond with exactly one JSON object between the sentinel lines and nothing else:\n"
     f"{RESULT_START}\n"
     '{{"match_found": true, "identity_match_confidence": 0.0, "ensemble_type": "",\n'
@@ -155,6 +228,25 @@ def load_prompt_template(template_path: Path) -> tuple[str, str]:
     except Exception as exc:
         logger.warning("Failed to read %s (%s); using built-in prompt.", template_path, exc)
         return DEFAULT_PROMPT_TEMPLATE, "builtin"
+
+
+def load_summarize_template(template_path: Path) -> tuple[str, str]:
+    """Return (template, source) for the score-text summarization prompt.
+
+    Falls back to the built-in summarize template when the file is missing or unreadable.
+    """
+    if not template_path.exists():
+        logger.warning(
+            "Summarize template %s not found; using built-in summarize prompt.", template_path
+        )
+        return DEFAULT_SUMMARIZE_TEMPLATE, "builtin"
+    try:
+        return template_path.read_text(encoding="utf-8"), "file"
+    except Exception as exc:
+        logger.warning(
+            "Failed to read %s (%s); using built-in summarize prompt.", template_path, exc
+        )
+        return DEFAULT_SUMMARIZE_TEMPLATE, "builtin"
 
 
 # --- Query + prompt building -----------------------------------------------------------------
@@ -325,6 +417,208 @@ def run_copilot_lookup(prompt: str, config: dict[str, Any]) -> dict[str, Any]:
 
     logger.info("Copilot CLI completed in %.1fs (%d chars captured).", elapsed, len(stdout))
     return parse_lookup_response(stdout)
+
+
+# --- Local score text (Stage A) --------------------------------------------------------------
+
+
+def find_best_score_doc(
+    piece_id: str, score_docs_by_piece: dict[str, list[dict[str, Any]]]
+) -> dict[str, Any] | None:
+    """Return the piece's most-informative local score document, or None.
+
+    Prefers a full score, then conductor/condensed/short (see ``SCORE_TYPE_PREFERENCE``); ties
+    break on ``pdf_path`` for determinism.
+    """
+    docs = score_docs_by_piece.get(piece_id) or []
+    if not docs:
+        return None
+    return min(
+        docs,
+        key=lambda d: (
+            SCORE_TYPE_PREFERENCE.get(str(d.get("score_type") or "full"), 9),
+            str(d.get("pdf_path") or ""),
+        ),
+    )
+
+
+def get_extracted_score_text(
+    pdf_path: str, text_by_pdf: dict[str, list[dict[str, Any]]], max_pages: int
+) -> str:
+    """Concatenate the leading pages' text (embedded or OCR) for a score PDF from Script 02 output.
+
+    Uses ``text_source`` to pick embedded vs OCR text per page and keeps only the first
+    ``max_pages`` pages, where a score's staff labels / instrumentation list appear.
+    """
+    pages = text_by_pdf.get(pdf_path) or []
+    ordered = sorted(pages, key=lambda r: r.get("page_num", 0))[: max(1, max_pages)]
+    chunks: list[str] = []
+    for rec in ordered:
+        source = rec.get("text_source")
+        text = rec.get("ocr_text") if source == "ocr" else rec.get("embedded_text")
+        text = text or rec.get("embedded_text") or rec.get("ocr_text") or ""
+        headers = rec.get("header_text_candidates") or []
+        if headers:
+            chunks.append(" ".join(str(h) for h in headers))
+        if text.strip():
+            chunks.append(text.strip())
+    return "\n".join(chunks).strip()
+
+
+def reocr_score_pages(
+    abs_pdf_path: Path, max_pages: int, dpi: int, dest_dir: Path
+) -> str:
+    """Re-render and OCR the leading pages of a score PDF; returns concatenated OCR text.
+
+    Returns an empty string when PyMuPDF/pytesseract are unavailable, the file is missing, or
+    rendering/OCR fails -- callers then keep whatever (thin) reused text they had.
+    """
+    if fitz is None or pytesseract is None or Image is None:
+        logger.debug("Re-OCR skipped: pymupdf/pytesseract/Pillow not available.")
+        return ""
+    if not abs_pdf_path.exists():
+        logger.debug("Re-OCR skipped: score PDF not found at %s", abs_pdf_path)
+        return ""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    chunks: list[str] = []
+    try:
+        doc = fitz.open(abs_pdf_path)  # type: ignore[attr-defined]
+    except Exception as exc:  # pragma: no cover - depends on file/toolchain
+        logger.warning("Re-OCR failed to open %s: %s", abs_pdf_path, exc)
+        return ""
+    try:
+        page_count = min(max(1, max_pages), doc.page_count)
+        matrix = fitz.Matrix(dpi / 72.0, dpi / 72.0)  # type: ignore[attr-defined]
+        for page_index in range(page_count):
+            try:
+                page = doc.load_page(page_index)
+                pix = page.get_pixmap(matrix=matrix)  # type: ignore[attr-defined]
+                img_path = dest_dir / f"reocr_page{page_index + 1}.png"
+                pix.save(img_path)
+                text = ocr_image_file(img_path)
+                if text.strip():
+                    chunks.append(text.strip())
+            except Exception as exc:  # pragma: no cover - depends on file/toolchain
+                logger.warning("Re-OCR failed on page %d of %s: %s", page_index + 1,
+                               abs_pdf_path, exc)
+    finally:
+        doc.close()
+    return "\n".join(chunks).strip()
+
+
+# --- Remote image OCR (Stage C) --------------------------------------------------------------
+
+
+def download_image(url: str, dest_dir: Path, index: int) -> Path | None:
+    """Download an image URL into ``dest_dir``; returns the saved path or None on failure.
+
+    No domain or size restriction is applied (per configuration): any URL the lookup returns is
+    fetched. Files land in the per-piece temp directory the caller created.
+    """
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    suffix = Path(urllib.parse.urlparse(url).path).suffix
+    if not suffix or len(suffix) > 5:
+        suffix = ".img"
+    dest = dest_dir / f"image_{index:02d}{suffix}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "music-library-analyser/04"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            dest.write_bytes(resp.read())
+    except Exception as exc:
+        logger.warning("Failed to download image %s: %s", url, exc)
+        return None
+    return dest
+
+
+def ocr_image_file(image_path: Path) -> str:
+    """OCR a single image file with Tesseract; returns "" when OCR is unavailable or fails."""
+    if pytesseract is None or Image is None:
+        logger.debug("Image OCR skipped: pytesseract/Pillow not available.")
+        return ""
+    try:
+        with Image.open(image_path) as img:  # type: ignore[union-attr]
+            return str(pytesseract.image_to_string(img) or "").strip()  # type: ignore[union-attr]
+    except Exception as exc:
+        logger.warning("Image OCR failed for %s: %s", image_path, exc)
+        return ""
+
+
+def extract_image_urls(result: dict[str, Any]) -> list[str]:
+    """Pull the candidate score-image URLs out of a lookup result, in order, de-duplicated."""
+    raw = result.get("candidate_score_images")
+    urls: list[str] = []
+    seen: set[str] = set()
+    if isinstance(raw, list):
+        for entry in raw:
+            url = entry.get("url") if isinstance(entry, dict) else entry
+            if isinstance(url, str) and url.strip() and url not in seen:
+                seen.add(url)
+                urls.append(url.strip())
+    return urls
+
+
+def download_and_ocr_images(
+    urls: list[str],
+    piece_id: str,
+    fetch_fn: Callable[[str, Path, int], Path | None],
+    ocr_fn: Callable[[Path], str],
+) -> tuple[str, int]:
+    """Download each image into a per-piece temp folder and OCR it; returns (text, ocr_count).
+
+    A dedicated temp directory is created for the piece so downloaded images are isolated and can
+    be inspected during a run; it is left in place for auditing.
+    """
+    if not urls:
+        return "", 0
+    temp_dir = Path(tempfile.mkdtemp(prefix=f"score_imgs_{piece_id}_"))
+    logger.info("Downloading %d candidate score image(s) for %s into %s",
+                len(urls), piece_id, temp_dir)
+    chunks: list[str] = []
+    ocr_count = 0
+    for i, url in enumerate(urls, start=1):
+        path = fetch_fn(url, temp_dir, i)
+        if path is None:
+            continue
+        text = ocr_fn(path)
+        if text.strip():
+            chunks.append(text.strip())
+            ocr_count += 1
+    return "\n".join(chunks).strip(), ocr_count
+
+
+# --- Summarize score text into the instrumentation contract ----------------------------------
+
+
+def build_summarize_prompt(template: str, piece: dict[str, Any], score_text: str) -> str:
+    """Render the summarize template with the piece context and the supplied score text."""
+    query = {
+        "title_guess": str(piece.get("piece_title_guess") or "unknown"),
+        "catalog_number": str(piece.get("catalog_number") or "unknown"),
+        "piece_folder": str(piece.get("piece_folder") or "unknown"),
+        "observed_summary": _observed_summary(piece),
+        "score_text": score_text,
+    }
+    return render_prompt(template, query)
+
+
+def derive_contract_from_text(
+    score_text: str,
+    piece: dict[str, Any],
+    summarize_fn: Callable[[str, dict[str, Any]], dict[str, Any]],
+    summarize_template: str,
+    config: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Summarize score/OCR text into the instrumentation contract via the LLM.
+
+    Returns the parsed contract dict, or None when the call fails or returns unusable output.
+    """
+    prompt = build_summarize_prompt(summarize_template, piece, score_text)
+    try:
+        result = summarize_fn(prompt, config)
+    except Exception as exc:
+        logger.warning("Summarize call failed for piece %s: %s", piece.get("piece_id"), exc)
+        return None
+    return result if isinstance(result, dict) else None
 
 
 # --- Expected-part normalization + reconciliation --------------------------------------------
@@ -529,6 +823,8 @@ def conservative_record(
         "ensemble_display_name": ensemble_display_name,
         "detection_method": "conservative_fallback",
         "inference_method": "fallback_conservative",
+        "ocr_source": None,
+        "local_score_path": None,
         "lookup_status": lookup_status,
         "lookup_model": lookup_model,
         "lookup_notes": lookup_notes,
@@ -554,14 +850,24 @@ def conservative_record(
     return rec
 
 
-def infer_piece_from_lookup(
+def build_matched_record(
     piece: dict[str, Any],
     doc: dict[str, Any] | None,
     run_id: str,
     result: dict[str, Any],
     lookup_model: str,
+    *,
+    detection_method: str = METHOD_AUTHORITY,
+    inference_method: str = METHOD_AUTHORITY,
+    ocr_source: str | None = None,
+    local_score_path: str | None = None,
 ) -> dict[str, Any]:
-    """Build a matched record by reconciling the looked-up parts against observed parts."""
+    """Build a matched record by reconciling the resolved parts against observed parts.
+
+    Shared by all three resolution paths (local score OCR, online authority lookup, remote image
+    OCR); ``detection_method`` / ``inference_method`` and the optional ``ocr_source`` /
+    ``local_score_path`` record which path produced the contract.
+    """
     slots = normalize_expected_parts(result.get("expected_parts"))
     expected, unexpected = reconcile_parts(slots, piece.get("observed_parts", []))
 
@@ -591,8 +897,10 @@ def infer_piece_from_lookup(
     rec.update({
         "ensemble_type": str(result.get("ensemble_type") or "unknown"),
         "ensemble_display_name": str(result.get("ensemble_display_name") or "Unknown"),
-        "detection_method": "authority_lookup",
-        "inference_method": "authority_lookup",
+        "detection_method": detection_method,
+        "inference_method": inference_method,
+        "ocr_source": ocr_source,
+        "local_score_path": local_score_path,
         "lookup_status": LookupStatus.MATCHED,
         "lookup_model": lookup_model,
         "lookup_notes": str(result.get("notes") or ""),
@@ -620,6 +928,47 @@ def infer_piece_from_lookup(
     return rec
 
 
+def _try_contract_from_text(
+    piece: dict[str, Any],
+    doc: dict[str, Any] | None,
+    run_id: str,
+    score_text: str,
+    *,
+    config: dict[str, Any],
+    summarize_fn: Callable[[str, dict[str, Any]], dict[str, Any]],
+    summarize_template: str,
+    detection_method: str,
+    ocr_source: str,
+    local_score_path: str | None = None,
+) -> dict[str, Any] | None:
+    """Summarize OCR/score text and, if confident, return a matched record; else None.
+
+    Used by both the local-score stage and the remote-image stage. Returns None when the text is
+    too thin, the summarize call fails, no match is reported, no parts come back, or the reported
+    confidence is below the configured threshold -- so the caller can fall through to the next
+    stage.
+    """
+    min_chars = int(config.get("min_score_text_chars", 200) or 0)
+    if len(score_text.strip()) < max(1, min_chars):
+        return None
+    contract = derive_contract_from_text(
+        score_text, piece, summarize_fn, summarize_template, config
+    )
+    if not contract or not contract.get("match_found") or not contract.get("expected_parts"):
+        return None
+    confidence = float(contract.get("identity_match_confidence") or 0.0)
+    threshold = float(config.get("confidence_threshold", 0.5) or 0.0)
+    if confidence < threshold:
+        return None
+    return build_matched_record(
+        piece, doc, run_id, contract, str(config.get("model") or ""),
+        detection_method=detection_method,
+        inference_method=detection_method,
+        ocr_source=ocr_source,
+        local_score_path=local_score_path,
+    )
+
+
 def infer_piece(
     piece: dict[str, Any],
     doc: dict[str, Any] | None,
@@ -629,9 +978,41 @@ def infer_piece(
     prompt_template: str,
     lookup_enabled: bool,
     lookup_fn: Callable[[str, dict[str, Any]], dict[str, Any]],
+    summarize_fn: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
+    summarize_template: str = "",
+    score_text_provider: Callable[[dict[str, Any]], tuple[str | None, dict[str, Any] | None]]
+    | None = None,
+    image_fetch_fn: Callable[[str, Path, int], Path | None] | None = None,
+    image_ocr_fn: Callable[[Path], str] | None = None,
 ) -> dict[str, Any]:
-    """Infer expected parts for one piece via online lookup, degrading conservatively."""
+    """Infer expected parts for one piece across up to three stages, degrading conservatively.
+
+    Stage A (local score OCR) runs first when a ``score_text_provider`` yields score text; Stage B
+    (online authority lookup) runs next; Stage C (remote image OCR) runs when the online lookup
+    returns candidate images but no instrumentation. The first stage to produce a confident
+    contract wins; otherwise the piece degrades to a conservative record.
+    """
     model = str(config.get("model") or "")
+    summarize = summarize_fn or lookup_fn
+
+    # --- Stage A: local score OCR --------------------------------------------------------
+    if config.get("local_score_enabled", True) and score_text_provider is not None:
+        score_text, score_doc = score_text_provider(piece)
+        if score_text:
+            record = _try_contract_from_text(
+                piece, doc, run_id, score_text,
+                config=config, summarize_fn=summarize, summarize_template=summarize_template,
+                detection_method=METHOD_LOCAL_SCORE, ocr_source="local_score",
+                local_score_path=(score_doc or {}).get("pdf_path") if score_doc else None,
+            )
+            if record is not None:
+                return record
+            logger.info(
+                "Local score OCR did not yield a confident contract for %s; trying online lookup.",
+                piece.get("piece_id"),
+            )
+
+    # --- Stage B: online authority lookup ------------------------------------------------
     if not lookup_enabled:
         return conservative_record(piece, doc, run_id, LookupStatus.DISABLED, lookup_model=model)
 
@@ -656,6 +1037,35 @@ def infer_piece(
 
     confidence = float(result.get("identity_match_confidence") or 0.0)
     threshold = float(config.get("confidence_threshold", 0.5) or 0.0)
+
+    if confidence >= threshold and result.get("expected_parts"):
+        return build_matched_record(
+            piece, doc, run_id, result, model,
+            detection_method=METHOD_AUTHORITY, inference_method=METHOD_AUTHORITY,
+        )
+
+    # --- Stage C: remote image OCR (online matched an edition but returned no parts) ------
+    if (
+        confidence >= threshold
+        and config.get("image_ocr_enabled", True)
+        and image_fetch_fn is not None
+        and image_ocr_fn is not None
+    ):
+        image_urls = extract_image_urls(result)
+        if image_urls:
+            ocr_text, ocr_count = download_and_ocr_images(
+                image_urls, str(piece.get("piece_id") or "piece"), image_fetch_fn, image_ocr_fn
+            )
+            if ocr_count:
+                record = _try_contract_from_text(
+                    piece, doc, run_id, ocr_text,
+                    config=config, summarize_fn=summarize,
+                    summarize_template=summarize_template,
+                    detection_method=METHOD_SCORE_IMAGE, ocr_source="score_image",
+                )
+                if record is not None:
+                    return record
+
     if confidence < threshold:
         return conservative_record(
             piece, doc, run_id, LookupStatus.LOW_CONFIDENCE,
@@ -668,7 +1078,17 @@ def infer_piece(
             lookup_identity=result.get("work_identity"),
         )
 
-    return infer_piece_from_lookup(piece, doc, run_id, result, model)
+    # Matched an edition, but neither text nor image OCR produced usable parts.
+    return conservative_record(
+        piece, doc, run_id, LookupStatus.NO_MATCH,
+        evidence=result.get("evidence_sources"),
+        identity_match_confidence=confidence,
+        lookup_notes=str(result.get("notes") or ""),
+        lookup_model=model,
+        ensemble_type=str(result.get("ensemble_type") or "unknown"),
+        ensemble_display_name=str(result.get("ensemble_display_name") or "Unknown"),
+        lookup_identity=result.get("work_identity"),
+    )
 
 
 def build_error_record(piece: dict[str, Any], run_id: str, message: str) -> dict[str, Any]:
@@ -682,23 +1102,45 @@ def build_error_record(piece: dict[str, Any], run_id: str, message: str) -> dict
 # --- Fingerprint + ordering ------------------------------------------------------------------
 
 
-def piece_fingerprint(piece: dict[str, Any], config_fingerprint: str) -> str:
-    """Stable fingerprint of the inputs that affect a piece's inference."""
+def piece_fingerprint(
+    piece: dict[str, Any], config_fingerprint: str, score_fingerprint: str = ""
+) -> str:
+    """Stable fingerprint of the inputs that affect a piece's inference.
+
+    ``score_fingerprint`` folds in the identity of the local score PDF (path + file fingerprint) so
+    incremental reuse re-runs a piece when its score changes.
+    """
     keys = sorted(
         f"{o.get('canonical_instrument')}|{o.get('part_index')}|{o.get('clef')}"
         for o in piece.get("observed_parts", [])
     )
-    basis = f"{config_fingerprint}|{bool(piece.get('has_score'))}|" + ";".join(keys)
+    basis = (
+        f"{config_fingerprint}|{bool(piece.get('has_score'))}|{score_fingerprint}|"
+        + ";".join(keys)
+    )
     return sha256_text(basis)
 
 
-def config_fingerprint(config: dict[str, Any], prompt_template: str, lookup_enabled: bool) -> str:
-    """Fingerprint of the lookup-affecting configuration (invalidates stale reuse)."""
+def config_fingerprint(
+    config: dict[str, Any],
+    prompt_template: str,
+    lookup_enabled: bool,
+    summarize_template: str = "",
+    local_score_enabled: bool = True,
+    image_ocr_enabled: bool = True,
+) -> str:
+    """Fingerprint of the inference-affecting configuration (invalidates stale reuse)."""
     basis = "|".join([
         str(lookup_enabled),
+        str(local_score_enabled),
+        str(image_ocr_enabled),
         str(config.get("model") or ""),
         str(config.get("confidence_threshold")),
+        str(config.get("max_score_pages")),
+        str(config.get("min_score_text_chars")),
+        str(config.get("reocr_dpi")),
         sha256_text(prompt_template),
+        sha256_text(summarize_template),
     ])
     return sha256_text(basis)
 
@@ -824,7 +1266,11 @@ def build_report(records: list[dict[str, Any]], meta: dict[str, Any]) -> str:
     out.append(f"| Rollup input | `{meta['pieces']}` |")
     out.append(f"| Config source | {meta['config_source']} |")
     out.append(f"| Prompt source | {meta['prompt_source']} |")
+    if meta.get("summarize_source"):
+        out.append(f"| Summarize prompt source | {meta['summarize_source']} |")
+    out.append(f"| Local score OCR | {'enabled' if meta.get('local_score_enabled') else 'disabled'} |")
     out.append(f"| Lookup | {'enabled' if meta['lookup_enabled'] else 'disabled'} |")
+    out.append(f"| Image OCR | {'enabled' if meta.get('image_ocr_enabled') else 'disabled'} |")
     out.append(f"| Model | {meta['model'] or '(CLI default)'} |")
     out.append(f"| Output | `{meta['output']}` |")
     out.append("")
@@ -964,6 +1410,18 @@ def main(
     documents: Path = typer.Option(
         Path("data/documents.jsonl"), help="Script 02 per-document rollups (optional identity)"
     ),
+    part_predictions: Path = typer.Option(
+        Path("data/part_predictions.jsonl"),
+        help="Script 03 per-document predictions (used to locate a piece's local score)",
+    ),
+    extracted_text: Path = typer.Option(
+        Path("data/extracted_text.jsonl"),
+        help="Script 02 per-page text (source of local-score text for Stage A)",
+    ),
+    library_root: Path = typer.Option(
+        None,
+        help="Library root for resolving score PDFs when re-OCR is needed (optional)",
+    ),
     config_path: Path = typer.Option(
         Path("config/score_lookup.yaml"), "--config", help="Lookup engine config YAML (optional)"
     ),
@@ -985,7 +1443,15 @@ def main(
     ),
     mode: str = typer.Option("full", help="Processing mode: full or incremental"),
     lookup_enabled: bool = typer.Option(
-        True, "--lookup/--no-lookup", help="Enable online score lookup (primary path)"
+        True, "--lookup/--no-lookup", help="Enable online score lookup (Stage B)"
+    ),
+    local_score_enabled: bool = typer.Option(
+        True, "--local-score/--no-local-score",
+        help="Enable local-score OCR before the online lookup (Stage A)",
+    ),
+    image_ocr_enabled: bool = typer.Option(
+        True, "--image-ocr/--no-image-ocr",
+        help="Enable local OCR of images the online lookup returns (Stage C)",
     ),
     model: str = typer.Option("", help="Override the Copilot CLI model (blank = config/default)"),
     timeout: int = typer.Option(0, help="Override per-piece subprocess timeout in seconds (0=cfg)"),
@@ -1018,6 +1484,12 @@ def main(
     config, config_source = load_lookup_config(config_path.resolve())
     if not config.get("enabled", True):
         lookup_enabled = False
+    if not config.get("local_score_enabled", True):
+        local_score_enabled = False
+    if not config.get("image_ocr_enabled", True):
+        image_ocr_enabled = False
+    config["local_score_enabled"] = local_score_enabled
+    config["image_ocr_enabled"] = image_ocr_enabled
     if model.strip():
         config["model"] = model.strip()
     if timeout > 0:
@@ -1026,6 +1498,9 @@ def main(
 
     template_path = Path(config.get("prompt_template_path", "")).resolve()
     prompt_template, prompt_source = load_prompt_template(template_path)
+
+    summarize_path = Path(config.get("summarize_prompt_template_path", "")).resolve()
+    summarize_template, summarize_source = load_summarize_template(summarize_path)
 
     if lookup_enabled and not shutil.which(config.get("command", "copilot")):
         logger.warning(
@@ -1039,7 +1514,56 @@ def main(
         if piece_id and piece_id not in doc_map:
             doc_map[piece_id] = rec
 
-    cfg_fp = config_fingerprint(config, prompt_template, lookup_enabled)
+    # Local-score inputs (Stage A): map each piece to its score document(s) from Script 03, and
+    # index Script 02 per-page text by the score PDFs only (bounding memory on large libraries).
+    score_docs_by_piece: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    if local_score_enabled:
+        for rec in read_jsonl(part_predictions.resolve()):
+            if rec.get("is_score") and rec.get("piece_id") and rec.get("pdf_path"):
+                score_docs_by_piece[rec["piece_id"]].append(rec)
+
+    score_pdf_paths = {
+        d.get("pdf_path") for docs in score_docs_by_piece.values() for d in docs
+    }
+    text_by_pdf: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    if local_score_enabled and score_pdf_paths:
+        for rec in read_jsonl(extracted_text.resolve()):
+            pdf_path = rec.get("pdf_path")
+            if pdf_path in score_pdf_paths:
+                text_by_pdf[pdf_path].append(rec)
+
+    lib_root = library_root.resolve() if library_root else None
+    max_score_pages = int(config.get("max_score_pages", 2) or 2)
+    min_score_text = int(config.get("min_score_text_chars", 200) or 0)
+    reocr_dpi = int(config.get("reocr_dpi", 300) or 300)
+
+    def _score_fingerprint(piece: dict[str, Any]) -> str:
+        best = find_best_score_doc(str(piece.get("piece_id") or ""), score_docs_by_piece)
+        if not best:
+            return ""
+        return f"{best.get('pdf_path')}|{best.get('file_fingerprint') or ''}"
+
+    def _score_text_provider(
+        piece: dict[str, Any],
+    ) -> tuple[str | None, dict[str, Any] | None]:
+        """Return (score_text, score_doc) for a piece, reusing Script 02 text; re-OCR if thin."""
+        best = find_best_score_doc(str(piece.get("piece_id") or ""), score_docs_by_piece)
+        if not best:
+            return None, None
+        pdf_path = str(best.get("pdf_path") or "")
+        text = get_extracted_score_text(pdf_path, text_by_pdf, max_score_pages)
+        if len(text.strip()) < max(1, min_score_text):
+            abs_path = (lib_root / pdf_path) if lib_root else Path(pdf_path)
+            reocr_dir = Path(tempfile.mkdtemp(prefix=f"reocr_{piece.get('piece_id')}_"))
+            reocr_text = reocr_score_pages(abs_path, max_score_pages, reocr_dpi, reocr_dir)
+            if len(reocr_text.strip()) > len(text.strip()):
+                text = reocr_text
+        return (text or None), best
+
+    cfg_fp = config_fingerprint(
+        config, prompt_template, lookup_enabled,
+        summarize_template, local_score_enabled, image_ocr_enabled,
+    )
 
     ckpt_path = make_checkpoint_path(output, CHECKPOINT_FILENAME)
     checkpoint = load_checkpoint(ckpt_path, RECORD_VERSION, logger)
@@ -1057,10 +1581,12 @@ def main(
 
     total_pieces = sum(1 for p in piece_records if p.get("piece_id"))
     logger.info(
-        "Processing %d piece(s) in %s mode (lookup %s).",
+        "Processing %d piece(s) in %s mode (local-score %s, lookup %s, image-OCR %s).",
         total_pieces,
         mode,
-        "enabled" if lookup_enabled else "disabled",
+        "on" if local_score_enabled else "off",
+        "on" if lookup_enabled else "off",
+        "on" if image_ocr_enabled else "off",
     )
 
     seen = 0
@@ -1070,7 +1596,7 @@ def main(
         if not piece_id:
             continue
         seen += 1
-        fingerprint = piece_fingerprint(piece, cfg_fp)
+        fingerprint = piece_fingerprint(piece, cfg_fp, _score_fingerprint(piece))
         fingerprints[piece_id] = fingerprint
 
         title = piece.get("piece_title_guess") or piece.get("piece_folder") or piece_id
@@ -1104,7 +1630,8 @@ def main(
     def _process(item: tuple[int, dict[str, Any], str, str]) -> dict[str, Any]:
         idx, piece, title, catalog = item
         logger.info("[%d/%d] %s: %s (cat %s)", idx, total_pieces,
-                    "Looking up" if lookup_enabled else "Recording (no lookup)", title, catalog)
+                    "Inferring" if (lookup_enabled or local_score_enabled)
+                    else "Recording (no lookup)", title, catalog)
         piece_start = time.perf_counter()
         try:
             record = infer_piece(
@@ -1115,14 +1642,20 @@ def main(
                 prompt_template=prompt_template,
                 lookup_enabled=lookup_enabled,
                 lookup_fn=run_copilot_lookup,
+                summarize_fn=run_copilot_lookup,
+                summarize_template=summarize_template,
+                score_text_provider=_score_text_provider if local_score_enabled else None,
+                image_fetch_fn=download_image if image_ocr_enabled else None,
+                image_ocr_fn=ocr_image_file if image_ocr_enabled else None,
             )
         except Exception as exc:
             logger.exception("Unexpected inference error on piece %s", piece.get("piece_id"))
             record = build_error_record(piece, run_id, str(exc))
         logger.info(
-            "[%d/%d] Done: %s -> status=%s tier=%s (%.1fs)",
+            "[%d/%d] Done: %s -> status=%s method=%s tier=%s (%.1fs)",
             idx, total_pieces, title,
-            record.get("lookup_status"), record.get("completeness_tier"),
+            record.get("lookup_status"), record.get("detection_method"),
+            record.get("completeness_tier"),
             time.perf_counter() - piece_start,
         )
         return record
@@ -1150,7 +1683,10 @@ def main(
             "pieces": pieces.as_posix(),
             "config_source": config_source,
             "prompt_source": prompt_source,
+            "summarize_source": summarize_source,
             "lookup_enabled": lookup_enabled,
+            "local_score_enabled": local_score_enabled,
+            "image_ocr_enabled": image_ocr_enabled,
             "model": config.get("model") or "",
             "output": output.as_posix(),
             "detail_limit": report_detail_limit,
@@ -1172,6 +1708,8 @@ def main(
         config_source=config_source,
         config_fingerprint=cfg_fp,
         lookup_enabled=lookup_enabled,
+        local_score_enabled=local_score_enabled,
+        image_ocr_enabled=image_ocr_enabled,
         record_count=len(rebuilt),
     )
     atomic_write_json(ckpt_path, new_checkpoint)

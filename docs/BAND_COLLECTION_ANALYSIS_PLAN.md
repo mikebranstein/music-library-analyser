@@ -295,52 +295,86 @@ Inputs:
   `piece_title_guess` identity seeds. Use this instead of re-grouping the per-document file.
 - `data/documents.jsonl` for additional work-identity seeds (`first_page_text`,
   `first_page_header_candidates`, `identity_candidates`)
-- `data/part_predictions.jsonl` only when per-document detail is needed (e.g. `confidence_tier`,
-  `evidence_source`, `match_details`); the observed-part key and `confidence`/`duplicate_in_piece`
-  are already rolled up per piece
+- `data/part_predictions.jsonl` (Script 03) — used to **locate a piece's local score** document(s):
+  records where `is_score` is true supply `pdf_path`, `score_type`, `file_fingerprint`, and
+  `piece_folder`. The best score per piece is chosen by `score_type` preference
+  (`full` > `conductor` > `condensed` > `short`).
+- `data/extracted_text.jsonl` (Script 02) — the per-page text (`embedded_text` / `ocr_text` chosen
+  by `text_source`, plus `header_text_candidates`) for the local score PDFs; the leading
+  `max_score_pages` pages are the Stage A text source, reused instead of re-OCR when adequate.
+- `--library-root` (optional) — filesystem root used to resolve a score `pdf_path` when Stage A must
+  re-render and re-OCR pages (only when the reused Script 02 text is thinner than
+  `min_score_text_chars`).
 
 Approach:
 
-Status: implemented (Script 04, schema `2.0`) as an **online score-lookup engine driven by the
-GitHub Copilot CLI**. Rather than assuming an ensemble template, it looks up the *actual published
-edition* per piece and reports that edition's real instrumentation; the ensemble type is inferred
-from whatever score is found. When lookup is disabled or fails, the piece degrades to a
-conservative, observed-only record flagged for review — it never fabricates a "missing" part
-without an authoritative source. See
+Status: implemented (Script 04, schema `2.1`) as a **three-stage inference engine**. Rather than
+assuming an ensemble template, it establishes each piece's *actual published edition* instrumentation
+from the most authoritative source available, degrading conservatively when nothing usable is found.
+The ensemble type is inferred from whatever score is found. All AI/OCR touchpoints are injectable so
+tests run fully offline. See
 `docs/SCRIPT04_EXPECTED_PARTS_INFERENCE_IMPLEMENTATION_PLAN.md` for the full design.
 
-1. Online score lookup (implemented primary path):
-- For each piece, build a work-identity query from the observed instruments, `catalog_number`,
-  `piece_title_guess`, and Script 02 `identity_candidates`, then render the prompt template at
-  `config/llm_prompts/lookup_instrumentation.txt`.
-- Invoke the GitHub Copilot CLI headlessly (`copilot -p <prompt> --allow-all-tools -s
-  --no-ask-user ...`, with `--allow-all-urls` or a restricted `--allow-url` list from
-  `config/score_lookup.yaml`). The model searches authoritative web sources (publisher, distributor,
-  library catalog) and returns exactly one JSON object between the
-  `<<<SCORE_JSON>>>` / `<<<END_SCORE_JSON>>>` sentinels.
-- The returned edition provides `ensemble_type`, `ensemble_display_name`, `work_identity`,
-  `evidence_sources`, and `expected_parts[{canonical_instrument, part_index, label, section,
-  required}]`. No instrumentation families are hardcoded; the parts come from the found score.
-- Reconcile the looked-up part slots against the piece's observed parts. Matching is count-based per
-  canonical instrument (robust to null `part_index`), preferring explicit index matches, then
-  consuming slots in order. Produces `present` / `missing` / `unexpected` sets.
-- Compute a required-part completeness score + tier, and `needs_review` when required parts are
-  missing, the score is missing, unexpected parts appear, or the Script 03 rollup already flagged
-  the piece.
+The stages run in order; the first stage to produce a confident instrumentation contract
+(match found, non-empty `expected_parts`, and `identity_match_confidence >= confidence_threshold`)
+wins, otherwise the piece degrades to the conservative fallback:
 
-2. Conservative fallback (per-piece degradation):
-- `--no-lookup` (or `enabled: false` in `config/score_lookup.yaml`) → `lookup_status: disabled`.
+**Stage A — local score OCR (`detection_method: local_score_ocr`):**
+- Find the piece's best local score from `part_predictions.jsonl` (score-type preference above).
+- Gather its leading-page text from `extracted_text.jsonl` (reusing Script 02 embedded/OCR text).
+  If that text is thinner than `min_score_text_chars`, re-render and re-OCR the first
+  `max_score_pages` at `reocr_dpi` via PyMuPDF + Tesseract (resolving the PDF under `--library-root`;
+  skipped gracefully when the toolchain or file is unavailable).
+- Send the score text to the Copilot CLI with the **summarize** prompt template
+  (`config/llm_prompts/summarize_score_instrumentation.txt`), which cleans/normalizes the text into
+  the same instrumentation contract JSON (no web search). A confident contract ends inference here.
+
+**Stage B — online authority lookup (`detection_method: authority_lookup`):**
+- Build a work-identity query from observed instruments, `catalog_number`, `piece_title_guess`, and
+  Script 02 `identity_candidates`, then render `config/llm_prompts/lookup_instrumentation.txt`.
+- Invoke the Copilot CLI headlessly (`copilot -p <prompt> --allow-all-tools -s --no-ask-user ...`).
+  The model searches authoritative web sources and returns one JSON object between the
+  `<<<SCORE_JSON>>>` / `<<<END_SCORE_JSON>>>` sentinels, providing `ensemble_type`,
+  `ensemble_display_name`, `work_identity`, `evidence_sources`, `expected_parts[...]` (only from
+  authoritative text sources), and — when it cannot read instrumentation from text — a list of
+  `candidate_score_images[{url, kind, source_url, notes}]`. The model does **not** OCR images itself.
+
+**Stage C — remote image OCR (`detection_method: score_image_ocr`):**
+- Runs only when Stage B matched an edition confidently but returned no `expected_parts` alongside
+  one or more `candidate_score_images`.
+- Each image URL is downloaded into a per-piece temp folder (no domain/size caps) and OCR'd with
+  Tesseract; the concatenated text is fed to the same **summarize** prompt as Stage A. A confident
+  contract ends inference here.
+
+For every winning stage, the looked-up part slots are reconciled against the piece's observed parts.
+Matching is count-based per canonical instrument (robust to null `part_index`), preferring explicit
+index matches, then consuming slots in order — producing `present` / `missing` / `unexpected` sets,
+a required-part completeness score + tier, and `needs_review` when required parts are missing, the
+score is missing, unexpected parts appear, or the Script 03 rollup already flagged the piece.
+
+Conservative fallback (per-piece degradation):
+- `--no-lookup` (or `enabled: false` in `config/score_lookup.yaml`) with no local-score result →
+  `lookup_status: disabled`.
 - The Copilot CLI is not on `PATH`, times out, or exits non-zero → `lookup_status: error`.
 - The model reports `match_found: false` → `lookup_status: no_match`.
 - Match confidence below `confidence_threshold` → `lookup_status: low_confidence`.
+- Matched an edition but no stage produced usable parts (no text parts, and image OCR yielded
+  nothing) → `lookup_status: no_match`.
 - In every fallback case the record declares no expected/missing parts, sets
   `completeness_score: null` and `completeness_tier: unknown`, and is flagged `needs_review: true`.
   Any evidence, notes, and resolved identity returned before the fallback are retained.
 
-Note: lookup accuracy is bounded by what the model can find online and is network- and
-AI-credit-dependent and nondeterministic. `--mode incremental` caches per-piece results by
-fingerprint (observed parts + `has_score` + model + confidence threshold + prompt-template hash) to
-avoid re-spending credits on unchanged pieces.
+Stage toggles: `--local-score/--no-local-score` (Stage A), `--lookup/--no-lookup` (Stage B), and
+`--image-ocr/--no-image-ocr` (Stage C); each also respects its `*_enabled` flag in
+`config/score_lookup.yaml`.
+
+Note: lookup accuracy is bounded by what the model can find online (Stage B) and by scan/OCR quality
+(Stages A/C), and Stages B/C are network- and AI-credit-dependent and nondeterministic. `--mode
+incremental` caches per-piece results by fingerprint (observed parts + `has_score` + best local
+score identity (`pdf_path` + `file_fingerprint`) + model + confidence threshold + stage flags +
+`max_score_pages`/`min_score_text_chars`/`reocr_dpi` + lookup- and summarize-template hashes) to
+avoid re-spending credits or re-OCR on unchanged pieces.
+
 
 Outputs:
 
@@ -349,15 +383,20 @@ Outputs:
 - `data/expected_instrumentation.md` (per-piece expected instrumentation from the lookups)
 - `data/.expected_parts_checkpoint.json` (checkpoint; supports `--mode incremental`)
 
-Fields (`expected_parts.jsonl`, schema 2.0):
+Fields (`expected_parts.jsonl`, schema 2.1):
 
 - `ensemble_type`, `ensemble_display_name` (inferred per piece from the found score)
-- `detection_method` (`authority_lookup` | `conservative_fallback` | `error`)
-- `inference_method` (`authority_lookup` | `fallback_conservative`)
+- `detection_method` (`local_score_ocr` | `authority_lookup` | `score_image_ocr` |
+  `conservative_fallback` | `error`)
+- `inference_method` (`local_score_ocr` | `authority_lookup` | `score_image_ocr` |
+  `fallback_conservative`)
+- `ocr_source` (`local_score` | `score_image` | `null`) and `local_score_path` (the score PDF used
+  for Stage A, or `null`)
 - `lookup_status` (`matched` | `low_confidence` | `no_match` | `disabled` | `error`)
 - `lookup_model`, `lookup_notes`, `identity_match_confidence`
 - `authority_coverage` (`full` when evidence sources were returned, else `none`),
   `evidence_sources` (list of `{url, title, snippet, retrieved}`)
+- `candidate_score_images` (list of `{url, kind, source_url, notes}` the Stage B lookup returned)
 - `expected_parts` (list of `{canonical_instrument, part_index, label, section, required, present}`)
 - `missing_parts`, `missing_required_parts`, `missing_optional_parts`
 - `unexpected_parts` (observed parts with no expected slot)
