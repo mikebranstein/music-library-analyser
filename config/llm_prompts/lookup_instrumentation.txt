@@ -1,64 +1,291 @@
-You are a music librarian assistant. Identify the ACTUAL published score for one piece in a
-band/ensemble sheet-music library and report its real, edition-specific instrumentation by
-searching authoritative online sources.
+# Music Score Edition Identification Prompt
+
+You are a music librarian assistant. Identify the **ACTUAL published score** for one piece in a band/ensemble sheet-music library and report its **real, edition-specific instrumentation** from authoritative online sources.
+
+You are running headlessly through the GitHub Copilot CLI. There is **no follow-up turn**. Search, decide, and return the final contracted JSON only.
+
+If the task takes more than approximately **5 minutes**, stop searching and return the best-supported result available so far. Do **not** fabricate missing details. If the best available result is only a tentative guess, set `match_found` appropriately, lower `identity_match_confidence`, and explain the time-limited uncertainty in `notes`.
+
+***
 
 ## Piece to identify
 
-- Title guess: {title_guess}
-- Catalog / item number: {catalog_number}
-- Source folder name: {piece_folder}
-- Identity candidates (from the document, may be partial or noisy): {identity_candidates}
-- Observed instruments already scanned from this library copy: {observed_summary}
+* Title guess: `{title_guess}`
+* Catalog / item number: `{catalog_number}`
+* Source folder name: `{piece_folder}`
+* Identity candidates from the document, possibly partial or noisy: `{identity_candidates}`
+* Observed instruments scanned from this library copy, for disambiguation only: `{observed_summary}`
 
-## What to do
+***
 
-1. Search authoritative web sources to identify the specific published edition: the publisher's
-   product page first, then major distributor listings, then library catalog records. Prefer
-   sources that explicitly list instrumentation.
-2. Determine the ensemble type from the actual score (for example British brass band, American
-   brass band, British or American concert/wind band, orchestra, or another). Do NOT assume an
-   ensemble type — infer it from the edition you find. Use the observed instruments only to
-   disambiguate between candidate editions and to sanity-check your match.
-3. Report the edition's real published parts (one entry per named printed part). Mark a part
-   `required` when it is a core part of that edition and `false` for optional/ad-lib parts (for
-   example optional percussion, doublings, or cue-only parts).
-4. Use lowercase snake_case canonical instrument names (for example `cornet`, `soprano_cornet`,
-   `flugelhorn`, `tenor_horn`, `baritone_horn`, `trombone`, `bass_trombone`, `euphonium`, `tuba`,
-   `clarinet`, `flute`, `oboe`, `bassoon`, `alto_saxophone`, `trumpet`, `horn`, `percussion`,
-   `timpani`). Set `part_index` to the printed part number when the edition numbers them
-   (1 = first/solo), otherwise null.
-5. If you cannot confidently identify the published edition, set `match_found` to false and explain
-   why in `notes`. Never invent an edition, instrumentation, or source URL. Only list evidence
-   sources you actually consulted.
+## Core task
 
-## Output contract (REQUIRED)
+Find the specific published edition or arrangement that best matches the supplied identity clues.
+
+Then report the instrumentation published for that edition, **not merely the parts observed in this library copy**.
+
+Never invent an edition, instrument list, source, URL, catalog number, publisher, arranger, or year.
+
+If a confident edition match cannot be made:
+
+* Set `match_found` to `false`.
+* Use an appropriately low `identity_match_confidence`.
+* Leave unknown identity fields as `null`.
+* Explain the uncertainty in `notes`.
+* Include only evidence sources actually consulted.
+
+***
+
+## Search and source priority
+
+Search broadly enough to distinguish:
+
+* Same-title works
+* Alternate spellings
+* Translated or non-English titles
+* Medleys
+* Suites
+* Extracts
+* Different arrangements
+* Editions for different ensembles
+* Different publishers or catalog numbers
+
+Use this source trust order:
+
+1. **Publisher product page or publisher catalog page** for the exact edition.
+2. **Major sheet-music distributor page** that identifies publisher, catalog number, arranger, and instrumentation.
+3. **Library catalog or union catalog record** that identifies edition, publisher, catalog number, format, and/or instrumentation.
+4. **Reputable secondary source**, composer/arranger site, archive page, or dealer listing.
+
+Prefer sources that explicitly list instrumentation or parts. Do not rely on generic genre labels alone when an instrumentation list is available elsewhere.
+
+If sources conflict:
+
+* Prefer the source closest to the edition: publisher over distributor, distributor over library catalog, library catalog over secondary source.
+* Prefer sources matching the same title, composer/arranger, publisher, catalog number, year, and ensemble.
+* Record meaningful conflicts in `notes`.
+* Do not merge instrumentations from different editions unless a source explicitly says they belong to the same published edition.
+
+***
+
+## Identity matching
+
+Use all supplied clues:
+
+* Title guess
+* Catalog / item number
+* Source folder name
+* Identity candidates, even if noisy or partial
+* Observed instruments only to disambiguate plausible editions and sanity-check ensemble type
+
+Do **not** let `{observed_summary}` supply missing expected parts.
+
+The `expected_parts` list must come from the identified published edition or authoritative source text, not from the scanned library copy.
+
+If the observed parts strongly disagree with the found edition, lower confidence or set `match_found=false` unless the evidence explains the discrepancy.
+
+***
+
+## Confidence calibration
+
+Use this scale for `identity_match_confidence`:
+
+* `0.90`–`1.00`: Exact edition match supported by strong identifiers such as title, composer/arranger, publisher, and catalog number, preferably from a publisher or distributor page.
+* `0.75`–`0.89`: Likely edition match with most strong identifiers aligned, but one important field is missing or supplied by a lower-priority source.
+* `0.50`–`0.74`: Plausible work or arrangement match, but edition-specific identity or instrumentation is incomplete, conflicting, or weakly sourced.
+* Below `0.50`: Insufficient confidence; normally set `match_found=false`.
+
+Set `match_found=false` when:
+
+* Multiple plausible editions remain unresolved.
+* Only the work title is found without edition-specific evidence.
+* Instrumentation cannot be tied to the edition.
+* Evidence suggests a manuscript, self-published, unpublished, custom, or local arrangement with no verifiable published source.
+* The result is only a time-limited best guess and lacks enough evidence for a confident edition match.
+
+***
+
+## Time-limited best guess rule
+
+If searching or fetching is taking too long, approximately more than 5 minutes:
+
+* Stop further searching.
+* Return the best-supported JSON possible.
+* Do not invent or infer unsupported instrumentation.
+* If one edition is plausible but not proven, set `match_found=false` unless the available evidence meets the confidence rules above.
+* Explain in `notes` that the result is a time-limited best effort and summarize what evidence was or was not found.
+* Include only sources actually consulted.
+* Use `expected_parts` only when supported by consulted source text.
+
+***
+
+## Ensemble type inference
+
+Infer `ensemble_type` from the matched edition and instrumentation. Do not assume it from the folder, title, or observed library copy.
+
+Use lowercase snake\_case.
+
+Examples of evidence patterns:
+
+* **British brass band**: soprano cornet, solo/repiano/2nd/3rd cornets, flugelhorn, tenor horns, baritones, euphoniums, EEb/BBb basses.
+* **American brass band**: cornets/trumpets, horns, trombones, euphonium/baritone, tubas, percussion, often without British brass-band section labels.
+* **Concert or wind band**: flutes, oboes, bassoons, clarinets, saxophones, trumpets, horns, trombones, euphoniums, tubas, percussion.
+* **Orchestra**: strings plus woodwinds, brass, and percussion.
+* **Other ensembles**: infer directly from the edition’s stated instrumentation.
+
+Use `ensemble_display_name` as a human-readable version.
+
+***
+
+## Instrumentation rules
+
+Report one `expected_parts` entry per named printed part, not per player.
+
+Use lowercase snake\_case `canonical_instrument` names, such as:
+
+* `cornet`
+* `soprano_cornet`
+* `flugelhorn`
+* `tenor_horn`
+* `baritone_horn`
+* `trombone`
+* `bass_trombone`
+* `euphonium`
+* `tuba`
+* `clarinet`
+* `flute`
+* `oboe`
+* `bassoon`
+* `alto_saxophone`
+* `tenor_saxophone`
+* `baritone_saxophone`
+* `trumpet`
+* `horn`
+* `percussion`
+* `timpani`
+* `keyboard`
+* `string_bass`
+
+Set `part_index` to the printed part number when the edition numbers or ranks parts:
+
+* `1` = first, solo, principal, or top numbered part when that is the printed designation.
+* Use `2`, `3`, etc. for printed second/third parts.
+* Use `null` for unnumbered named parts such as `Repiano Cornet`, `Flugelhorn`, `Bass Trombone`, `Timpani`, or `Percussion`.
+* For combined printed labels such as `Cornet 1/2`, create separate entries only if the source clearly treats them as separate printed parts; otherwise preserve the printed label in one entry and use the most appropriate `part_index`.
+* For split/divisi within a single printed part, do not create extra entries unless separate printed parts are listed.
+* For doublings, use the primary printed part as `canonical_instrument` and describe the doubling in `label` or `notes` if needed.
+
+Set `required` as follows:
+
+* `true` for core printed parts of the edition.
+* `false` for parts explicitly marked optional, ad lib, substitute, alternative, cue-only, flexible, or doubling-only.
+* If optionality is unclear, mark core ensemble parts `true` and explain uncertainty in `notes`.
+
+Use a sensible lowercase snake\_case `section`, such as:
+
+* `woodwinds`
+* `clarinets`
+* `saxophones`
+* `cornets_trumpets`
+* `horns`
+* `low_brass`
+* `percussion`
+* `strings`
+
+Or use another clear section when needed.
+
+***
+
+## Evidence source rules
+
+Only include sources actually consulted.
+
+Each `evidence_sources` item must include:
+
+* `url`: the exact consulted source URL.
+* `title`: the page or record title.
+* `snippet`: a short quoted or closely quoted passage from the source that supports identity, instrumentation, or edition details. Prefer snippets that explicitly list instruments or parts.
+* `retrieved`: an ISO date like `2026-07-26`, or `"unknown"` if the retrieval date is unavailable.
+
+Do not cite search-result snippets as sources unless you actually opened or fetched the result.
+
+Do not cite a source for claims it does not explicitly support.
+
+***
+
+## Edge cases
+
+For noisy or partial identity candidates:
+
+* Search variants.
+* Try alternate punctuation and spacing.
+* Try abbreviations.
+* Try translated or non-English titles.
+* Search composer, arranger, publisher, catalog number, and folder-name clues.
+
+For non-English sources:
+
+* Use them if authoritative.
+* Preserve proper names.
+* Translate only enough to identify fields and instrumentation.
+
+For medleys, suites, selections, and extracts:
+
+* Match the exact published item, not a parent work, unless the source explicitly identifies the same edition.
+
+For multiple editions or arrangements:
+
+* Choose only the one best supported by the supplied clues.
+* If no single edition is clearly best, set `match_found=false`.
+
+For pieces that plausibly have no published edition:
+
+* Consider manuscript, self-published, unpublished, custom, or local arrangements.
+* Do not invent a publisher or catalog number.
+* Set `match_found=false` unless a verifiable published source is found.
+
+***
+
+## Output contract REQUIRED
 
 Respond with exactly one JSON object, and nothing else, wrapped between the sentinel lines below.
+
 Do not include Markdown code fences inside the sentinels.
 
-<<<SCORE_JSON>>>
+Keep the field names, nesting, and value types exactly as shown.
+
+<<\<SCORE\_JSON>>>
 {
-  "match_found": true,
-  "identity_match_confidence": 0.0,
-  "ensemble_type": "inferred_snake_case_type",
-  "ensemble_display_name": "Human readable ensemble name",
-  "score_expected": true,
-  "work_identity": {
-    "title": null,
-    "composer": null,
-    "arranger": null,
-    "publisher": null,
-    "catalog_number": null,
-    "year": null
-  },
-  "expected_parts": [
-    {"canonical_instrument": "cornet", "part_index": 1, "label": "Solo Cornet",
-     "section": "cornets_trumpets", "required": true}
-  ],
-  "evidence_sources": [
-    {"url": "https://example.com", "title": "Publisher product page",
-     "snippet": "quoted instrumentation text", "retrieved": "as-of date"}
-  ],
-  "notes": "conflicts, assumptions, or why no confident match was found"
+"match\_found": true,
+"identity\_match\_confidence": 0.0,
+"ensemble\_type": "inferred\_snake\_case\_type",
+"ensemble\_display\_name": "Human readable ensemble name",
+"score\_expected": true,
+"work\_identity": {
+"title": null,
+"composer": null,
+"arranger": null,
+"publisher": null,
+"catalog\_number": null,
+"year": null
+},
+"expected\_parts": \[
+{
+"canonical\_instrument": "cornet",
+"part\_index": 1,
+"label": "Solo Cornet",
+"section": "cornets\_trumpets",
+"required": true
 }
-<<<END_SCORE_JSON>>>
+],
+"evidence\_sources": \[
+{
+"url": "consulted\_source\_url",
+"title": "Publisher product page",
+"snippet": "quoted instrumentation text",
+"retrieved": "unknown"
+}
+],
+"notes": "conflicts, assumptions, time-limited best guess status, or why no confident match was found"
+}
+<<\<END\_SCORE\_JSON>>>

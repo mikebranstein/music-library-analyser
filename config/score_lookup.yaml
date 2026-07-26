@@ -14,8 +14,9 @@ command: copilot
 # AI model for the CLI. Empty string uses the CLI's default model.
 model: ""
 
-# Per-piece subprocess timeout, in seconds.
-timeout_seconds: 300
+# Per-piece subprocess timeout, in seconds. Agentic web lookups can be slow; raise this if
+# lookups are being cut off. Also overridable at runtime with --timeout.
+timeout_seconds: 600
 
 # Identity-match confidence below which a returned match is downgraded to a conservative
 # fallback (evidence is still recorded, but expected parts are not asserted).

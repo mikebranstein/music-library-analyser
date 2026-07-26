@@ -64,7 +64,7 @@ DEFAULT_LOOKUP_CONFIG: dict[str, Any] = {
     "enabled": True,
     "command": "copilot",
     "model": "",
-    "timeout_seconds": 300,
+    "timeout_seconds": 600,
     "confidence_threshold": 0.5,
     "allowed_domains": [],
     "prompt_template_path": "config/llm_prompts/lookup_instrumentation.txt",
@@ -262,7 +262,7 @@ def run_copilot_lookup(prompt: str, config: dict[str, Any]) -> dict[str, Any]:
     if not shutil.which(command):
         raise FileNotFoundError(f"Copilot CLI '{command}' not found on PATH.")
     args = build_cli_args(config, prompt)
-    timeout = float(config.get("timeout_seconds", 300) or 300)
+    timeout = float(config.get("timeout_seconds", 600) or 600)
     stream = bool(config.get("stream_output", True))
 
     logger.info(
