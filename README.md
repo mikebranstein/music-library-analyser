@@ -59,7 +59,7 @@ Primary outputs:
 - Reconcile the looked-up part slots against observed parts (count-based, robust to null part indices) into present / missing / unexpected sets
 - Score required-part completeness + tier, flag `score_missing` and `needs_review`, and record `evidence_sources` + resolved work identity
 - Degrade conservatively (`--no-lookup`, CLI missing/error, `no_match`, or `low_confidence`): declare no missing parts, set `completeness_score: null`, and flag for review — never fabricate a missing part
-- Emit `data/expected_parts.jsonl` (schema 2.0) and a Markdown report (`data/expected_parts_report.md`); `--mode incremental` caches per-piece results by fingerprint to avoid re-spending AI credits
+- Emit `data/expected_parts.jsonl` (schema 2.0), a summary report (`data/expected_parts_report.md`), and a per-piece instrumentation report listing each piece's expected parts (`data/expected_instrumentation.md`); `--mode incremental` caches per-piece results by fingerprint to avoid re-spending AI credits
 
 5. `05_quality_checks.py`
 - Score scan quality
@@ -106,6 +106,7 @@ project-root/
     observed_parts_by_piece.jsonl
     expected_parts.jsonl
     expected_parts_report.md
+    expected_instrumentation.md
     quality_metrics.jsonl
     piece_reports/
     collection_reports/

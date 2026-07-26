@@ -69,6 +69,7 @@ project-root/
     observed_parts_by_piece.jsonl
     expected_parts.jsonl
     expected_parts_report.md
+    expected_instrumentation.md
     quality_metrics.jsonl
     piece_reports/
     collection_reports/
@@ -345,6 +346,7 @@ Outputs:
 
 - `data/expected_parts.jsonl` (one record per piece)
 - `data/expected_parts_report.md` (Markdown summary)
+- `data/expected_instrumentation.md` (per-piece expected instrumentation from the lookups)
 - `data/.expected_parts_checkpoint.json` (checkpoint; supports `--mode incremental`)
 
 Fields (`expected_parts.jsonl`, schema 2.0):

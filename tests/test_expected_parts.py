@@ -392,6 +392,54 @@ def test_infer_piece_lookup_error_conservative():
     assert rec["needs_review"] is True
 
 
+# --- Instrumentation report ------------------------------------------------------------------
+
+
+def _meta() -> dict[str, Any]:
+    return {
+        "generated_at": "2026-01-01T00:00:00Z",
+        "run_id": "run1",
+        "mode": "full",
+        "model": "gpt-x",
+    }
+
+
+def test_build_instrumentation_report_matched_piece():
+    piece = _piece("p1", observed=[_observed("cornet", 1)])
+    parts = [
+        {"canonical_instrument": "cornet", "part_index": 1, "label": "Cornet 1", "required": True},
+        {"canonical_instrument": "euphonium", "part_index": 1, "label": "Euph", "required": True},
+    ]
+    rec = expected.infer_piece(
+        piece, None, "run1",
+        config=dict(expected.DEFAULT_LOOKUP_CONFIG),
+        prompt_template="{title_guess}",
+        lookup_enabled=True,
+        lookup_fn=lambda p, c: _score_result(parts),
+    )
+    report = expected.build_instrumentation_report([rec], _meta())
+    assert "Expected Instrumentation by Piece" in report
+    assert "British Brass Band" in report
+    assert "Cornet 1" in report
+    assert "Euph" in report
+    # cornet observed -> yes; euphonium not observed -> MISSING
+    assert "MISSING" in report
+    assert "https://example.com" in report
+
+
+def test_build_instrumentation_report_fallback_piece():
+    piece = _piece("p1")
+    rec = expected.infer_piece(
+        piece, None, "run1",
+        config=dict(expected.DEFAULT_LOOKUP_CONFIG),
+        prompt_template="{title_guess}",
+        lookup_enabled=False,
+        lookup_fn=lambda p, c: _score_result([]),
+    )
+    report = expected.build_instrumentation_report([rec], _meta())
+    assert "No authoritative instrumentation found" in report
+
+
 # --- End to end ------------------------------------------------------------------------------
 
 
@@ -400,6 +448,7 @@ def _run_cli(tmp_path: Path, monkeypatch, results_by_piece: dict[str, dict[str, 
     docs_path = tmp_path / "documents.jsonl"
     out_path = tmp_path / "expected_parts.jsonl"
     report_path = tmp_path / "report.md"
+    instr_path = tmp_path / "instrumentation.md"
 
     calls = {"count": 0}
 
@@ -418,6 +467,7 @@ def _run_cli(tmp_path: Path, monkeypatch, results_by_piece: dict[str, dict[str, 
         "--documents", str(docs_path),
         "--output", str(out_path),
         "--output-report", str(report_path),
+        "--output-instrumentation", str(instr_path),
         "--config", str(tmp_path / "no_config.yaml"),
     ]
     if extra:
@@ -452,6 +502,12 @@ def test_e2e_full_run(tmp_path: Path, monkeypatch):
     assert "Expected Parts Report" in report_path.read_text()
     assert (out_path.parent / ".expected_parts_checkpoint.json").exists()
     assert calls["count"] == 2
+
+    instr = (out_path.parent / "instrumentation.md").read_text()
+    assert "Expected Instrumentation by Piece" in instr
+    assert "Cornet 1" in instr
+    # p2 is missing euphonium, so it must be flagged MISSING in the per-piece table.
+    assert "MISSING" in instr
 
 
 def test_e2e_incremental_reuse(tmp_path: Path, monkeypatch):

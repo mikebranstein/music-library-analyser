@@ -837,6 +837,126 @@ def build_report(records: list[dict[str, Any]], meta: dict[str, Any]) -> str:
     return "\n".join(out) + "\n"
 
 
+def _format_identity(resolved: dict[str, Any]) -> str:
+    """One-line summary of the resolved edition identity, or empty when nothing is known."""
+    if not isinstance(resolved, dict):
+        return ""
+    order = ["composer", "arranger", "publisher", "catalog_number", "year"]
+    labels = {
+        "composer": "composer",
+        "arranger": "arr.",
+        "publisher": "publisher",
+        "catalog_number": "cat.",
+        "year": "year",
+    }
+    parts = [
+        f"{labels[key]} {resolved[key]}"
+        for key in order
+        if resolved.get(key) not in (None, "")
+    ]
+    return "; ".join(parts)
+
+
+def build_instrumentation_report(records: list[dict[str, Any]], meta: dict[str, Any]) -> str:
+    """Render a per-piece report of the expected instrumentation found by the LLM lookups.
+
+    Unlike the summary report, this lists every expected part for each piece (canonical
+    instrument, printed label, section, required/optional, and whether it was observed), plus the
+    resolved edition identity and the evidence sources the lookup consulted. Pieces that fell back
+    to a conservative record are listed with a note that no authoritative instrumentation was
+    found.
+    """
+    matched = [r for r in records if r.get("lookup_status") == "matched"]
+
+    out: list[str] = []
+    out.append("# Expected Instrumentation by Piece")
+    out.append("")
+    out.append(
+        f"_Generated {meta['generated_at']} - run `{meta['run_id']}` - "
+        f"mode **{meta['mode']}** - model {meta['model'] or '(CLI default)'}_"
+    )
+    out.append("")
+    out.append(
+        f"Instrumentation below comes from online score lookups. "
+        f"{len(matched)} of {len(records)} piece(s) have an authoritative instrumentation list; "
+        f"the rest fell back to a conservative record (no expected parts asserted)."
+    )
+    out.append("")
+
+    for rec in sorted(records, key=_sort_key):
+        catalog = rec.get("catalog_number") or "?"
+        title = rec.get("piece_title_guess") or rec.get("piece_folder") or rec.get("piece_id")
+        out.append(f"## {catalog} - {title}")
+        out.append("")
+
+        ensemble = rec.get("ensemble_display_name") or "Unknown"
+        ensemble_type = rec.get("ensemble_type") or "unknown"
+        status = rec.get("lookup_status", "unknown")
+        confidence = rec.get("identity_match_confidence")
+        score = rec.get("completeness_score")
+        pct = "-" if score is None else f"{score * 100:.0f}% ({rec.get('completeness_tier')})"
+
+        out.append(f"- **Ensemble:** {_md_cell(ensemble)} (`{ensemble_type}`)")
+        out.append(
+            f"- **Lookup:** {status} - confidence {confidence} - completeness {pct}"
+        )
+        identity = _format_identity((rec.get("work_identity") or {}).get("resolved", {}))
+        if identity:
+            out.append(f"- **Edition:** {_md_cell(identity)}")
+        if rec.get("lookup_notes"):
+            out.append(f"- **Notes:** {_md_cell(rec['lookup_notes'])}")
+        out.append("")
+
+        expected_parts = rec.get("expected_parts") or []
+        if expected_parts:
+            out.append("| # | Instrument | Label | Section | Required | Observed |")
+            out.append("| --- | --- | --- | --- | --- | --- |")
+            for part in expected_parts:
+                idx = part.get("part_index")
+                idx_cell = "-" if idx is None else str(idx)
+                required = "required" if part.get("required") else "optional"
+                observed = "yes" if part.get("present") else "MISSING"
+                out.append(
+                    f"| {idx_cell} | {_md_cell(part.get('canonical_instrument'))} "
+                    f"| {_md_cell(part.get('label'))} | {_md_cell(part.get('section'))} "
+                    f"| {required} | {observed} |"
+                )
+            out.append("")
+            unexpected = rec.get("unexpected_parts") or []
+            if unexpected:
+                labels = ", ".join(
+                    _md_cell(u.get("predicted_part") or u.get("canonical_instrument"))
+                    for u in unexpected
+                )
+                out.append(f"_Observed but not expected: {labels}_")
+                out.append("")
+        else:
+            out.append(
+                "_No authoritative instrumentation found "
+                f"(lookup {status}); {rec.get('observed_instrument_count', 0)} "
+                "instrument(s) observed in the library copy._"
+            )
+            out.append("")
+
+        evidence = rec.get("evidence_sources") or []
+        if evidence:
+            out.append("**Sources:**")
+            out.append("")
+            for src in evidence:
+                if not isinstance(src, dict):
+                    continue
+                stitle = _md_cell(src.get("title") or src.get("url") or "source")
+                url = src.get("url") or ""
+                snippet = _md_cell(src.get("snippet") or "")
+                line = f"- [{stitle}]({url})" if url else f"- {stitle}"
+                if snippet:
+                    line += f' - "{snippet}"'
+                out.append(line)
+            out.append("")
+
+    return "\n".join(out) + "\n"
+
+
 # --- CLI -------------------------------------------------------------------------------------
 
 
@@ -857,6 +977,10 @@ def main(
     ),
     output_report: Path = typer.Option(
         Path("data/expected_parts_report.md"), help="Markdown summary output"
+    ),
+    output_instrumentation: Path = typer.Option(
+        Path("data/expected_instrumentation.md"),
+        help="Per-piece expected-instrumentation report output",
     ),
     write_report: bool = typer.Option(
         True, "--report/--no-report", help="Write the Markdown summary report"
@@ -1019,6 +1143,10 @@ def main(
         report = build_report(rebuilt, meta)
         atomic_write_text(output_report.resolve(), report)
         logger.info("Wrote Markdown report: %s", output_report.resolve())
+
+        instrumentation = build_instrumentation_report(rebuilt, meta)
+        atomic_write_text(output_instrumentation.resolve(), instrumentation)
+        logger.info("Wrote instrumentation report: %s", output_instrumentation.resolve())
 
     new_checkpoint = {
         "record_version": RECORD_VERSION,
