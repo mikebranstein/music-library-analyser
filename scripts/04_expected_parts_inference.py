@@ -897,11 +897,26 @@ def _coerce_index(value: Any) -> int | None:
     return None
 
 
+def _is_score_slot(canonical: str, section: Any) -> bool:
+    """True when a lookup part entry describes the score itself, not a playable instrument.
+
+    Authority sources routinely list the score edition (e.g. "Condensed Score", "Full Score") as
+    the first line of the instrumentation. Those are not reconcilable instrument parts -- observed
+    score documents are tracked separately via ``score_expected`` / ``has_score`` -- so they must
+    not become expected instrument slots (which could never be matched and would surface as a false
+    "missing Condensed Score" required part).
+    """
+    if "score" in canonical.lower():
+        return True
+    return isinstance(section, str) and section.strip().lower() == "score"
+
+
 def normalize_expected_parts(raw_parts: Any) -> list[dict[str, Any]]:
     """Coerce lookup ``expected_parts`` into internal slot dicts.
 
     Output slots use the same shape as ``reconcile_parts`` expects: ``canonical``, ``part_index``,
-    ``label``, ``section``, ``required``. Entries without a canonical instrument are dropped. Each
+    ``label``, ``section``, ``required``. Entries without a canonical instrument are dropped, as are
+    score-edition entries (see ``_is_score_slot``) since score presence is tracked separately. Each
     ``canonical_instrument`` from the lookup is mapped onto the shared taxonomy token (e.g.
     ``alto_saxophone`` -> ``alto_sax``) so it reconciles against Script 03's observed parts, and the
     ``section`` is taken from the taxonomy for that canonical (falling back to the lookup's section)
@@ -921,6 +936,8 @@ def normalize_expected_parts(raw_parts: Any) -> list[dict[str, Any]]:
             continue
         canonical = canonicalize_instrument(raw_canonical, alias_to_canonical)
         if not canonical:
+            continue
+        if _is_score_slot(canonical, entry.get("section")):
             continue
         required = entry.get("required")
         slots.append({

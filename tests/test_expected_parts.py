@@ -277,6 +277,42 @@ def test_normalize_expected_parts_canonicalizes_to_taxonomy():
     assert slots[0]["label"] == "Alto Saxophone I"
 
 
+def test_normalize_expected_parts_drops_score_entries():
+    # Authority instrumentation lists routinely start with the score edition (e.g. "Condensed
+    # Score"). That is not a playable instrument part -- score presence is tracked separately --
+    # so it must not become an expected slot that would falsely read as a missing required part.
+    raw = [
+        {"canonical_instrument": "Condensed Score", "label": "Condensed Score",
+         "section": "score", "required": True},
+        {"canonical_instrument": "Full Score", "label": "Full Score", "required": True},
+        {"canonical_instrument": "Flute", "part_index": 1, "label": "Flute 1"},
+    ]
+    slots = expected.normalize_expected_parts(raw)
+    assert [s["canonical"] for s in slots] == ["flute"]
+
+
+def test_infer_piece_condensed_score_not_reported_missing():
+    # Regression (001 Mexican Hat Dance): a conductor score exists (has_score True) and the lookup
+    # lists "Condensed Score" first. The score edition must not surface as a missing required part.
+    piece = _piece(observed=[_observed("flute", 1)], has_score=True)
+    parts = [
+        {"canonical_instrument": "Condensed Score", "label": "Condensed Score",
+         "section": "score", "required": True},
+        {"canonical_instrument": "flute", "part_index": 1, "label": "Flute 1", "required": True},
+    ]
+    rec = expected.infer_piece(
+        piece, None, "run1",
+        config=dict(expected.DEFAULT_LOOKUP_CONFIG),
+        prompt_template="{title_guess}",
+        lookup_enabled=True,
+        lookup_fn=lambda p, c: _score_result(parts),
+    )
+    assert "Condensed Score" not in rec["missing_required_parts"]
+    assert rec["missing_required_count"] == 0
+    assert rec["score_missing"] is False
+    assert rec["needs_review"] is False
+
+
 # --- Reconciliation --------------------------------------------------------------------------
 
 
