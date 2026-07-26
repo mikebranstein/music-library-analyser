@@ -276,6 +276,8 @@ def run_copilot_lookup(prompt: str, config: dict[str, Any]) -> dict[str, Any]:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         bufsize=1,
     )
 
