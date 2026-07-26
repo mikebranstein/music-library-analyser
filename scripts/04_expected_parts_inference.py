@@ -489,8 +489,12 @@ def reocr_score_pages(
     try:
         page_count = min(max(1, max_pages), doc.page_count)
         matrix = fitz.Matrix(dpi / 72.0, dpi / 72.0)  # type: ignore[attr-defined]
+        logger.info("Re-OCRing first %d page(s) of score %s at %d DPI",
+                    page_count, abs_pdf_path.name, dpi)
         for page_index in range(page_count):
             try:
+                logger.info("Re-OCR: rendering + OCRing page %d/%d of %s",
+                            page_index + 1, page_count, abs_pdf_path.name)
                 page = doc.load_page(page_index)
                 pix = page.get_pixmap(matrix=matrix)  # type: ignore[attr-defined]
                 img_path = dest_dir / f"reocr_page{page_index + 1}.png"
@@ -520,6 +524,7 @@ def download_image(url: str, dest_dir: Path, index: int) -> Path | None:
     if not suffix or len(suffix) > 5:
         suffix = ".img"
     dest = dest_dir / f"image_{index:02d}{suffix}"
+    logger.info("Downloading candidate score image #%d: %s -> %s", index, url, dest.name)
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "music-library-analyser/04"})
         with urllib.request.urlopen(req, timeout=60) as resp:
@@ -527,6 +532,7 @@ def download_image(url: str, dest_dir: Path, index: int) -> Path | None:
     except Exception as exc:
         logger.warning("Failed to download image %s: %s", url, exc)
         return None
+    logger.info("Downloaded image #%d (%d bytes): %s", index, dest.stat().st_size, dest.name)
     return dest
 
 
@@ -535,12 +541,15 @@ def ocr_image_file(image_path: Path) -> str:
     if pytesseract is None or Image is None:
         logger.debug("Image OCR skipped: pytesseract/Pillow not available.")
         return ""
+    logger.info("OCRing image %s", image_path.name)
     try:
         with Image.open(image_path) as img:  # type: ignore[union-attr]
-            return str(pytesseract.image_to_string(img) or "").strip()  # type: ignore[union-attr]
+            text = str(pytesseract.image_to_string(img) or "").strip()  # type: ignore[union-attr]
     except Exception as exc:
         logger.warning("Image OCR failed for %s: %s", image_path, exc)
         return ""
+    logger.info("OCR of %s produced %d character(s)", image_path.name, len(text))
+    return text
 
 
 def extract_image_urls(result: dict[str, Any]) -> list[str]:
@@ -583,6 +592,8 @@ def download_and_ocr_images(
         if text.strip():
             chunks.append(text.strip())
             ocr_count += 1
+    logger.info("OCR'd %d of %d candidate score image(s) for %s (%d chars total)",
+                ocr_count, len(urls), piece_id, len("\n".join(chunks).strip()))
     return "\n".join(chunks).strip(), ocr_count
 
 
@@ -994,28 +1005,41 @@ def infer_piece(
     """
     model = str(config.get("model") or "")
     summarize = summarize_fn or lookup_fn
+    piece_id = piece.get("piece_id")
 
     # --- Stage A: local score OCR --------------------------------------------------------
     if config.get("local_score_enabled", True) and score_text_provider is not None:
+        logger.info("[%s] Stage A: checking for a local score to OCR", piece_id)
         score_text, score_doc = score_text_provider(piece)
         if score_text:
+            score_path = (score_doc or {}).get("pdf_path") if score_doc else None
+            logger.info(
+                "[%s] Stage A: found local score %s (%d chars of text); summarizing into a "
+                "contract", piece_id, score_path or "?", len(score_text),
+            )
             record = _try_contract_from_text(
                 piece, doc, run_id, score_text,
                 config=config, summarize_fn=summarize, summarize_template=summarize_template,
                 detection_method=METHOD_LOCAL_SCORE, ocr_source="local_score",
-                local_score_path=(score_doc or {}).get("pdf_path") if score_doc else None,
+                local_score_path=score_path,
             )
             if record is not None:
+                logger.info("[%s] Stage A succeeded: instrumentation from local score %s",
+                            piece_id, score_path or "?")
                 return record
             logger.info(
-                "Local score OCR did not yield a confident contract for %s; trying online lookup.",
-                piece.get("piece_id"),
+                "[%s] Stage A: local score did not yield a confident contract; trying "
+                "online lookup", piece_id,
             )
+        else:
+            logger.info("[%s] Stage A: no usable local score found; trying online lookup", piece_id)
 
     # --- Stage B: online authority lookup ------------------------------------------------
     if not lookup_enabled:
+        logger.info("[%s] Online lookup disabled; recording conservative fallback", piece_id)
         return conservative_record(piece, doc, run_id, LookupStatus.DISABLED, lookup_model=model)
 
+    logger.info("[%s] Stage B: querying online authority lookup", piece_id)
     query = build_lookup_query(piece, doc)
     prompt = render_prompt(prompt_template, query)
     try:
@@ -1027,6 +1051,8 @@ def infer_piece(
         )
 
     if not isinstance(result, dict) or not result.get("match_found"):
+        logger.info("[%s] Stage B: no authoritative match found; recording conservative fallback",
+                    piece_id)
         return conservative_record(
             piece, doc, run_id, LookupStatus.NO_MATCH,
             evidence=result.get("evidence_sources") if isinstance(result, dict) else None,
@@ -1039,6 +1065,8 @@ def infer_piece(
     threshold = float(config.get("confidence_threshold", 0.5) or 0.0)
 
     if confidence >= threshold and result.get("expected_parts"):
+        logger.info("[%s] Stage B matched an edition with instrumentation (confidence %.2f)",
+                    piece_id, confidence)
         return build_matched_record(
             piece, doc, run_id, result, model,
             detection_method=METHOD_AUTHORITY, inference_method=METHOD_AUTHORITY,
@@ -1053,10 +1081,15 @@ def infer_piece(
     ):
         image_urls = extract_image_urls(result)
         if image_urls:
+            logger.info(
+                "[%s] Stage C: edition matched (confidence %.2f) but no parts returned; "
+                "OCRing %d candidate score image(s)", piece_id, confidence, len(image_urls),
+            )
             ocr_text, ocr_count = download_and_ocr_images(
                 image_urls, str(piece.get("piece_id") or "piece"), image_fetch_fn, image_ocr_fn
             )
             if ocr_count:
+                logger.info("[%s] Stage C: summarizing OCR'd image text into a contract", piece_id)
                 record = _try_contract_from_text(
                     piece, doc, run_id, ocr_text,
                     config=config, summarize_fn=summarize,
@@ -1064,9 +1097,15 @@ def infer_piece(
                     detection_method=METHOD_SCORE_IMAGE, ocr_source="score_image",
                 )
                 if record is not None:
+                    logger.info("[%s] Stage C succeeded: instrumentation from OCR'd score images",
+                                piece_id)
                     return record
 
     if confidence < threshold:
+        logger.info(
+            "[%s] Stage B match below confidence threshold (%.2f < %.2f); conservative fallback",
+            piece_id, confidence, threshold,
+        )
         return conservative_record(
             piece, doc, run_id, LookupStatus.LOW_CONFIDENCE,
             evidence=result.get("evidence_sources"),
@@ -1079,6 +1118,8 @@ def infer_piece(
         )
 
     # Matched an edition, but neither text nor image OCR produced usable parts.
+    logger.info("[%s] Matched an edition but no stage produced usable parts; conservative fallback",
+                piece_id)
     return conservative_record(
         piece, doc, run_id, LookupStatus.NO_MATCH,
         evidence=result.get("evidence_sources"),
@@ -1547,17 +1588,28 @@ def main(
         piece: dict[str, Any],
     ) -> tuple[str | None, dict[str, Any] | None]:
         """Return (score_text, score_doc) for a piece, reusing Script 02 text; re-OCR if thin."""
-        best = find_best_score_doc(str(piece.get("piece_id") or ""), score_docs_by_piece)
+        pid = piece.get("piece_id")
+        best = find_best_score_doc(str(pid or ""), score_docs_by_piece)
         if not best:
+            logger.info("[%s] No local score document found in part predictions", pid)
             return None, None
         pdf_path = str(best.get("pdf_path") or "")
+        logger.info("[%s] Selected local score %s (score_type=%s)",
+                    pid, pdf_path, best.get("score_type") or "?")
         text = get_extracted_score_text(pdf_path, text_by_pdf, max_score_pages)
         if len(text.strip()) < max(1, min_score_text):
             abs_path = (lib_root / pdf_path) if lib_root else Path(pdf_path)
-            reocr_dir = Path(tempfile.mkdtemp(prefix=f"reocr_{piece.get('piece_id')}_"))
+            logger.info(
+                "[%s] Reused text is thin (%d < %d chars); re-OCRing %s",
+                pid, len(text.strip()), min_score_text, abs_path,
+            )
+            reocr_dir = Path(tempfile.mkdtemp(prefix=f"reocr_{pid}_"))
             reocr_text = reocr_score_pages(abs_path, max_score_pages, reocr_dpi, reocr_dir)
             if len(reocr_text.strip()) > len(text.strip()):
                 text = reocr_text
+        else:
+            logger.info("[%s] Reusing %d chars of extracted score text from Script 02",
+                        pid, len(text.strip()))
         return (text or None), best
 
     cfg_fp = config_fingerprint(
