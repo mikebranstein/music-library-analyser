@@ -27,6 +27,9 @@ Primary outputs:
 - LLM usage: extraction/adjudication constrained to retrieved evidence only
 - Quality classification: includes printed-original vs handwritten vs mixed/uncertain with confidence
 - Pipeline behavior: idempotent, incremental, and auditable
+- Shared infrastructure: every script builds on `scripts/_common.py` for logging, checkpointing,
+  record envelopes, concurrency, report helpers, and the status/tier vocabulary constants
+  (`LookupStatus`, `CompletenessTier`, `ProcessingStatus`) — see §4.9 of the plan document
 
 ## Pipeline Overview
 

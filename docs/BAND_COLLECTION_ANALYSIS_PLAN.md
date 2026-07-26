@@ -424,6 +424,15 @@ Optional model-assisted checks:
   - severe artifact presence
   - confidence rationale for classification
 
+Shared infrastructure (reuse from `scripts._common`; see §4.9):
+
+- `setup_logging`; a `RECORD_VERSION` + `CHECKPOINT_FILENAME` (`.quality_checks_checkpoint.json`)
+  with `make_checkpoint_path` / `load_checkpoint` / `build_checkpoint` for `--mode incremental`.
+- Build each record from `new_record_envelope(run_id, RECORD_VERSION)`; set `ProcessingStatus.ERROR`
+  on failed pages/documents.
+- Run per-document (optional vision) checks through `run_with_progress` so `-j/--concurrency` works
+  like Script 04; keep per-item logging inside the worker.
+
 Outputs:
 
 - `data/quality_metrics.jsonl`
@@ -462,6 +471,14 @@ Report sections:
 - Confidence summary
 - Manual actions recommended
 
+Shared infrastructure (reuse from `scripts._common`; see §4.9):
+
+- Iterate/sort pieces with `piece_sort_key`; escape Markdown table cells with `md_cell` and compute
+  rates with `pct`.
+- When reading `expected_parts.jsonl`, branch on `LookupStatus.*` and `CompletenessTier.*` constants
+  (never bare strings), and present completeness using `COMPLETENESS_TIER_ORDER`.
+- Render many piece reports concurrently via `run_with_progress`.
+
 Outputs:
 
 - `data/piece_reports/<piece_id>.md`
@@ -482,6 +499,14 @@ Metrics:
 - distribution of quality bands
 - top missing instruments overall (aggregate by Script 03 `section` and `canonical_instrument`)
 - confidence distribution (aggregate Script 03 `confidence_tier` / `needs_review_count`)
+
+Shared infrastructure (reuse from `scripts._common`; see §4.9):
+
+- Aggregate Script 04 results by iterating `LOOKUP_STATUS_ORDER` / `COMPLETENESS_TIER_ORDER` so
+  every table shares one canonical ordering; compare against `LookupStatus.*` / `CompletenessTier.*`
+  constants rather than literals.
+- Use `pct` for coverage percentages and `md_cell` for all Markdown table cells; order any
+  piece-level rows with `piece_sort_key`.
 
 Outputs:
 
@@ -511,9 +536,68 @@ Include:
 - reason codes
 - recommended next action
 
+Shared infrastructure (reuse from `scripts._common`; see §4.9):
+
+- Drive priority off `CompletenessTier.*` / `LookupStatus.*` and Script 03's `needs_review`
+  rollup counts (compare against the shared constants, not strings).
+- Order the queue with `piece_sort_key` as a stable tie-breaker; escape any Markdown/HTML table
+  cells with `md_cell`.
+
 Output:
 
 - CSV and optional lightweight HTML dashboard
+
+## 4.9 Shared Pipeline Infrastructure (`scripts/_common.py`) and Gap Analysis
+
+Auditing Script 04 alongside Scripts 01-03 surfaced infrastructure that had been copy-pasted into
+every script. Because Scripts 05-08 are not written yet, that duplication is now the single largest
+risk to the pipeline staying consistent: each new script would otherwise re-implement logging,
+checkpointing, percentage/Markdown helpers, concurrency, and — most dangerously — re-type the
+status/tier string literals that consumers filter on. The audit therefore extracted six pieces of
+shared infrastructure into `scripts/_common.py`. Scripts 01-04 were refactored onto them (all 67
+tests still pass), and Scripts 05-08 are expected to build on them from day one.
+
+### Gap analysis (what was missing, now filled)
+
+| # | Gap before | Shared API in `scripts/_common.py` | Why it matters for 05-08 |
+|---|------------|------------------------------------|--------------------------|
+| 1 | Each script re-declared `setup_logging`, an ad-hoc checkpoint-path builder, and private `_pct` / `_md_cell` report helpers | `LOG_FORMAT`, `setup_logging(log_level)`, `make_checkpoint_path(output, filename)`, `pct(part, whole)`, `md_cell(value)` | New scripts get identical log lines, checkpoint placement, and safe Markdown tables for free |
+| 2 | Each script hand-rolled checkpoint load (with its own version-mismatch check) and checkpoint assembly | `load_checkpoint(path, record_version, logger=None)` (returns `{}` on missing/stale), `build_checkpoint(record_version, run_id, fingerprints, **extra)` | `--mode incremental` behaves identically everywhere; a schema bump auto-invalidates stale checkpoints |
+| 3 | Each record's common header (`record_version`, `run_id`, `processing_status`, `processing_timestamp`) was inlined per script | `new_record_envelope(run_id, record_version)` | Every downstream record carries the same envelope; consumers can rely on it existing |
+| 4 | Only Script 04 had concurrency, wired directly to `ThreadPoolExecutor` | `run_with_progress(items, worker, max_workers=1)` (order-preserving; sequential for 1 worker/item) | Any slow stage (05 vision checks, 06 report rendering) gets a `-j/--concurrency` option with one call |
+| 5 | Status/tier strings (`"matched"`, `"complete"`, `"success"`, …) were bare literals scattered across scripts | `ProcessingStatus`, `LookupStatus`, `CompletenessTier` classes + `LOOKUP_STATUS_ORDER` / `COMPLETENESS_TIER_ORDER` tuples | A rename can no longer silently break a consumer's filter; report tables share one canonical ordering |
+| 6 | Piece ordering was a private `_sort_key` in Script 04 only | `piece_sort_key(record)` → `(catalog_number or "~", piece_folder or "")` | Piece-level output/reports sort identically across 04, 06, 07, 08 |
+
+### Shared API surface (import from `scripts._common`)
+
+- Serialization / IO (pre-existing): `read_jsonl`, `read_json`, `atomic_write_jsonl`,
+  `atomic_write_json`, `atomic_write_text`, `utc_now_iso`, `sha256_text`, `file_fingerprint`,
+  `normalize_rel_path`.
+- Scaffolding (this audit): `setup_logging`, `make_checkpoint_path`, `load_checkpoint`,
+  `build_checkpoint`, `new_record_envelope`, `run_with_progress`.
+- Report helpers (this audit): `pct`, `md_cell`, `piece_sort_key`.
+- Vocabulary constants (this audit): `ProcessingStatus`, `LookupStatus`, `CompletenessTier`,
+  `LOOKUP_STATUS_ORDER`, `COMPLETENESS_TIER_ORDER`.
+
+### Conventions every new script (05-08) should follow
+
+1. Define a module-level `RECORD_VERSION` and a `CHECKPOINT_FILENAME` dotfile constant (e.g.
+   `".quality_checks_checkpoint.json"`) so `make_checkpoint_path` keeps checkpoints beside outputs.
+2. Start `main()` with `setup_logging(log_level)`; log per-item progress inside the `worker`
+   passed to `run_with_progress`, not in the caller.
+3. Build every output record from `new_record_envelope(run_id, RECORD_VERSION)` and add domain
+   fields on top; set `processing_status` from `ProcessingStatus` on error paths.
+4. For incremental mode, load with `load_checkpoint(path, RECORD_VERSION, logger)` and persist with
+   `build_checkpoint(RECORD_VERSION, run_id, fingerprints, **stage_specific_fields)` via
+   `atomic_write_json`.
+5. When reading Script 04 output, filter on `LookupStatus.*` / `CompletenessTier.*` constants — never
+   bare strings — and iterate report groups using the `*_ORDER` tuples.
+6. Sort piece-level records/reports with `piece_sort_key`; escape Markdown cells with `md_cell` and
+   compute rates with `pct`.
+
+> Note: Script 02's per-page/per-document record builders were intentionally left on their inline
+> envelope fields (rather than retrofitted to `new_record_envelope`) to avoid churning a stable,
+> already-shipped schema. New scripts have no such constraint and should use the envelope helper.
 
 ## 5. Core Decision Model
 
