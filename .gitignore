@@ -164,6 +164,7 @@ venv.bak/
 /data/.extraction_checkpoint.json
 /data/piece_reports/
 /data/collection_reports/
+/data/expected_instrumentation/
 /cache/ocr/
 /cache/render/
 /cache/llm/

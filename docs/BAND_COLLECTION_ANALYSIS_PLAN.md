@@ -70,6 +70,7 @@ project-root/
     expected_parts.jsonl
     expected_parts_report.md
     expected_instrumentation.md
+    expected_instrumentation/
     quality_metrics.jsonl
     quality_report.md
     piece_reports/
@@ -367,7 +368,9 @@ Conservative fallback (per-piece degradation):
 
 Stage toggles: `--local-score/--no-local-score` (Stage A), `--lookup/--no-lookup` (Stage B), and
 `--image-ocr/--no-image-ocr` (Stage C); each also respects its `*_enabled` flag in
-`config/score_lookup.yaml`.
+`config/score_lookup.yaml`. Report toggle: `--split-instrumentation/--no-split-instrumentation`
+(default on) controls whether the instrumentation report is split into per-piece files with a
+linking index (see §4.10).
 
 Note: lookup accuracy is bounded by what the model can find online (Stage B) and by scan/OCR quality
 (Stages A/C), and Stages B/C are network- and AI-credit-dependent and nondeterministic. `--mode
@@ -379,10 +382,15 @@ avoid re-spending credits or re-OCR on unchanged pieces.
 
 Outputs:
 
-- `data/expected_parts.jsonl` (one record per piece)
-- `data/expected_parts_report.md` (Markdown summary)
-- `data/expected_instrumentation.md` (per-piece expected instrumentation from the lookups)
-- `data/.expected_parts_checkpoint.json` (checkpoint; supports `--mode incremental`)
+- `data/expected_parts.jsonl` (one record per piece; rewritten atomically as each piece completes,
+  so an interrupted run keeps the pieces already finished)
+- `data/expected_parts_report.md` (Markdown summary; written at end of run)
+- `data/expected_instrumentation.md` (per-piece expected instrumentation). By default this is an
+  **index** that links to one Markdown file per piece under `data/expected_instrumentation/`, each
+  written as its piece finishes; `--no-split-instrumentation` restores a single monolithic file.
+- `data/expected_instrumentation/` (per-piece instrumentation Markdown when splitting is enabled)
+- `data/.expected_parts_checkpoint.json` (checkpoint; rewritten as each piece completes; supports
+  `--mode incremental` resume after an interrupted run)
 
 Fields (`expected_parts.jsonl`, schema 2.1):
 
@@ -663,6 +671,55 @@ tests still pass), and Scripts 05-08 are expected to build on them from day one.
 > Note: Script 02's per-page/per-document record builders were intentionally left on their inline
 > envelope fields (rather than retrofitted to `new_record_envelope`) to avoid churning a stable,
 > already-shipped schema. New scripts have no such constraint and should use the envelope helper.
+
+## 4.10 Incremental streaming output and per-piece report split (Script 04)
+
+A follow-up audit of Script 04's write path (aimed at large libraries, e.g. 700 pieces) surfaced a
+durability gap and a report-scaling problem. Both are now addressed; the design below is the
+convention Scripts 05-08 should follow whenever a run is long, expensive, or interruptible.
+
+### Audit findings
+
+| # | Finding (before) | Impact | Fix |
+|---|------------------|--------|-----|
+| A | **Nothing was persisted until the run finished.** `expected_parts.jsonl`, both Markdown reports, and `.expected_parts_checkpoint.json` were all written only after the full processing loop. | Stopping mid-run (e.g. 400/700) lost every structured record **and** the checkpoint. `--mode incremental` could not resume because `previous_records` is read from the end-only JSONL, so a re-run recomputed everything and re-spent AI credits. Only raw lookup JSON (`--save-lookups`) was written incrementally, and it is not structured enough to rebuild reports or drive resume. | Records, the checkpoint, and (when split) per-piece Markdown are now persisted **as each piece completes**, so an interrupted run resumes and never recomputes finished pieces. |
+| B | **`expected_instrumentation.md` was one monolithic file** rendered only at the end. | At ~1-3 KB/piece it grows to 1-2 MB for 700 pieces: unwieldy to navigate, noisy diffs, and unavailable until completion. | The report is split into one file per piece under `data/expected_instrumentation/`, written as each piece finishes; `expected_instrumentation.md` becomes a lightweight index that links to them. |
+| C | **`run_with_progress` returned only after all items completed** (`ThreadPoolExecutor.map`), giving no per-completion hook. | There was no safe place to persist incrementally under concurrency. | `run_with_progress` gained an optional `on_result(item, result)` callback invoked in the **caller's thread** as each item finishes (order-preserving return is unchanged), so incremental writes need no locking. |
+| D | **Checkpoint fingerprints were computed for all pieces upfront** but written once at the end. | A partial checkpoint could otherwise claim unprocessed pieces were done. | Incremental checkpoint writes include only fingerprints for pieces actually persisted so far; the existing dual guard (record present in output **and** fingerprint match) keeps partial checkpoints correct. |
+
+### Design (as built)
+
+- **`scripts/_common.py` — `run_with_progress(items, worker, max_workers=1, on_result=None)`:**
+  when `on_result` is supplied it is called once per completed item, in the caller's thread, for
+  both the sequential and parallel paths. Return order still matches input order. This is the shared
+  hook any streaming stage (05-08) should use for incremental persistence.
+- **Incremental persistence (Script 04):** as each piece completes, the run (a) appends the record
+  to the in-memory set and atomically rewrites `expected_parts.jsonl` (sorted via `piece_sort_key`),
+  (b) records the piece's fingerprint and atomically rewrites the checkpoint, and (c) when splitting,
+  atomically writes that piece's per-piece Markdown file. All writes go through the existing
+  `atomic_write_*` helpers (temp-file + `os.replace`), so a crash never corrupts an existing file.
+- **Per-piece report split:** controlled by `--split-instrumentation/--no-split-instrumentation`
+  (default **on**). Split files live in a subfolder named after the instrumentation report's stem —
+  `data/expected_instrumentation/` for the default `data/expected_instrumentation.md`. Each file is
+  named `"{catalog}_{title}_{piece_id}.md"` (slugged) so it is deterministic across runs and sorts
+  by catalog. `expected_instrumentation.md` is then an index: run metadata plus a table
+  (Catalog / Piece / Ensemble / Lookup / Completeness / Missing required / Details) whose Details
+  column links to each per-piece file. `--no-split-instrumentation` restores the single-file report.
+- **Orphan cleanup:** at the end of a run the split folder is reconciled — Markdown files that no
+  longer correspond to a current piece are removed. Only `*.md` files inside the managed subfolder
+  are touched.
+
+### Implications for Scripts 05-08
+
+- Script 05 (quality checks) already scores documents through `run_with_progress`; if its runs get
+  long it should adopt the same `on_result` incremental-persistence pattern rather than writing
+  `quality_metrics.jsonl` and its report only at the end.
+- Scripts 06-08 read `expected_parts.jsonl` (unchanged schema) as their source of truth — **not** the
+  Markdown reports — so the split does not change their inputs. If Script 06 renders many per-piece
+  files, it should mirror this split + streaming convention (it already targets
+  `data/piece_reports/<piece_id>.md`).
+- The instrumentation split establishes the folder convention (`data/<report_stem>/` for per-piece
+  Markdown, with the top-level `.md` as an index). Reuse this shape for any future per-piece report.
 
 ## 5. Core Decision Model
 

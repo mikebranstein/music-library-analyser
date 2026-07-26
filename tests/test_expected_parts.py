@@ -827,9 +827,14 @@ def test_e2e_full_run(tmp_path: Path, monkeypatch):
 
     instr = (out_path.parent / "instrumentation.md").read_text()
     assert "Expected Instrumentation by Piece" in instr
-    assert "Cornet 1" in instr
-    # p2 is missing euphonium, so it must be flagged MISSING in the per-piece table.
-    assert "MISSING" in instr
+    # Split is on by default: instrumentation.md is an index that links to per-piece files.
+    assert "(instrumentation/" in instr
+    split_dir = out_path.parent / "instrumentation"
+    assert split_dir.is_dir()
+    combined = "\n".join(p.read_text() for p in sorted(split_dir.glob("*.md")))
+    assert "Cornet 1" in combined
+    # p2 is missing euphonium, so it must be flagged MISSING in its per-piece table.
+    assert "MISSING" in combined
 
 
 def test_e2e_incremental_reuse(tmp_path: Path, monkeypatch):
@@ -876,3 +881,129 @@ def test_e2e_parallel_lookups(tmp_path: Path, monkeypatch):
     assert {r["piece_id"] for r in records} == {"p1", "p2", "p3"}
     assert calls["count"] == 3
     assert all(r["lookup_status"] == "matched" for r in records)
+
+
+# --- Per-piece instrumentation split ---------------------------------------------------------
+
+
+def _matched_record(piece_id: str = "p1") -> dict[str, Any]:
+    parts = [
+        {"canonical_instrument": "cornet", "part_index": 1, "label": "Cornet 1", "required": True},
+        {"canonical_instrument": "euphonium", "part_index": 1, "label": "Euph", "required": True},
+    ]
+    return expected.infer_piece(
+        _piece(piece_id, observed=[_observed("cornet", 1)]), None, "run1",
+        config=dict(expected.DEFAULT_LOOKUP_CONFIG),
+        prompt_template="{title_guess}",
+        lookup_enabled=True,
+        lookup_fn=lambda p, c: _score_result(parts),
+    )
+
+
+def test_piece_instrumentation_filename_deterministic():
+    rec = _matched_record("p1")
+    name = expected.piece_instrumentation_filename(rec)
+    # Stable across calls, ends in .md, leads with the catalog number, includes the piece id.
+    assert name == expected.piece_instrumentation_filename(rec)
+    assert name.endswith(".md")
+    assert name.startswith("100_")
+    assert "p1" in name
+    # Filesystem-safe: no path separators or spaces.
+    assert "/" not in name and "\\" not in name and " " not in name
+
+
+def test_render_piece_instrumentation_doc_standalone():
+    rec = _matched_record("p1")
+    doc = expected.render_piece_instrumentation_doc(rec, _meta())
+    assert doc.startswith("# ")  # standalone H1 heading
+    assert "Cornet 1" in doc
+    assert "Euph" in doc
+    assert "MISSING" in doc  # euphonium not observed
+
+
+def test_build_instrumentation_index_links_to_files():
+    rec = _matched_record("p1")
+    index = expected.build_instrumentation_index([rec], _meta(), "expected_instrumentation")
+    assert "Expected Instrumentation by Piece" in index
+    fname = expected.piece_instrumentation_filename(rec)
+    assert f"(expected_instrumentation/{fname})" in index
+    # The index is a summary table, not the full per-piece detail.
+    assert "Cornet 1" not in index
+
+
+def test_e2e_no_split_instrumentation(tmp_path: Path, monkeypatch):
+    pieces = [_piece("p1", observed=[_observed("cornet", 1)])]
+    _write_jsonl(tmp_path / "pieces.jsonl", pieces)
+    _write_jsonl(tmp_path / "documents.jsonl", [])
+
+    parts = [
+        {"canonical_instrument": "cornet", "part_index": 1, "label": "Cornet 1", "required": True},
+    ]
+    results = {"p1": _score_result(parts)}
+
+    result, out_path, _, _calls = _run_cli(
+        tmp_path, monkeypatch, results, extra=["--no-split-instrumentation"]
+    )
+    assert result.exit_code == 0, result.output
+
+    instr = (out_path.parent / "instrumentation.md").read_text()
+    # Single combined file: details are inline, and no split folder is created.
+    assert "Cornet 1" in instr
+    assert not (out_path.parent / "instrumentation").exists()
+
+
+def test_e2e_split_writes_per_piece_files(tmp_path: Path, monkeypatch):
+    pieces = [
+        _piece("p1", observed=[_observed("cornet", 1)]),
+        _piece("p2", observed=[_observed("cornet", 1)]),
+    ]
+    _write_jsonl(tmp_path / "pieces.jsonl", pieces)
+    _write_jsonl(tmp_path / "documents.jsonl", [])
+
+    parts = [
+        {"canonical_instrument": "cornet", "part_index": 1, "label": "Cornet 1", "required": True},
+    ]
+    results = {"p1": _score_result(parts), "p2": _score_result(parts)}
+
+    result, out_path, _, _calls = _run_cli(tmp_path, monkeypatch, results)
+    assert result.exit_code == 0, result.output
+
+    split_dir = out_path.parent / "instrumentation"
+    files = sorted(split_dir.glob("*.md"))
+    assert len(files) == 2
+    assert all(f.read_text().startswith("# ") for f in files)
+
+
+def test_e2e_incremental_persistence_writes_during_run(tmp_path: Path, monkeypatch):
+    """Records + checkpoint must be persisted per piece, not only once at the end."""
+    pieces = [
+        _piece("p1", observed=[_observed("cornet", 1)]),
+        _piece("p2", observed=[_observed("cornet", 1)]),
+    ]
+    _write_jsonl(tmp_path / "pieces.jsonl", pieces)
+    _write_jsonl(tmp_path / "documents.jsonl", [])
+
+    parts = [
+        {"canonical_instrument": "cornet", "part_index": 1, "label": "Cornet 1", "required": True},
+    ]
+    results = {"p1": _score_result(parts), "p2": _score_result(parts)}
+
+    out_path = tmp_path / "expected_parts.jsonl"
+    jsonl_writes = {"count": 0}
+    real_write_jsonl = expected.atomic_write_jsonl
+
+    def counting_write_jsonl(path, records):
+        if Path(path).name == "expected_parts.jsonl":
+            jsonl_writes["count"] += 1
+        return real_write_jsonl(path, records)
+
+    monkeypatch.setattr(expected, "atomic_write_jsonl", counting_write_jsonl)
+
+    result, out_path2, _, _calls = _run_cli(
+        tmp_path, monkeypatch, results, extra=["--concurrency", "1"]
+    )
+    assert result.exit_code == 0, result.output
+    assert out_path2 == out_path
+    # One write per completed piece (2) plus the final canonical write (>= 3), proving the output
+    # is not written only once at the end.
+    assert jsonl_writes["count"] >= 3

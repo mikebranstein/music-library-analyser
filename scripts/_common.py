@@ -5,7 +5,7 @@ import json
 import logging
 import os
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeVar
@@ -268,18 +268,38 @@ def run_with_progress(
     items: list[_T],
     worker: Callable[[_T], _R],
     max_workers: int = 1,
+    on_result: Callable[[_T, _R], None] | None = None,
 ) -> list[_R]:
     """Apply ``worker`` to each item, in parallel when ``max_workers > 1`` (change 4).
 
     Results preserve input order regardless of concurrency. Runs sequentially for a single worker
     or a single item (so there is no thread-pool overhead in the common case). Per-item progress
     logging belongs in ``worker`` itself.
+
+    When ``on_result`` is provided it is called once per completed item as ``on_result(item,
+    result)``, in the **caller's thread** (never from a worker thread), so callers can persist
+    results incrementally without their own locking. Under concurrency ``on_result`` fires in
+    completion order, but the returned list is still in input order.
     """
     workers = max(1, max_workers)
     if workers <= 1 or len(items) <= 1:
-        return [worker(item) for item in items]
+        results: list[_R] = []
+        for item in items:
+            result = worker(item)
+            if on_result is not None:
+                on_result(item, result)
+            results.append(result)
+        return results
+    ordered: dict[int, _R] = {}
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        return list(pool.map(worker, items))
+        future_to_index = {pool.submit(worker, item): idx for idx, item in enumerate(items)}
+        for future in as_completed(future_to_index):
+            idx = future_to_index[future]
+            result = future.result()
+            ordered[idx] = result
+            if on_result is not None:
+                on_result(items[idx], result)
+    return [ordered[i] for i in range(len(items))]
 
 
 def piece_sort_key(record: dict[str, Any]) -> tuple[str, str]:

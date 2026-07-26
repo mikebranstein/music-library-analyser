@@ -63,7 +63,8 @@ Primary outputs:
 - Score required-part completeness + tier, flag `score_missing` and `needs_review`, and record `detection_method`, `ocr_source`, `local_score_path`, `evidence_sources`, `candidate_score_images`, and resolved work identity
 - Toggle stages with `--local-score/--no-local-score`, `--lookup/--no-lookup`, and `--image-ocr/--no-image-ocr`; degrade conservatively (all stages off/failed, CLI missing/error, `no_match`, or `low_confidence`): declare no missing parts, set `completeness_score: null`, and flag for review — never fabricate a missing part
 - Each lookup logs a one-line Stage B result summary (`match_found`, confidence, `expected_parts`, `candidate_score_images` counts) so it is clear when/why Stage C image download runs; `--save-lookups` (default on) also persists each raw lookup result (prompt + parsed JSON) under `cache/llm/lookups/` for auditing
-- Emit `data/expected_parts.jsonl` (schema 2.1), a summary report (`data/expected_parts_report.md`), and a per-piece instrumentation report listing each piece's expected parts (`data/expected_instrumentation.md`); `--mode incremental` caches per-piece results by fingerprint to avoid re-spending AI credits or re-OCR
+- Persist results **incrementally**: `data/expected_parts.jsonl` and the checkpoint are rewritten atomically as each piece completes, so stopping mid-run (e.g. 400/700 pieces) never loses finished work and `--mode incremental` resumes without re-spending credits
+- Emit `data/expected_parts.jsonl` (schema 2.1) and a summary report (`data/expected_parts_report.md`). The per-piece instrumentation report is split by default (`--split-instrumentation`) into one file per piece under `data/expected_instrumentation/`, written as each piece finishes, with `data/expected_instrumentation.md` as a linking index; `--no-split-instrumentation` writes a single combined file. `--mode incremental` caches per-piece results by fingerprint to avoid re-spending AI credits or re-OCR
 
 5. `05_quality_checks.py`
 - Score per-document scan quality (0-100) into a `quality_band` (`good` / `review` / `poor`, plus `unknown` when a document has no scoreable pages) by thresholding the objective per-page metrics Script 02 already computed (resolution, skew, contrast, blur, OCR confidence, blankness/noise) — pages are never re-rendered, and a missing (null) metric never raises an issue
@@ -115,6 +116,7 @@ project-root/
     expected_parts.jsonl
     expected_parts_report.md
     expected_instrumentation.md
+    expected_instrumentation/
     quality_metrics.jsonl
     quality_report.md
     piece_reports/

@@ -1447,72 +1447,150 @@ def build_instrumentation_report(records: list[dict[str, Any]], meta: dict[str, 
         title = rec.get("piece_title_guess") or rec.get("piece_folder") or rec.get("piece_id")
         out.append(f"## {catalog} - {title}")
         out.append("")
+        out.extend(render_piece_instrumentation_body(rec))
 
-        ensemble = rec.get("ensemble_display_name") or "Unknown"
-        ensemble_type = rec.get("ensemble_type") or "unknown"
-        status = rec.get("lookup_status", "unknown")
-        confidence = rec.get("identity_match_confidence")
-        score = rec.get("completeness_score")
-        completeness = "-" if score is None else f"{score * 100:.0f}% ({rec.get('completeness_tier')})"
+    return "\n".join(out) + "\n"
 
-        out.append(f"- **Ensemble:** {md_cell(ensemble)} (`{ensemble_type}`)")
+
+def piece_instrumentation_filename(rec: dict[str, Any]) -> str:
+    """Deterministic per-piece Markdown filename: ``<catalog>_<title>_<piece_id>.md`` (slugged).
+
+    Includes ``piece_id`` so the name is unique and stable across runs (so incremental runs never
+    orphan a renamed file), and leads with the catalog number so files sort like the reports.
+    """
+    catalog = rec.get("catalog_number") or "000"
+    title = rec.get("piece_title_guess") or rec.get("piece_folder") or "piece"
+    piece_id = rec.get("piece_id") or "piece"
+    return _safe_filename(f"{catalog}_{title}_{piece_id}") + ".md"
+
+
+def render_piece_instrumentation_body(rec: dict[str, Any]) -> list[str]:
+    """Render one piece's instrumentation body (identity bullets, parts table, sources).
+
+    The caller supplies the heading; this returns everything under it, so it is shared by both the
+    single-file report and the per-piece split files.
+    """
+    out: list[str] = []
+    ensemble = rec.get("ensemble_display_name") or "Unknown"
+    ensemble_type = rec.get("ensemble_type") or "unknown"
+    status = rec.get("lookup_status", "unknown")
+    confidence = rec.get("identity_match_confidence")
+    score = rec.get("completeness_score")
+    completeness = "-" if score is None else f"{score * 100:.0f}% ({rec.get('completeness_tier')})"
+
+    out.append(f"- **Ensemble:** {md_cell(ensemble)} (`{ensemble_type}`)")
+    out.append(
+        f"- **Lookup:** {status} - confidence {confidence} - completeness {completeness}"
+    )
+    identity = _format_identity((rec.get("work_identity") or {}).get("resolved", {}))
+    if identity:
+        out.append(f"- **Edition:** {md_cell(identity)}")
+    if rec.get("lookup_notes"):
+        out.append(f"- **Notes:** {md_cell(rec['lookup_notes'])}")
+    out.append("")
+
+    expected_parts = rec.get("expected_parts") or []
+    if expected_parts:
+        out.append("| # | Instrument | Label | Section | Required | Observed |")
+        out.append("| --- | --- | --- | --- | --- | --- |")
+        for part in expected_parts:
+            idx = part.get("part_index")
+            idx_cell = "-" if idx is None else str(idx)
+            required = "required" if part.get("required") else "optional"
+            observed = "yes" if part.get("present") else "MISSING"
+            out.append(
+                f"| {idx_cell} | {md_cell(part.get('canonical_instrument'))} "
+                f"| {md_cell(part.get('label'))} | {md_cell(part.get('section'))} "
+                f"| {required} | {observed} |"
+            )
+        out.append("")
+        unexpected = rec.get("unexpected_parts") or []
+        if unexpected:
+            labels = ", ".join(
+                md_cell(u.get("predicted_part") or u.get("canonical_instrument"))
+                for u in unexpected
+            )
+            out.append(f"_Observed but not expected: {labels}_")
+            out.append("")
+    else:
         out.append(
-            f"- **Lookup:** {status} - confidence {confidence} - completeness {completeness}"
+            "_No authoritative instrumentation found "
+            f"(lookup {status}); {rec.get('observed_instrument_count', 0)} "
+            "instrument(s) observed in the library copy._"
         )
-        identity = _format_identity((rec.get("work_identity") or {}).get("resolved", {}))
-        if identity:
-            out.append(f"- **Edition:** {md_cell(identity)}")
-        if rec.get("lookup_notes"):
-            out.append(f"- **Notes:** {md_cell(rec['lookup_notes'])}")
         out.append("")
 
-        expected_parts = rec.get("expected_parts") or []
-        if expected_parts:
-            out.append("| # | Instrument | Label | Section | Required | Observed |")
-            out.append("| --- | --- | --- | --- | --- | --- |")
-            for part in expected_parts:
-                idx = part.get("part_index")
-                idx_cell = "-" if idx is None else str(idx)
-                required = "required" if part.get("required") else "optional"
-                observed = "yes" if part.get("present") else "MISSING"
-                out.append(
-                    f"| {idx_cell} | {md_cell(part.get('canonical_instrument'))} "
-                    f"| {md_cell(part.get('label'))} | {md_cell(part.get('section'))} "
-                    f"| {required} | {observed} |"
-                )
-            out.append("")
-            unexpected = rec.get("unexpected_parts") or []
-            if unexpected:
-                labels = ", ".join(
-                    md_cell(u.get("predicted_part") or u.get("canonical_instrument"))
-                    for u in unexpected
-                )
-                out.append(f"_Observed but not expected: {labels}_")
-                out.append("")
-        else:
-            out.append(
-                "_No authoritative instrumentation found "
-                f"(lookup {status}); {rec.get('observed_instrument_count', 0)} "
-                "instrument(s) observed in the library copy._"
-            )
-            out.append("")
+    evidence = rec.get("evidence_sources") or []
+    if evidence:
+        out.append("**Sources:**")
+        out.append("")
+        for src in evidence:
+            if not isinstance(src, dict):
+                continue
+            stitle = md_cell(src.get("title") or src.get("url") or "source")
+            url = src.get("url") or ""
+            snippet = md_cell(src.get("snippet") or "")
+            line = f"- [{stitle}]({url})" if url else f"- {stitle}"
+            if snippet:
+                line += f' - "{snippet}"'
+            out.append(line)
+        out.append("")
 
-        evidence = rec.get("evidence_sources") or []
-        if evidence:
-            out.append("**Sources:**")
-            out.append("")
-            for src in evidence:
-                if not isinstance(src, dict):
-                    continue
-                stitle = md_cell(src.get("title") or src.get("url") or "source")
-                url = src.get("url") or ""
-                snippet = md_cell(src.get("snippet") or "")
-                line = f"- [{stitle}]({url})" if url else f"- {stitle}"
-                if snippet:
-                    line += f' - "{snippet}"'
-                out.append(line)
-            out.append("")
+    return out
 
+
+def render_piece_instrumentation_doc(rec: dict[str, Any], meta: dict[str, Any]) -> str:
+    """Render a standalone per-piece instrumentation document (for the split-report files)."""
+    catalog = rec.get("catalog_number") or "?"
+    title = rec.get("piece_title_guess") or rec.get("piece_folder") or rec.get("piece_id")
+    out: list[str] = []
+    out.append(f"# {catalog} - {title}")
+    out.append("")
+    out.append(
+        f"_Generated {meta['generated_at']} - run `{meta['run_id']}` - "
+        f"model {meta['model'] or '(CLI default)'}_"
+    )
+    out.append("")
+    out.extend(render_piece_instrumentation_body(rec))
+    return "\n".join(out) + "\n"
+
+
+def build_instrumentation_index(
+    records: list[dict[str, Any]], meta: dict[str, Any], split_dirname: str
+) -> str:
+    """Render the instrumentation index: run metadata plus a table linking to per-piece files."""
+    matched = [r for r in records if r.get("lookup_status") == "matched"]
+
+    out: list[str] = []
+    out.append("# Expected Instrumentation by Piece")
+    out.append("")
+    out.append(
+        f"_Generated {meta['generated_at']} - run `{meta['run_id']}` - "
+        f"mode **{meta['mode']}** - model {meta['model'] or '(CLI default)'}_"
+    )
+    out.append("")
+    out.append(
+        f"Instrumentation comes from online score lookups. "
+        f"{len(matched)} of {len(records)} piece(s) have an authoritative instrumentation list; "
+        f"the rest fell back to a conservative record (no expected parts asserted). "
+        f"Each piece links to its own file under `{split_dirname}/`."
+    )
+    out.append("")
+    out.append("| Catalog | Piece | Ensemble | Lookup | Completeness | Missing required | Details |")
+    out.append("| --- | --- | --- | --- | --- | --- | --- |")
+    for rec in sorted(records, key=piece_sort_key):
+        catalog = rec.get("catalog_number") or ""
+        name = md_cell(rec.get("piece_title_guess") or rec.get("piece_folder"))
+        ensemble = md_cell(rec.get("ensemble_type"))
+        status = rec.get("lookup_status", "")
+        score = rec.get("completeness_score")
+        completeness = "-" if score is None else f"{score * 100:.0f}% ({rec.get('completeness_tier')})"
+        missing = md_cell(", ".join(rec.get("missing_required_parts", [])) or "-")
+        link = f"[details]({split_dirname}/{piece_instrumentation_filename(rec)})"
+        out.append(
+            f"| {catalog} | {name} | {ensemble} | {status} | {completeness} | {missing} | {link} |"
+        )
+    out.append("")
     return "\n".join(out) + "\n"
 
 
@@ -1584,6 +1662,11 @@ def main(
     concurrency: int = typer.Option(
         4, "--concurrency", "-j",
         help="Number of pieces to look up in parallel (I/O-bound). 1 = sequential; 3-4 recommended",
+    ),
+    split_instrumentation: bool = typer.Option(
+        True, "--split-instrumentation/--no-split-instrumentation",
+        help="Write one instrumentation file per piece (under a subfolder named after the report) "
+             "as each finishes, with the main report as a linking index. Off = single file.",
     ),
     log_level: str = typer.Option("INFO", help="DEBUG, INFO, WARNING, ERROR"),
 ) -> None:
@@ -1714,6 +1797,57 @@ def main(
     processed = 0
     reused = 0
     fingerprints: dict[str, str] = {}
+    persisted_fingerprints: dict[str, str] = {}
+
+    # Per-piece instrumentation split: files live in a subfolder named after the report's stem
+    # (e.g. data/expected_instrumentation/) and are written as each piece finishes.
+    instrumentation_path = output_instrumentation.resolve()
+    split_dir = instrumentation_path.parent / instrumentation_path.stem
+    split_dirname = instrumentation_path.stem
+    do_split = write_report and split_instrumentation
+    if do_split:
+        split_dir.mkdir(parents=True, exist_ok=True)
+    stream_meta = {
+        "generated_at": utc_now_iso(),
+        "run_id": run_id,
+        "model": config.get("model") or "",
+    }
+
+    def _write_piece_doc(record: dict[str, Any]) -> None:
+        if not do_split:
+            return
+        atomic_write_text(
+            split_dir / piece_instrumentation_filename(record),
+            render_piece_instrumentation_doc(record, stream_meta),
+        )
+
+    def _write_stream_checkpoint(fp_dict: dict[str, str], record_count: int) -> None:
+        atomic_write_json(
+            ckpt_path,
+            build_checkpoint(
+                RECORD_VERSION, run_id, dict(fp_dict),
+                pieces_input=pieces.as_posix(),
+                output=output.as_posix(),
+                config_source=config_source,
+                config_fingerprint=cfg_fp,
+                lookup_enabled=lookup_enabled,
+                local_score_enabled=local_score_enabled,
+                image_ocr_enabled=image_ocr_enabled,
+                record_count=record_count,
+            ),
+        )
+
+    def _persist(_item: tuple[int, dict[str, Any], str, str], record: dict[str, Any]) -> None:
+        # Runs in the caller's thread as each piece completes: append, then durably persist the
+        # record, the checkpoint, and (when splitting) the per-piece file, so an interrupted run
+        # keeps everything finished so far and can resume via --mode incremental.
+        rebuilt.append(record)
+        pid = record.get("piece_id")
+        if pid:
+            persisted_fingerprints[pid] = fingerprints.get(pid, "")
+        atomic_write_jsonl(output, sorted(rebuilt, key=piece_sort_key))
+        _write_stream_checkpoint(persisted_fingerprints, len(rebuilt))
+        _write_piece_doc(record)
 
     total_pieces = sum(1 for p in piece_records if p.get("piece_id"))
     logger.info(
@@ -1747,6 +1881,8 @@ def main(
         ):
             rebuilt.append(prior)
             reused += 1
+            persisted_fingerprints[piece_id] = fingerprint
+            _write_piece_doc(prior)
             logger.info("[%d/%d] Reusing cached result: %s (cat %s)", seen, total_pieces,
                         title, catalog)
             continue
@@ -1796,14 +1932,10 @@ def main(
         )
         return record
 
-    if workers <= 1 or len(to_process) <= 1:
-        for item in to_process:
-            rebuilt.append(_process(item))
-            processed += 1
-    else:
+    if to_process:
         logger.info("Running %d lookup(s) with concurrency %d.", len(to_process), workers)
-        rebuilt.extend(run_with_progress(to_process, _process, workers))
-        processed += len(to_process)
+        run_with_progress(to_process, _process, workers, on_result=_persist)
+    processed = len(to_process)
 
     rebuilt.sort(key=piece_sort_key)
     atomic_write_jsonl(output, rebuilt)
@@ -1831,9 +1963,33 @@ def main(
         atomic_write_text(output_report.resolve(), report)
         logger.info("Wrote Markdown report: %s", output_report.resolve())
 
-        instrumentation = build_instrumentation_report(rebuilt, meta)
-        atomic_write_text(output_instrumentation.resolve(), instrumentation)
-        logger.info("Wrote instrumentation report: %s", output_instrumentation.resolve())
+        if split_instrumentation:
+            split_dir.mkdir(parents=True, exist_ok=True)
+            valid_names: set[str] = set()
+            for rec in rebuilt:
+                name = piece_instrumentation_filename(rec)
+                valid_names.add(name)
+                atomic_write_text(
+                    split_dir / name, render_piece_instrumentation_doc(rec, meta)
+                )
+            # Prune per-piece files that no longer correspond to a current piece (only *.md in the
+            # managed subfolder are touched).
+            for existing in split_dir.glob("*.md"):
+                if existing.name not in valid_names:
+                    try:
+                        existing.unlink()
+                    except OSError:
+                        pass
+            index = build_instrumentation_index(rebuilt, meta, split_dirname)
+            atomic_write_text(instrumentation_path, index)
+            logger.info(
+                "Wrote instrumentation index: %s (%d per-piece file(s) under %s)",
+                instrumentation_path, len(rebuilt), split_dir,
+            )
+        else:
+            instrumentation = build_instrumentation_report(rebuilt, meta)
+            atomic_write_text(instrumentation_path, instrumentation)
+            logger.info("Wrote instrumentation report: %s", instrumentation_path)
 
     new_checkpoint = build_checkpoint(
         RECORD_VERSION,
