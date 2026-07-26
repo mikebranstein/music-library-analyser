@@ -65,8 +65,11 @@ Primary outputs:
 - Emit `data/expected_parts.jsonl` (schema 2.1), a summary report (`data/expected_parts_report.md`), and a per-piece instrumentation report listing each piece's expected parts (`data/expected_instrumentation.md`); `--mode incremental` caches per-piece results by fingerprint to avoid re-spending AI credits or re-OCR
 
 5. `05_quality_checks.py`
-- Score scan quality
-- Classify notation source (`printed_original`, `handwritten`, `mixed_or_uncertain`)
+- Score per-document scan quality (0-100) into a `quality_band` (`good` / `review` / `poor`, plus `unknown` when a document has no scoreable pages) by thresholding the objective per-page metrics Script 02 already computed (resolution, skew, contrast, blur, OCR confidence, blankness/noise) — pages are never re-rendered, and a missing (null) metric never raises an issue
+- Detect per-page issues (`low_resolution`, `excessive_skew`, `low_contrast`, `heavy_blur`, `ocr_illegible`, `blank_page`, `noise_page`), roll them into a document score weighted by affected-page fraction, and record `top_issues`, `worst_page`, and `needs_review`
+- Classify notation source (`printed_original`, `handwritten`, `mixed_or_uncertain`) with a 0-1 confidence and evidence from searchable-text fraction, OCR confidence, and alphanumeric ratio
+- Thresholds live in `config/quality_thresholds.yaml` (built-in defaults when absent); `--mode incremental` caches per-document results by fingerprint. A `--use-vision` hook is reserved for a future model-assisted pass but is not wired to a provider yet, and the *cropping margin loss* check is deferred (Script 02 exposes no margin metric)
+- Emit `data/quality_metrics.jsonl` (schema 1.0) plus a Markdown summary `data/quality_report.md`
 
 6. `06_piece_report.py`
 - Generate per-piece JSON + Markdown reports
@@ -112,6 +115,7 @@ project-root/
     expected_parts_report.md
     expected_instrumentation.md
     quality_metrics.jsonl
+    quality_report.md
     piece_reports/
     collection_reports/
   cache/
@@ -161,13 +165,20 @@ All inferred expected parts should preserve:
 
 ## Quality and Notation Source Classification
 
-Each document should include:
+Each document record (`data/quality_metrics.jsonl`, schema 1.0) includes:
 
-- `quality_score` (0-100)
-- `quality_band` (`good`, `review`, `poor`)
+- `quality_score` (0-100 float, or `null` when no pages were scoreable)
+- `quality_band` (`good`, `review`, `poor`, or `unknown`)
+- `needs_review`, `page_issue_count`, `issue_summary`, `top_issues`, `worst_page`,
+  `page_findings`
 - `notation_source_type` (`printed_original`, `handwritten`, `mixed_or_uncertain`)
 - `notation_source_confidence` (0-1)
-- `notation_source_evidence` (signals/page refs)
+- `notation_source_evidence` (feature signals such as `searchable_fraction=0.80`)
+- a `metrics` block (median DPI, mean contrast/blur, max skew, mean alnum/OCR confidence,
+  image-based fraction, blank-page count)
+
+> The thresholds in `config/quality_thresholds.yaml` are initial heuristics and are not yet
+> calibrated against real scan data.
 
 ## Suggested Tech Stack
 

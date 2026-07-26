@@ -71,6 +71,7 @@ project-root/
     expected_parts_report.md
     expected_instrumentation.md
     quality_metrics.jsonl
+    quality_report.md
     piece_reports/
     collection_reports/
   cache/
@@ -415,76 +416,101 @@ Deferred fields (populated once the authority path is wired): `source_match_diag
 requirements), and normalized multi-field `work_identity` (title_variants, composer, publisher,
 edition, series, publication_year).
 
-## 4.5 Script 05: Quality Checks (`05_quality_checks.py`)
+## 4.5 Script 05: Quality Checks (`05_quality_checks.py`) — implemented (schema 1.0)
 
 Purpose:
 
-Flag poor scan quality and likely unusable pages.
+Flag poor scan quality / likely-unusable pages and classify each document's notation source
+(printed/engraved vs handwritten). The engine is deterministic and threshold-driven: it **reuses**
+the objective per-page metrics Script 02 already computed rather than re-rendering pages, and it
+never flags an issue from a missing (null) metric.
 
 Inputs:
 
-- `data/pages.jsonl` already carries the core objective metrics from Script 02:
-  `blur_variance` (Laplacian variance), `skew_angle_deg`, `contrast_std`, `text_density`,
-  `black_white_ratio`, `estimated_dpi`, `is_image_based`, `image_count`, and geometry.
-- `data/extracted_text.jsonl` provides `alnum_ratio` and `word_count` as legibility signals.
+- `data/pages.jsonl` — core objective metrics from Script 02: `blur_variance` (Laplacian
+  variance), `skew_angle_deg`, `contrast_std`, `text_density`, `estimated_dpi`,
+  `render_width_px` / `render_height_px`, `is_image_based`, `is_blank`, `thumbnail_hash`.
+- `data/extracted_text.jsonl` — legibility signals: `ocr_confidence`, `ocr_word_count`,
+  `alnum_ratio`, `word_count`, `text_is_searchable`, `page_text_hash`.
+- `data/documents.jsonl` — optional per-document rollups supplying `piece_folder` / `pdf_filename`.
 
-Script 05 should consume and threshold these existing metrics rather than recompute them;
-re-rendering is only needed for optional model-assisted vision checks. Thresholds live in
-`config/quality_thresholds.yaml`. Script 03's `needs_review` flag can additionally prioritize which
-documents warrant a manual/visual quality pass.
+Thresholds live in `config/quality_thresholds.yaml` (`quality_checks` + `notation_source`
+sections); built-in defaults are used when the file or PyYAML is absent, and YAML values are merged
+one level deep over those defaults.
 
-Checks (mostly derived from Script 02 metrics):
+Per-page issue codes (each derived from a single Script 02 metric; a null metric is never flagged):
 
-- Low effective resolution (`estimated_dpi`, render dimensions)
-- Excessive skew (`skew_angle_deg`)
-- Extreme low contrast / washed pages (`contrast_std`)
-- Heavy blur (`blur_variance`)
-- OCR illegibility score (from Script 02 `ocr_confidence`; interim proxy: `alnum_ratio` when OCR disabled)
-- Cropping margin loss
-- Page anomalies (blank page, mostly noise)
-- Document style classification:
-  - scanned printed/engraved original
-  - hand-written manuscript part
-  - mixed/uncertain
+- `low_resolution` — `estimated_dpi` below `min_estimated_dpi`, else render dimensions below
+  `min_render_width_px` / `min_render_height_px`.
+- `excessive_skew` — `abs(skew_angle_deg)` above `max_skew_angle_deg`.
+- `low_contrast` — `contrast_std` below `min_contrast_std`.
+- `heavy_blur` — `blur_variance` below `min_blur_variance`.
+- `blank_page` — `is_blank` true, or very low `text_density` with zero words.
+- `noise_page` — high `text_density` with almost no recognized words.
+- `ocr_illegible` — only when the page was expected to carry text: low `ocr_confidence` where
+  OCR actually found words (`ocr_word_count > 0`), or low `alnum_ratio` when `word_count > 0`
+  (interim proxy when OCR is disabled). Pure-notation pages (no text) are not penalized, and blank
+  pages suppress this check.
 
-Handwritten-vs-printed detection signals:
+`Cropping margin loss` from earlier drafts is **deferred**: Script 02 exposes no margin/crop metric,
+so it is intentionally not implemented rather than fabricated.
 
-- OCR character confidence and stability across pages
-- Stroke regularity/consistency (engraved notation is usually more uniform)
-- Text baseline variance and letterform irregularity in headers/markings
-- Symbol contour variance and spacing entropy
-- Presence of pen-like pressure artifacts or inconsistent line weight
+Scoring:
 
-Optional model-assisted checks:
+- Each issue penalizes `quality_score` by its configured weight scaled by the fraction of analyzed
+  pages it affects (`score = max(0, 100 - Σ weightᵢ × affected_fractionᵢ)`), so a defect on every
+  page hurts more than a one-page defect.
+- `quality_band` maps the score via `bands` (`good` ≥ `good_min_score`, `review` ≥
+  `review_min_score`, else `poor`). Documents with **no scoreable pages** (all pages errored) get
+  `quality_band = unknown`, `quality_score = null`, and `needs_review = true`.
 
-- LLM vision model reviews sampled pages and labels
-  - readability
-  - handwritten vs engraved
-  - severe artifact presence
-  - confidence rationale for classification
+Notation-source classification (`classify_notation_source`):
+
+- Strongest signal: a real embedded/searchable text layer (`searchable_fraction ≥
+  searchable_fraction_printed`) ⇒ `printed_original`.
+- Otherwise OCR confidence + alphanumeric ratio discriminate engraved print
+  (`printed_min_ocr_confidence` / `printed_min_alnum_ratio`) from handwriting
+  (`handwritten_max_ocr_confidence` / `handwritten_max_alnum_ratio`); ambiguous ⇒
+  `mixed_or_uncertain`.
+- `notation_source_evidence` records the feature values used (e.g. `searchable_fraction=0.80`,
+  `mean_ocr_confidence=88.2`); `notation_source_confidence` is 0..1 (0.0 only when there is no
+  usable text signal).
+
+Optional model-assisted checks (`--use-vision`): a hook is reserved for a future vision pass but is
+**not wired to a provider**; requesting it logs a warning and falls back to the heuristic checks
+(mirrors Script 03's `--use-llm`).
 
 Shared infrastructure (reuse from `scripts._common`; see §4.9):
 
-- `setup_logging`; a `RECORD_VERSION` + `CHECKPOINT_FILENAME` (`.quality_checks_checkpoint.json`)
+- `setup_logging`; `RECORD_VERSION = "1.0"` + `CHECKPOINT_FILENAME = ".quality_checks_checkpoint.json"`
   with `make_checkpoint_path` / `load_checkpoint` / `build_checkpoint` for `--mode incremental`.
+  Incremental reuse keys on a per-document fingerprint (config fingerprint + per-page
+  `page_text_hash` / `thumbnail_hash` / `processing_status`).
 - Build each record from `new_record_envelope(run_id, RECORD_VERSION)`; set `ProcessingStatus.ERROR`
-  on failed pages/documents.
-- Run per-document (optional vision) checks through `run_with_progress` so `-j/--concurrency` works
-  like Script 04; keep per-item logging inside the worker.
+  on unexpected per-document failures.
+- Documents are scored through `run_with_progress`, so `-j/--concurrency` works like Script 04
+  (scoring is CPU-light; concurrency mainly benefits the future vision pass).
 
 Outputs:
 
-- `data/quality_metrics.jsonl`
+- `data/quality_metrics.jsonl` — one record per document.
+- `data/quality_report.md` — Markdown summary (config table, quality-band distribution,
+  notation-source distribution, collection-wide issue counts, and a per-document detail table
+  ordered worst-score-first, limited by `--report-detail-limit`).
 
-Per-document quality summary:
+Per-document record (schema 1.0) fields: envelope (`record_version`, `run_id`, `processing_status`,
+`processing_timestamp`) plus `pdf_path`, `piece_id`, `piece_folder`, `pdf_filename`, `page_count`,
+`analyzed_page_count`, `quality_score` (0-100 float, or null), `quality_band`
+(`good` / `review` / `poor` / `unknown`), `needs_review`, `page_issue_count`,
+`issue_summary` (code → affected-page count), `top_issues`, `worst_page`,
+`page_findings` (`[{page_num, issues}]`), `notation_source_type`
+(`printed_original` / `handwritten` / `mixed_or_uncertain`), `notation_source_confidence` (0-1),
+`notation_source_evidence`, and a `metrics` block (`median_estimated_dpi`, `mean_contrast_std`,
+`mean_blur_variance`, `max_abs_skew_deg`, `mean_alnum_ratio`, `mean_ocr_confidence`,
+`image_based_fraction`, `blank_page_count`).
 
-- quality_score (0-100)
-- quality_band (`good`, `review`, `poor`)
-- top_issues (list)
-- page_issue_count
-- notation_source_type (`printed_original`, `handwritten`, `mixed_or_uncertain`)
-- notation_source_confidence (0-1)
-- notation_source_evidence (top 3-5 feature signals or page references)
+> Thresholds in `config/quality_thresholds.yaml` are initial heuristics and are **unverified against
+> real scan data**; they should be calibrated once a representative sample has been run.
 
 ## 4.6 Script 06: Piece Report Generator (`06_piece_report.py`)
 

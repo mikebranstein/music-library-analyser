@@ -1,3 +1,57 @@
 confidence_tiers:
   auto_accept_min: 0.85
   review_queue_min: 0.60
+
+# --- Script 05 scan-quality checks ---------------------------------------------------------
+# Each check is only evaluated when Script 02 actually produced the underlying metric; a missing
+# (null) metric is treated as "not evaluated" and never counts as an issue.
+quality_checks:
+  # Effective resolution. estimated_dpi comes from Script 02's image analysis; render dimensions
+  # are the rasterized page size.
+  min_estimated_dpi: 200
+  min_render_width_px: 1000
+  min_render_height_px: 1400
+  # Page rotation/skew in degrees (absolute value).
+  max_skew_angle_deg: 3.0
+  # Grayscale standard deviation; washed-out / low-contrast pages fall below this.
+  min_contrast_std: 22.0
+  # Laplacian variance; lower means blurrier. Sharp scans are typically in the hundreds+.
+  min_blur_variance: 90.0
+  # OCR legibility. When per-page ocr_confidence is available it is thresholded directly; when it
+  # is absent (OCR disabled) alnum_ratio is used as an interim legibility proxy.
+  min_ocr_confidence: 60.0
+  min_alnum_ratio_proxy: 0.55
+  # Blank vs noisy pages. A page with essentially no ink and no words is blank; a page that is
+  # almost entirely dark yet carries no words is likely a noise/over-exposed scan.
+  blank_text_density_max: 0.004
+  noise_text_density_min: 0.55
+  noise_max_word_count: 3
+  # Penalty weight (0-100) applied per issue, scaled by the fraction of analyzed pages affected.
+  penalties:
+    low_resolution: 25
+    excessive_skew: 15
+    low_contrast: 20
+    heavy_blur: 30
+    ocr_illegible: 20
+    blank_page: 35
+    noise_page: 35
+  # Quality-score cutoffs for the reported band.
+  bands:
+    good_min_score: 80
+    review_min_score: 50
+
+# --- Script 05 notation-source classification ----------------------------------------------
+# Distinguishes engraved/printed originals from handwritten manuscript parts using the signals
+# Script 02 already emits. Richer stroke/baseline-variance signals from the plan are not yet
+# available and are treated as future work.
+notation_source:
+  # A document whose pages mostly carry real embedded/searchable text is almost certainly a
+  # printed/engraved original (born-digital or a clean scan with a good text layer).
+  searchable_fraction_printed: 0.5
+  # OCR-based discrimination (used when embedded text is sparse but OCR ran).
+  printed_min_ocr_confidence: 80.0
+  printed_min_alnum_ratio: 0.70
+  handwritten_max_ocr_confidence: 55.0
+  handwritten_max_alnum_ratio: 0.45
+  # Minimum confidence reported when a classification is made from weak/partial evidence.
+  min_confidence: 0.30
