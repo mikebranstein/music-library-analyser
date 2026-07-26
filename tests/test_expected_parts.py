@@ -278,6 +278,66 @@ def test_reconcile_extra_same_instrument_is_unexpected():
     assert unexpected[0]["canonical_instrument"] == "cornet"
 
 
+def test_collapse_clef_editions_merges_bc_and_tc():
+    observed = [
+        {**_observed("euphonium", 1), "clef": "bass"},
+        {**_observed("euphonium", 1), "clef": "treble"},
+    ]
+    collapsed = expected.collapse_clef_editions(observed)
+    assert len(collapsed) == 1
+    assert collapsed[0]["observed_clefs"] == ["BC", "TC"]
+    assert collapsed[0]["count"] == 2
+
+
+def test_collapse_clef_editions_keeps_distinct_indices():
+    observed = [
+        {**_observed("euphonium", 1), "clef": "bass"},
+        {**_observed("euphonium", 2), "clef": "treble"},
+    ]
+    collapsed = expected.collapse_clef_editions(observed)
+    assert len(collapsed) == 2
+
+
+def test_collapse_clef_editions_keeps_same_clef_copies_separate():
+    # Two same-clef copies are distinct physical parts, not clef editions: keep both.
+    observed = [
+        {**_observed("cornet", None), "clef": "treble"},
+        {**_observed("cornet", None), "clef": "treble"},
+    ]
+    collapsed = expected.collapse_clef_editions(observed)
+    assert len(collapsed) == 2
+
+
+def test_reconcile_clef_editions_fill_one_slot():
+    slots = [
+        {"canonical": "euphonium", "part_index": 1, "label": "Euphonium", "required": True},
+    ]
+    observed = [
+        {**_observed("euphonium", 1), "clef": "bass"},
+        {**_observed("euphonium", 1), "clef": "treble"},
+    ]
+    expected_parts, unexpected = expected.reconcile_parts(slots, observed)
+    assert expected_parts[0]["present"] is True
+    assert expected_parts[0]["observed_clefs"] == ["BC", "TC"]
+    assert unexpected == []
+
+
+def test_reconcile_clef_editions_no_completeness_inflation():
+    slots = [
+        {"canonical": "euphonium", "part_index": 1, "label": "Euphonium 1", "required": True},
+        {"canonical": "euphonium", "part_index": 2, "label": "Euphonium 2", "required": True},
+    ]
+    observed = [
+        {**_observed("euphonium", 1), "clef": "bass"},
+        {**_observed("euphonium", 1), "clef": "treble"},
+    ]
+    expected_parts, unexpected = expected.reconcile_parts(slots, observed)
+    present = {(e["canonical_instrument"], e["part_index"]): e["present"] for e in expected_parts}
+    assert present[("euphonium", 1)] is True
+    assert present[("euphonium", 2)] is False
+    assert unexpected == []
+
+
 # --- Completeness tiers ----------------------------------------------------------------------
 
 
@@ -314,6 +374,30 @@ def test_infer_piece_confident_complete():
     assert rec["completeness_tier"] == "complete"
     assert rec["needs_review"] is False
     assert rec["ensemble_type"] == "british_brass_band"
+
+
+def test_infer_piece_clef_editions_not_unexpected_and_shown_in_report():
+    piece = _piece(observed=[
+        {**_observed("euphonium", 1), "clef": "bass"},
+        {**_observed("euphonium", 1), "clef": "treble"},
+    ])
+    parts = [
+        {"canonical_instrument": "euphonium", "part_index": 1, "label": "Euphonium",
+         "required": True},
+    ]
+    rec = expected.infer_piece(
+        piece, None, "run1",
+        config=dict(expected.DEFAULT_LOOKUP_CONFIG),
+        prompt_template="{title_guess}",
+        lookup_enabled=True,
+        lookup_fn=lambda p, c: _score_result(parts),
+    )
+    assert rec["unexpected_part_count"] == 0
+    assert rec["needs_review"] is False
+    assert rec["completeness_tier"] == "complete"
+    body = "\n".join(expected.render_piece_instrumentation_body(rec))
+    assert "yes (BC, TC)" in body
+    assert "Observed but not expected" not in body
 
 
 def test_infer_piece_missing_required_flags_review():

@@ -743,7 +743,75 @@ def _unexpected_entry(obs: dict[str, Any]) -> dict[str, Any]:
         "part_index": obs.get("part_index"),
         "predicted_part": obs.get("predicted_part"),
         "count": obs.get("count", 1),
+        "observed_clefs": list(obs.get("observed_clefs", [])),
     }
+
+
+# Display abbreviations for the clef editions a brass-band part may be published in.
+_CLEF_DISPLAY: dict[str, str] = {"bass": "BC", "treble": "TC"}
+
+
+def collapse_clef_editions(
+    observed_parts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge observed parts that are the same musical part in different clef editions.
+
+    In a British brass band the *same* part is routinely published in both a bass-clef (BC,
+    concert pitch) and treble-clef (TC, transposing) edition. Script 03 keeps those as separate
+    observed entries because they are distinct physical items in the library, but for expected-parts
+    reconciliation they represent one part. Collapsing them here prevents the alternate edition from
+    (a) double-filling an expected slot (which would inflate completeness) or (b) being reported as
+    an "unexpected" surplus part.
+
+    Entries are grouped by ``(canonical_instrument, part_index)``. Within a group each *distinct*
+    clef is treated as one edition of the same part; the set of clefs seen is recorded on the merged
+    entry as ``observed_clefs`` (sorted BC/TC display codes). When the same clef appears more than
+    once in a group (genuinely separate copies, not editions) the extra copies are kept as separate
+    observed instances so they still consume their own slots. Insertion order is preserved for
+    deterministic downstream matching.
+    """
+    groups: dict[tuple[Any, Any], list[dict[str, Any]]] = {}
+    order: list[tuple[Any, Any]] = []
+    for obs in observed_parts:
+        key = (obs.get("canonical_instrument"), obs.get("part_index"))
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(obs)
+
+    collapsed: list[dict[str, Any]] = []
+    for key in order:
+        entries = groups[key]
+        by_clef: dict[Any, list[dict[str, Any]]] = {}
+        clef_order: list[Any] = []
+        for entry in entries:
+            clef = entry.get("clef")
+            if clef not in by_clef:
+                by_clef[clef] = []
+                clef_order.append(clef)
+            by_clef[clef].append(entry)
+
+        instances = max(len(bucket) for bucket in by_clef.values())
+        for i in range(instances):
+            base: dict[str, Any] | None = None
+            total = 0
+            clefs: list[str] = []
+            for clef in clef_order:
+                bucket = by_clef[clef]
+                if i >= len(bucket):
+                    continue
+                entry = bucket[i]
+                if base is None:
+                    base = entry
+                total += int(entry.get("count", 1) or 1)
+                display = _CLEF_DISPLAY.get(clef, clef) if clef else None
+                if display and display not in clefs:
+                    clefs.append(display)
+            merged = dict(base) if base is not None else {}
+            merged["count"] = total
+            merged["observed_clefs"] = sorted(clefs)
+            collapsed.append(merged)
+    return collapsed
 
 
 def reconcile_parts(
@@ -754,9 +822,12 @@ def reconcile_parts(
     """Match observed parts against expected slots.
 
     Returns (expected_parts, unexpected_parts). ``expected_parts`` preserves slot order and carries
-    a ``present`` flag. Matching is count-based per canonical instrument (robust to null
-    ``part_index``), preferring explicit index matches before consuming slots in order.
-    ``equivalents`` maps a slot canonical to observed canonicals that should satisfy it.
+    a ``present`` flag plus ``observed_clefs`` (the clef editions that satisfied the slot). Matching
+    is count-based per canonical instrument (robust to null ``part_index``), preferring explicit
+    index matches before consuming slots in order. Observed parts that differ only by clef (a
+    bass-clef and treble-clef edition of the same part) are collapsed first so an alternate edition
+    never double-fills a slot or shows up as "unexpected". ``equivalents`` maps a slot canonical to
+    observed canonicals that should satisfy it.
     """
     alias_to_slot: dict[str, str] = {}
     for slot_canonical, aliases in (equivalents or {}).items():
@@ -768,12 +839,13 @@ def reconcile_parts(
         expected_idx_by_instr[slot["canonical"]].append(i)
 
     observed_by_instr: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for obs in observed_parts:
+    for obs in collapse_clef_editions(observed_parts):
         canonical = obs.get("canonical_instrument")
         if canonical is not None:
             observed_by_instr[alias_to_slot.get(canonical, canonical)].append(obs)
 
     present_ids: set[int] = set()
+    slot_obs: dict[int, dict[str, Any]] = {}
     unexpected: list[dict[str, Any]] = []
 
     for canonical, slot_ids in expected_idx_by_instr.items():
@@ -790,6 +862,7 @@ def reconcile_parts(
                 if not consumed[sid] and template_parts[sid].get("part_index") == oidx:
                     consumed[sid] = True
                     used[oi] = True
+                    slot_obs[sid] = obs
                     break
 
         # Pass 2: consume remaining observed against remaining slots in order.
@@ -800,6 +873,7 @@ def reconcile_parts(
                 if not consumed[sid]:
                     consumed[sid] = True
                     used[oi] = True
+                    slot_obs[sid] = obs_list[oi]
                     break
 
         for sid in slot_ids:
@@ -816,6 +890,7 @@ def reconcile_parts(
 
     expected: list[dict[str, Any]] = []
     for i, slot in enumerate(template_parts):
+        obs = slot_obs.get(i)
         expected.append({
             "canonical_instrument": slot["canonical"],
             "part_index": slot.get("part_index"),
@@ -823,6 +898,7 @@ def reconcile_parts(
             "section": slot.get("section"),
             "required": bool(slot.get("required")),
             "present": i in present_ids,
+            "observed_clefs": list(obs.get("observed_clefs", [])) if obs else [],
         })
     return expected, unexpected
 
@@ -1497,7 +1573,11 @@ def render_piece_instrumentation_body(rec: dict[str, Any]) -> list[str]:
             idx = part.get("part_index")
             idx_cell = "-" if idx is None else str(idx)
             required = "required" if part.get("required") else "optional"
-            observed = "yes" if part.get("present") else "MISSING"
+            if part.get("present"):
+                clefs = part.get("observed_clefs") or []
+                observed = f"yes ({', '.join(clefs)})" if clefs else "yes"
+            else:
+                observed = "MISSING"
             out.append(
                 f"| {idx_cell} | {md_cell(part.get('canonical_instrument'))} "
                 f"| {md_cell(part.get('label'))} | {md_cell(part.get('section'))} "
