@@ -82,7 +82,7 @@ instruments:
   bass_drum: ["bass drum"]
   cymbals: ["cymbals", "crash cymbals", "suspended cymbal"]
   percussion: ["percussion", "perc", "battery", "aux percussion", "auxiliary percussion"]
-  drum_set: ["drum set", "drum kit", "drums", "trap set"]
+  drum_set: ["drum set", "drum kit", "drums", "trap set", "trap kit", "drumset", "drumkit", "trapset", "trapkit", "kit"]
 
 # token (normalized, lowercase) -> clef
 clef_markers:

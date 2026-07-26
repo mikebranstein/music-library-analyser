@@ -291,9 +291,10 @@ def observed_canonicals(piece: dict[str, Any]) -> set[str]:
     """Distinct non-null canonical instruments observed in a piece rollup."""
     result: set[str] = set()
     for obs in piece.get("observed_parts", []):
-        canonical = obs.get("canonical_instrument")
-        if canonical:
-            result.add(canonical)
+        for facet in obs.get("instruments", []):
+            canonical = facet.get("canonical")
+            if canonical:
+                result.add(canonical)
     return result
 
 
@@ -301,12 +302,20 @@ def _observed_summary(piece: dict[str, Any]) -> str:
     """Compact human-readable summary of the observed instruments and counts."""
     parts: list[str] = []
     for obs in piece.get("observed_parts", []):
-        canonical = obs.get("canonical_instrument")
-        if not canonical:
+        facets = obs.get("instruments", [])
+        if not facets:
             continue
-        idx = obs.get("part_index")
+        labels: list[str] = []
+        for facet in facets:
+            canonical = facet.get("canonical")
+            if not canonical:
+                continue
+            idx = facet.get("part_index")
+            labels.append(canonical if idx is None else f"{canonical} {idx}")
+        if not labels:
+            continue
+        label = " / ".join(labels)
         count = obs.get("count", 1)
-        label = canonical if idx is None else f"{canonical} {idx}"
         parts.append(f"{label} (x{count})" if count and count != 1 else label)
     return ", ".join(parts) if parts else "none detected"
 
@@ -921,16 +930,40 @@ def normalize_expected_parts(raw_parts: Any) -> list[dict[str, Any]]:
 
 def _unexpected_entry(obs: dict[str, Any]) -> dict[str, Any]:
     return {
-        "canonical_instrument": obs.get("canonical_instrument"),
-        "part_index": obs.get("part_index"),
         "predicted_part": obs.get("predicted_part"),
+        "instruments": [
+            {"canonical": f.get("canonical"), "part_index": f.get("part_index")}
+            for f in obs.get("instruments", [])
+        ],
         "count": obs.get("count", 1),
         "observed_clefs": list(obs.get("observed_clefs", [])),
     }
 
 
+def _unexpected_label(entry: dict[str, Any]) -> str:
+    """Human-readable label for an unexpected observed part."""
+    predicted = entry.get("predicted_part")
+    if predicted:
+        return str(predicted)
+    labels: list[str] = []
+    for facet in entry.get("instruments", []):
+        canonical = facet.get("canonical")
+        if not canonical:
+            continue
+        idx = facet.get("part_index")
+        labels.append(canonical if idx is None else f"{canonical} {idx}")
+    return " / ".join(labels) if labels else "unknown"
+
+
 # Display abbreviations for the clef editions a part may be published in.
 _CLEF_DISPLAY: dict[str, str] = {"bass": "BC", "treble": "TC"}
+
+
+def _facet_set_key(obs: dict[str, Any]) -> tuple[tuple[Any, Any], ...]:
+    """Order-independent identity of the instrument set a part represents."""
+    return tuple(
+        sorted((f.get("canonical"), f.get("part_index")) for f in obs.get("instruments", []))
+    )
 
 
 def collapse_clef_editions(
@@ -945,17 +978,18 @@ def collapse_clef_editions(
     (a) double-filling an expected slot (which would inflate completeness) or (b) being reported as
     an "unexpected" surplus part.
 
-    Entries are grouped by ``(canonical_instrument, part_index)``. Within a group each *distinct*
-    clef is treated as one edition of the same part; the set of clefs seen is recorded on the merged
-    entry as ``observed_clefs`` (sorted BC/TC display codes). When the same clef appears more than
-    once in a group (genuinely separate copies, not editions) the extra copies are kept as separate
-    observed instances so they still consume their own slots. Insertion order is preserved for
-    deterministic downstream matching.
+    Entries are grouped by their instrument set (the sorted ``(canonical, part_index)`` facets), so
+    a combined/doubling part collapses only with another part covering the exact same instruments.
+    Within a group each *distinct* clef is treated as one edition of the same part; the set of clefs
+    seen is recorded on the merged entry as ``observed_clefs`` (sorted BC/TC display codes). When the
+    same clef appears more than once in a group (genuinely separate copies, not editions) the extra
+    copies are kept as separate observed instances so they still consume their own slots. Insertion
+    order is preserved for deterministic downstream matching.
     """
-    groups: dict[tuple[Any, Any], list[dict[str, Any]]] = {}
-    order: list[tuple[Any, Any]] = []
+    groups: dict[tuple[tuple[Any, Any], ...], list[dict[str, Any]]] = {}
+    order: list[tuple[tuple[Any, Any], ...]] = []
     for obs in observed_parts:
-        key = (obs.get("canonical_instrument"), obs.get("part_index"))
+        key = _facet_set_key(obs)
         if key not in groups:
             groups[key] = []
             order.append(key)
@@ -1001,15 +1035,23 @@ def reconcile_parts(
     observed_parts: list[dict[str, Any]],
     equivalents: dict[str, list[str]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Match observed parts against expected slots.
+    """Match observed parts against expected slots using instrument-set coverage.
 
     Returns (expected_parts, unexpected_parts). ``expected_parts`` preserves slot order and carries
-    a ``present`` flag plus ``observed_clefs`` (the clef editions that satisfied the slot). Matching
-    is count-based per canonical instrument (robust to null ``part_index``), preferring explicit
-    index matches before consuming slots in order. Observed parts that differ only by clef (a
-    bass-clef and treble-clef edition of the same part) are collapsed first so an alternate edition
-    never double-fills a slot or shows up as "unexpected". ``equivalents`` maps a slot canonical to
-    observed canonicals that should satisfy it.
+    a ``present`` flag plus ``observed_clefs`` (the clef editions that satisfied the slot).
+
+    Each observed part lists every instrument it covers (``instruments``): a combined or doubling
+    part such as "Flute 1 & Piccolo" contributes one *instance* per instrument, so a single physical
+    part can satisfy multiple expected slots. Matching is count-based per canonical instrument
+    (robust to null ``part_index``), preferring explicit index matches before consuming slots in
+    order. Observed parts that differ only by clef are collapsed first so an alternate edition never
+    double-fills a slot. ``equivalents`` maps a slot canonical to observed canonicals that should
+    satisfy it.
+
+    An observed part is reported as *unexpected* only if **none** of its instruments matched any
+    expected slot. When a part is anchored by at least one matched instrument, its remaining
+    (doubling) instruments are silently accepted rather than flagged \u2014 an extra doubling the score
+    happens not to enumerate is informational at most, never a surplus.
     """
     alias_to_slot: dict[str, str] = {}
     for slot_canonical, aliases in (equivalents or {}).items():
@@ -1020,55 +1062,64 @@ def reconcile_parts(
     for i, slot in enumerate(template_parts):
         expected_idx_by_instr[slot["canonical"]].append(i)
 
-    observed_by_instr: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for obs in collapse_clef_editions(observed_parts):
-        canonical = obs.get("canonical_instrument")
-        if canonical is not None:
-            observed_by_instr[alias_to_slot.get(canonical, canonical)].append(obs)
+    collapsed = collapse_clef_editions(observed_parts)
+    # Flatten every observed part into one instance per instrument facet, tagged with the owning
+    # observed-part id so we can tell whether a part anchored at least one slot.
+    instances_by_instr: dict[str, list[tuple[int, dict[str, Any]]]] = defaultdict(list)
+    for obs_id, obs in enumerate(collapsed):
+        for facet in obs.get("instruments", []):
+            canonical = facet.get("canonical")
+            if canonical is None:
+                continue
+            slot_canonical = alias_to_slot.get(canonical, canonical)
+            instances_by_instr[slot_canonical].append((obs_id, facet))
 
     present_ids: set[int] = set()
     slot_obs: dict[int, dict[str, Any]] = {}
-    unexpected: list[dict[str, Any]] = []
+    matched_obs_ids: set[int] = set()
 
     for canonical, slot_ids in expected_idx_by_instr.items():
-        obs_list = observed_by_instr.get(canonical, [])
+        inst_list = instances_by_instr.get(canonical, [])
         consumed = {sid: False for sid in slot_ids}
-        used = [False] * len(obs_list)
+        used = [False] * len(inst_list)
 
         # Pass 1: match by explicit part_index.
-        for oi, obs in enumerate(obs_list):
-            oidx = obs.get("part_index")
+        for ii, (obs_id, facet) in enumerate(inst_list):
+            oidx = facet.get("part_index")
             if oidx is None:
                 continue
             for sid in slot_ids:
                 if not consumed[sid] and template_parts[sid].get("part_index") == oidx:
                     consumed[sid] = True
-                    used[oi] = True
-                    slot_obs[sid] = obs
+                    used[ii] = True
+                    slot_obs[sid] = collapsed[obs_id]
+                    matched_obs_ids.add(obs_id)
                     break
 
-        # Pass 2: consume remaining observed against remaining slots in order.
-        for oi in range(len(obs_list)):
-            if used[oi]:
+        # Pass 2: consume remaining instances against remaining slots in order.
+        for ii in range(len(inst_list)):
+            if used[ii]:
                 continue
+            obs_id, _facet = inst_list[ii]
             for sid in slot_ids:
                 if not consumed[sid]:
                     consumed[sid] = True
-                    used[oi] = True
-                    slot_obs[sid] = obs_list[oi]
+                    used[ii] = True
+                    slot_obs[sid] = collapsed[obs_id]
+                    matched_obs_ids.add(obs_id)
                     break
 
         for sid in slot_ids:
             if consumed[sid]:
                 present_ids.add(sid)
-        for oi, obs in enumerate(obs_list):
-            if not used[oi]:
-                unexpected.append(_unexpected_entry(obs))
 
-    # Observed instruments with no expected slots at all.
-    for canonical, obs_list in observed_by_instr.items():
-        if canonical not in expected_idx_by_instr:
-            unexpected.extend(_unexpected_entry(obs) for obs in obs_list)
+    # A part is unexpected only if none of its instruments anchored an expected slot.
+    unexpected: list[dict[str, Any]] = []
+    for obs_id, obs in enumerate(collapsed):
+        if not obs.get("instruments"):
+            continue
+        if obs_id not in matched_obs_ids:
+            unexpected.append(_unexpected_entry(obs))
 
     expected: list[dict[str, Any]] = []
     for i, slot in enumerate(template_parts):
@@ -1219,9 +1270,9 @@ def build_matched_record(
     completeness_score = round(required_present / required_total, 3) if required_total else 1.0
 
     tier = completeness_tier(completeness_score, len(missing_required), score_missing)
-    needs_review = bool(
-        missing_required or unexpected or score_missing or rollup_needs_review
-    )
+    # Unexpected/extra parts are informational only \u2014 a part the score doesn't enumerate is a
+    # warning, not a gap that blocks review.
+    needs_review = bool(missing_required or score_missing or rollup_needs_review)
     evidence = result.get("evidence_sources")
     evidence = evidence if isinstance(evidence, list) else []
 
@@ -1834,11 +1885,8 @@ def render_piece_instrumentation_body(rec: dict[str, Any]) -> list[str]:
         out.append("")
         unexpected = rec.get("unexpected_parts") or []
         if unexpected:
-            labels = ", ".join(
-                md_cell(u.get("predicted_part") or u.get("canonical_instrument"))
-                for u in unexpected
-            )
-            out.append(f"_Observed but not expected: {labels}_")
+            labels = ", ".join(md_cell(_unexpected_label(u)) for u in unexpected)
+            out.append(f"_Observed but not expected (informational): {labels}_")
             out.append("")
     else:
         out.append(

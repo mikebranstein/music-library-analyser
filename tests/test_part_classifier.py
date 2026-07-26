@@ -138,10 +138,27 @@ def test_classify_filename_only_confidence():
         "file_fingerprint": "fp1",
     }
     rec = _classify(inv)
-    assert rec["canonical_instrument"] == "cornet"
-    assert rec["part_index"] == 2
+    assert rec["instruments"][0]["canonical"] == "cornet"
+    assert rec["instruments"][0]["part_index"] == 2
     assert rec["evidence_source"] == "filename"
     assert rec["confidence"] == 0.75
+
+
+def test_classify_combined_doubling_part_lists_both_instruments():
+    # A single physical part covering a chair plus a doubling (e.g. "Flute 1 & Piccolo")
+    # must be classified as BOTH instruments so it can satisfy either expected slot.
+    inv = {
+        "pdf_path": "P/Song - Flute 1 & Piccolo.pdf",
+        "pdf_filename": "Song - Flute 1 & Piccolo.pdf",
+        "piece_folder": "Song",
+        "piece_id": "abc",
+        "file_fingerprint": "fp1",
+    }
+    rec = _classify(inv)
+    canonicals = {(f["canonical"], f["part_index"]) for f in rec["instruments"]}
+    assert canonicals == {("flute", 1), ("piccolo", None)}
+    # The composed label mentions both roles.
+    assert "Flute" in rec["predicted_part"] and "Piccolo" in rec["predicted_part"]
 
 
 def test_classify_combined_confidence_with_text():
@@ -154,7 +171,7 @@ def test_classify_combined_confidence_with_text():
     }
     doc = {"first_page_header_candidates": ["Trumpet"], "first_page_text": "Trumpet in Bb"}
     rec = _classify(inv, doc)
-    assert rec["canonical_instrument"] == "trumpet"
+    assert rec["instruments"][0]["canonical"] == "trumpet"
     assert rec["evidence_source"] == "combined"
     assert rec["confidence"] >= 0.90
 
@@ -169,7 +186,7 @@ def test_text_only_recovery():
     }
     doc = {"first_page_header_candidates": ["Flute"], "first_page_text": "Flute solo"}
     rec = _classify(inv, doc)
-    assert rec["canonical_instrument"] == "flute"
+    assert rec["instruments"][0]["canonical"] == "flute"
     assert rec["evidence_source"] == "text"
     assert rec["confidence"] == 0.50
 
@@ -183,18 +200,20 @@ def test_no_match_is_unknown():
         "file_fingerprint": "fp1",
     }
     rec = _classify(inv)
-    assert rec["canonical_instrument"] is None
-    assert rec["family"] == "unknown"
+    assert rec["instruments"] == []
     assert rec["evidence_source"] == "none"
 
 
 def test_apply_ensemble_flags_duplicates():
+    def _facet(canonical, idx):
+        return {"canonical": canonical, "part_index": idx, "family": "other", "section": "x"}
+
     records = [
-        {"piece_id": "p", "canonical_instrument": "trumpet", "part_index": 1,
+        {"piece_id": "p", "instruments": [_facet("trumpet", 1)],
          "clef": None, "is_score": False, "duplicate_in_piece": False},
-        {"piece_id": "p", "canonical_instrument": "trumpet", "part_index": 1,
+        {"piece_id": "p", "instruments": [_facet("trumpet", 1)],
          "clef": None, "is_score": False, "duplicate_in_piece": False},
-        {"piece_id": "p", "canonical_instrument": "flute", "part_index": 1,
+        {"piece_id": "p", "instruments": [_facet("flute", 1)],
          "clef": None, "is_score": False, "duplicate_in_piece": False},
     ]
     classifier.apply_ensemble(records)
@@ -271,18 +290,19 @@ def test_section_assignment():
         {"pdf_path": "P/Song - Cornet 1.pdf", "pdf_filename": "Song - Cornet 1.pdf",
          "piece_folder": "Song", "piece_id": "p", "file_fingerprint": "f"}
     )
-    assert cornet["section"] == "cornets_trumpets"
+    assert cornet["instruments"][0]["section"] == "cornets_trumpets"
     tuba = _classify(
         {"pdf_path": "P/Song - Tuba.pdf", "pdf_filename": "Song - Tuba.pdf",
          "piece_folder": "Song", "piece_id": "p", "file_fingerprint": "f"}
     )
-    assert tuba["section"] == "tubas"
-    # Score and unmatched fall back to score/unknown.
+    assert tuba["instruments"][0]["section"] == "tubas"
+    # Score parts carry no instrument facets; the record is flagged as a score instead.
     score = _classify(
         {"pdf_path": "P/Song - Full Score.pdf", "pdf_filename": "Song - Full Score.pdf",
          "piece_folder": "Song", "piece_id": "p", "file_fingerprint": "f"}
     )
-    assert score["section"] == "score"
+    assert score["is_score"] is True
+    assert score["instruments"] == []
 
 
 def test_part_sort_key_orders_scores_first_and_by_index():
@@ -315,7 +335,10 @@ def test_build_piece_rollups():
     assert piece["distinct_instruments"] == 1
     assert piece["duplicate_count"] == 2
     # The two Cornet 1 docs collapse to one observed-part key with count 2.
-    cornet_entries = [p for p in piece["observed_parts"] if p["canonical_instrument"] == "cornet"]
+    cornet_entries = [
+        p for p in piece["observed_parts"]
+        if any(f["canonical"] == "cornet" for f in p["instruments"])
+    ]
     assert len(cornet_entries) == 1
     assert cornet_entries[0]["count"] == 2
     assert cornet_entries[0]["duplicate"] is True
@@ -379,18 +402,18 @@ def test_full_run_end_to_end(tmp_path: Path):
     by_path = {r["pdf_path"]: r for r in records}
 
     cornet = by_path["Song/Song - Cornet 1.pdf"]
-    assert cornet["canonical_instrument"] == "cornet"
-    assert cornet["part_index"] == 1
+    assert cornet["instruments"][0]["canonical"] == "cornet"
+    assert cornet["instruments"][0]["part_index"] == 1
     assert cornet["duplicate_in_piece"] is True  # two Cornet 1 in the piece
 
     baritone = by_path["Song/Song - Baritone (BC).pdf"]
-    assert baritone["canonical_instrument"] == "baritone_horn"
+    assert baritone["instruments"][0]["canonical"] == "baritone_horn"
     assert baritone["clef"] == "bass"
     assert baritone["predicted_part"] == "Baritone (BC)"
 
     score = by_path["Song/Song - Full Score.pdf"]
     assert score["is_score"] is True
-    assert score["family"] == "score"
+    assert score["instruments"] == []
 
     broken = by_path["Song/broken.pdf"]
     assert broken["processing_status"] == "skipped_unreadable"
@@ -407,7 +430,10 @@ def test_full_run_end_to_end(tmp_path: Path):
     assert piece["piece_id"] == "p1"
     assert piece["has_score"] is True
     assert piece["duplicate_count"] == 2
-    cornet = [p for p in piece["observed_parts"] if p["canonical_instrument"] == "cornet"]
+    cornet = [
+        p for p in piece["observed_parts"]
+        if any(f["canonical"] == "cornet" for f in p["instruments"])
+    ]
     assert cornet and cornet[0]["count"] == 2
 
 

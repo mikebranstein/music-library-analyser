@@ -39,7 +39,7 @@ from scripts._common import (
     utc_now_iso,
 )
 
-RECORD_VERSION = "1.1"
+RECORD_VERSION = "1.2"
 
 CHECKPOINT_FILENAME = ".part_classifier_checkpoint.json"
 
@@ -111,7 +111,10 @@ DEFAULT_LEXICON: dict[str, Any] = {
         "bass_drum": ["bass drum"],
         "cymbals": ["cymbals", "crash cymbals", "suspended cymbal"],
         "percussion": ["percussion", "perc", "battery", "aux percussion", "auxiliary percussion"],
-        "drum_set": ["drum set", "drum kit", "drums", "trap set"],
+        "drum_set": [
+            "drum set", "drum kit", "drums", "trap set", "trap kit",
+            "drumset", "drumkit", "trapset", "trapkit", "kit",
+        ],
     },
     "clef_markers": {
         "(bc)": "bass", "(tc)": "treble", "(bass)": "bass", "(treble)": "treble",
@@ -368,6 +371,87 @@ def match_instrument(
     return best_canonical, best_alias, alternates
 
 
+# Connectors that mean one physical part covers MULTIPLE instruments -- either a doubling
+# ("Flute 1 & Piccolo", "Oboe / English Horn") or a multi-chair part ("Horn 1 & 2"). Each named
+# instrument becomes a co-equal facet so downstream coverage can satisfy any matching expected slot.
+_COMBINED_SPLIT_RE = re.compile(r"\s*(?:&|/|\+|w/|\band\b|\bdoubling\b|\bdbl\b\.?)\s*")
+
+
+def build_instrument_facets(
+    seg_norm: str,
+    compiled: list[tuple[str, str]],
+    section_map: dict[str, str],
+    lexicon: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split a (possibly combined) part label into ordered, co-equal instrument facets.
+
+    Returns ``(facets, primary_alternates)``. Each facet is
+    ``{"canonical", "part_index", "family", "section"}``. A single-instrument label yields one
+    facet (identical to the old behavior). A combined label yields one facet per named instrument.
+    A sub-segment that carries only an index (e.g. the ``2`` in ``Horn 1 & 2``) extends the most
+    recent instrument as an additional chair. ``primary_alternates`` are the ambiguity alternates of
+    the first matched instrument (kept for the record's ``alternates`` field).
+    """
+    sub_segments = [s for s in _COMBINED_SPLIT_RE.split(seg_norm) if s.strip()]
+    if not sub_segments:
+        sub_segments = [seg_norm]
+
+    facets: list[dict[str, Any]] = []
+    seen: set[tuple[str, int | None]] = set()
+    primary_alternates: list[dict[str, Any]] = []
+    last_canonical: str | None = None
+    for sub in sub_segments:
+        canonical, _alias, alternates = match_instrument(sub, compiled)
+        idx = extract_part_index(sub)
+        if canonical is None:
+            # A bare index extends the previous instrument (e.g. "Horn 1 & 2" -> horn 1, horn 2).
+            if idx is not None and last_canonical is not None:
+                canonical = last_canonical
+            else:
+                continue
+        else:
+            last_canonical = canonical
+            if not primary_alternates:
+                primary_alternates = alternates
+        key = (canonical, idx)
+        if key in seen:
+            continue
+        seen.add(key)
+        family = lexicon["families"].get(canonical, "other")
+        facets.append({
+            "canonical": canonical,
+            "part_index": idx,
+            "family": family,
+            "section": section_for(canonical, family, section_map),
+        })
+    return facets, primary_alternates
+
+
+def primary_facet(rec: dict[str, Any]) -> dict[str, Any] | None:
+    """The first instrument facet of a record (its representative instrument), or None."""
+    facets = rec.get("instruments") or []
+    return facets[0] if facets else None
+
+
+def primary_canonical(rec: dict[str, Any]) -> str | None:
+    facet = primary_facet(rec)
+    return facet.get("canonical") if facet else None
+
+
+def primary_family(rec: dict[str, Any]) -> str:
+    if rec.get("is_score"):
+        return "score"
+    facet = primary_facet(rec)
+    return facet.get("family") if facet else "unknown"
+
+
+def primary_section(rec: dict[str, Any]) -> str:
+    if rec.get("is_score"):
+        return "score"
+    facet = primary_facet(rec)
+    return facet.get("section") if facet else "unknown"
+
+
 def detect_score(text_norm: str, lexicon: dict[str, Any]) -> str | None:
     for keyword, score_type in lexicon["score_keywords"]:
         if _word_search(normalize(keyword), text_norm):
@@ -467,31 +551,32 @@ def classify_document(
     clef = extract_clef(seg_norm, lexicon)
     transposition = extract_transposition(seg_norm, lexicon)
 
-    canonical: str | None = None
-    matched_alias: str | None = None
+    instruments: list[dict[str, Any]] = []
     alternates: list[dict[str, Any]] = []
+    matched_alias: str | None = None
     filename_match = False
     text_match = False
     is_score = False
 
     if score_type is not None:
         is_score = True
-        family = "score"
         confidence = 0.90
         evidence = "filename"
-        part_index = None
         clef = None
         transposition = None
     else:
-        canonical, matched_alias, alternates = match_instrument(seg_norm, compiled)
-        part_index = extract_part_index(seg_norm)
-        if canonical is not None:
+        instruments, alternates = build_instrument_facets(
+            seg_norm, compiled, section_map, lexicon
+        )
+        if instruments:
             filename_match = True
-            # Confirm with page text: does any alias of this canonical appear?
+            matched_alias = instruments[0]["canonical"]
+            facet_canonicals = {f["canonical"] for f in instruments}
+            # Confirm with page text: does any alias of any matched instrument appear?
             text_match = any(
                 _word_search(alias, text_norm)
                 for c, alias in compiled
-                if c == canonical
+                if c in facet_canonicals
             )
             if text_match:
                 confidence = 0.90
@@ -501,37 +586,61 @@ def classify_document(
             else:
                 confidence = 0.75
                 evidence = "filename"
-            family = lexicon["families"].get(canonical, "other")
         else:
-            # Filename gave nothing usable; try to recover from page text.
-            t_canonical, t_alias, t_alts = match_instrument(
+            # Filename gave nothing usable; try to recover a single instrument from page text.
+            t_canonical, _t_alias, t_alts = match_instrument(
                 text_norm, compiled, min_alias_len=4
             )
             if t_canonical is not None:
-                canonical = t_canonical
-                matched_alias = t_alias
+                matched_alias = t_canonical
                 alternates = t_alts
+                family = lexicon["families"].get(t_canonical, "other")
+                instruments = [{
+                    "canonical": t_canonical,
+                    "part_index": None,
+                    "family": family,
+                    "section": section_for(t_canonical, family, section_map),
+                }]
                 text_match = True
                 confidence = 0.50
                 evidence = "text"
-                family = lexicon["families"].get(canonical, "other")
             else:
                 confidence = 0.0
                 evidence = "none"
-                family = "unknown"
 
-    predicted_part = compose_label(
-        canonical, transposition, part_index, clef, is_score, score_type
-    )
-    section = section_for(canonical, family, section_map)
+    first = instruments[0] if instruments else None
+    if is_score:
+        predicted_part = compose_label(None, None, None, None, True, score_type)
+    elif not instruments:
+        predicted_part = None
+    else:
+        facet_labels = [
+            compose_label(
+                f["canonical"],
+                transposition if i == 0 else None,
+                f["part_index"],
+                None,
+                False,
+                None,
+            )
+            for i, f in enumerate(instruments)
+        ]
+        predicted_part = " / ".join(label for label in facet_labels if label)
+        if clef in CLEF_ABBREV:
+            predicted_part = f"{predicted_part} ({CLEF_ABBREV[clef]})"
+
     part_sort_key = compute_part_sort_key(
-        canonical, part_index, clef, is_score, score_type
+        first["canonical"] if first else None,
+        first["part_index"] if first else None,
+        clef,
+        is_score,
+        score_type,
     )
     confidence = round(confidence, 3)
     tier = confidence_tier(confidence)
     # Base review flag; duplicate_in_piece is OR'd in during ensemble harmonization.
     needs_review = bool(
-        (not is_score and canonical is None) or confidence < LOW_CONFIDENCE
+        (not is_score and not instruments) or confidence < LOW_CONFIDENCE
     )
 
     return {
@@ -544,10 +653,7 @@ def classify_document(
         "catalog_number": catalog_number,
         "piece_title_guess": piece_title_guess,
         "predicted_part": predicted_part,
-        "canonical_instrument": canonical,
-        "family": family,
-        "section": section,
-        "part_index": part_index,
+        "instruments": instruments,
         "clef": clef,
         "transposition": transposition,
         "is_score": is_score,
@@ -586,10 +692,7 @@ def build_skipped_record(inv_record: dict[str, Any], run_id: str) -> dict[str, A
         "catalog_number": catalog_number,
         "piece_title_guess": piece_title_guess,
         "predicted_part": None,
-        "canonical_instrument": None,
-        "family": "unknown",
-        "section": "unknown",
-        "part_index": None,
+        "instruments": [],
         "clef": None,
         "transposition": None,
         "is_score": False,
@@ -617,12 +720,14 @@ def apply_ensemble(records: list[dict[str, Any]]) -> None:
     """Flag documents that share an instrument signature within the same piece."""
     signatures: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
     for rec in records:
-        if rec.get("is_score") or rec.get("canonical_instrument") is None:
+        if rec.get("is_score") or not rec.get("instruments"):
             continue
+        facet_key = tuple(
+            sorted((f.get("canonical"), f.get("part_index")) for f in rec["instruments"])
+        )
         key = (
             rec.get("piece_id"),
-            rec.get("canonical_instrument"),
-            rec.get("part_index"),
+            facet_key,
             rec.get("clef"),
         )
         signatures.setdefault(key, []).append(rec)
@@ -638,8 +743,10 @@ def build_piece_rollups(
 ) -> list[dict[str, Any]]:
     """Aggregate per-document predictions into one observed-parts record per piece.
 
-    The observed-part key is ``(canonical_instrument, part_index, clef)`` \u2014 the exact shape
-    Scripts 04/06 compare against \u2014 so downstream gap analysis never drifts on key shape.
+    Each observed-part entry carries the list of instruments the physical part represents
+    (``instruments``); a combined/doubling part (e.g. "Flute 1 & Piccolo") therefore lists every
+    instrument it covers, so downstream coverage in Script 04 can satisfy any matching expected
+    slot. Entries are keyed by ``(instrument-set, clef)`` so identical parts collapse with a count.
     """
     pieces: dict[Any, dict[str, Any]] = {}
     for rec in records:
@@ -668,21 +775,26 @@ def build_piece_rollups(
         scores = [d for d in classified if d.get("is_score")]
         parts = [d for d in classified if not d.get("is_score")]
 
-        observed: dict[tuple[Any, Any, Any], dict[str, Any]] = {}
+        observed: dict[tuple[Any, Any], dict[str, Any]] = {}
         for d in parts:
+            facets = d.get("instruments") or []
             key = (
-                d.get("canonical_instrument"),
-                d.get("part_index"),
+                tuple(sorted((f.get("canonical"), f.get("part_index")) for f in facets)),
                 d.get("clef"),
             )
             entry = observed.get(key)
             conf = d.get("confidence", 0.0)
             if entry is None:
                 observed[key] = {
-                    "canonical_instrument": key[0],
-                    "part_index": key[1],
-                    "clef": key[2],
-                    "section": d.get("section", "unknown"),
+                    "instruments": [
+                        {
+                            "canonical": f.get("canonical"),
+                            "part_index": f.get("part_index"),
+                            "section": f.get("section", "unknown"),
+                        }
+                        for f in facets
+                    ],
+                    "clef": d.get("clef"),
                     "predicted_part": d.get("predicted_part"),
                     "count": 1,
                     "min_confidence": conf,
@@ -699,10 +811,11 @@ def build_piece_rollups(
                 entry["duplicate"] = entry["duplicate"] or bool(d.get("duplicate_in_piece"))
 
         observed_parts = sorted(observed.values(), key=lambda e: e["part_sort_key"])
-        families = sorted({d.get("family") for d in classified if d.get("family")})
-        sections = sorted({d.get("section") for d in classified if d.get("section")})
+        part_facets = [f for d in parts for f in (d.get("instruments") or [])]
+        families = sorted({f.get("family") for f in part_facets if f.get("family")})
+        sections = sorted({f.get("section") for f in part_facets if f.get("section")})
         distinct_instruments = len(
-            {d.get("canonical_instrument") for d in parts if d.get("canonical_instrument")}
+            {f.get("canonical") for f in part_facets if f.get("canonical")}
         )
 
         rollups.append(
@@ -722,12 +835,12 @@ def build_piece_rollups(
                 "sections": sections,
                 "needs_review_count": sum(1 for d in docs if d.get("needs_review")),
                 "unmatched_count": sum(
-                    1 for d in parts if d.get("canonical_instrument") is None
+                    1 for d in parts if not d.get("instruments")
                 ),
                 "low_confidence_count": sum(
                     1
                     for d in parts
-                    if d.get("canonical_instrument") is not None
+                    if d.get("instruments")
                     and d.get("confidence", 0.0) < LOW_CONFIDENCE
                 ),
                 "duplicate_count": sum(1 for d in docs if d.get("duplicate_in_piece")),
@@ -751,7 +864,7 @@ def _part_status_icon(rec: dict[str, Any]) -> str:
         return "⏭️"
     if rec.get("is_score"):
         return "🎼"
-    if rec.get("canonical_instrument") is None:
+    if not rec.get("instruments"):
         return "⚠️"
     if rec.get("confidence", 0.0) < LOW_CONFIDENCE:
         return "⚠️"
@@ -772,17 +885,27 @@ def build_report(
     instrument_counts: dict[str, int] = {}
     evidence_counts: dict[str, int] = {}
     for rec in classified:
-        family_counts[rec["family"]] = family_counts.get(rec["family"], 0) + 1
-        canonical = rec["canonical_instrument"] or "(unmatched)"
-        instrument_counts[canonical] = instrument_counts.get(canonical, 0) + 1
         evidence = rec.get("evidence_source") or "none"
         evidence_counts[evidence] = evidence_counts.get(evidence, 0) + 1
+        if rec.get("is_score"):
+            family_counts["score"] = family_counts.get("score", 0) + 1
+            continue
+        facets = rec.get("instruments") or []
+        if not facets:
+            instrument_counts["(unmatched)"] = instrument_counts.get("(unmatched)", 0) + 1
+            family_counts["unknown"] = family_counts.get("unknown", 0) + 1
+            continue
+        for facet in facets:
+            fam = facet.get("family") or "other"
+            family_counts[fam] = family_counts.get(fam, 0) + 1
+            canonical = facet.get("canonical") or "(unmatched)"
+            instrument_counts[canonical] = instrument_counts.get(canonical, 0) + 1
 
     scores = [r for r in classified if r["is_score"]]
     parts = [r for r in classified if not r["is_score"]]
-    unmatched = [r for r in parts if r["canonical_instrument"] is None]
+    unmatched = [r for r in parts if not r.get("instruments")]
     low_conf = [
-        r for r in parts if r["canonical_instrument"] is not None and r["confidence"] < LOW_CONFIDENCE
+        r for r in parts if r.get("instruments") and r["confidence"] < LOW_CONFIDENCE
     ]
     duplicates = [r for r in classified if r["duplicate_in_piece"]]
 
@@ -972,7 +1095,7 @@ def build_report(
             p["classified"] += 1
             if rec["is_score"]:
                 p["scores"] += 1
-            elif rec["canonical_instrument"] is None:
+            elif not rec.get("instruments"):
                 p["unmatched"] += 1
             elif rec["confidence"] < LOW_CONFIDENCE:
                 p["low"] += 1
@@ -1006,7 +1129,7 @@ def build_report(
             f"| {_part_status_icon(rec)} | {md_cell(rec.get('pdf_filename'))} | "
             f"{md_cell(rec.get('piece_folder'))} | "
             f"{md_cell(rec.get('predicted_part'))} | "
-            f"{md_cell(rec.get('section'))} | {rec.get('confidence', 0.0):.2f} | "
+            f"{md_cell(primary_section(rec))} | {rec.get('confidence', 0.0):.2f} | "
             f"{md_cell(rec.get('evidence_source'))} |"
         )
     out.append("")

@@ -34,10 +34,10 @@ expected = load_module()
 
 def _observed(canonical: str, part_index: int | None, count: int = 1) -> dict[str, Any]:
     return {
-        "canonical_instrument": canonical,
-        "part_index": part_index,
+        "instruments": [
+            {"canonical": canonical, "part_index": part_index, "section": None}
+        ],
         "clef": "treble",
-        "section": None,
         "predicted_part": f"{canonical}_{part_index}",
         "count": count,
         "min_confidence": 0.9,
@@ -45,6 +45,26 @@ def _observed(canonical: str, part_index: int | None, count: int = 1) -> dict[st
         "needs_review": False,
         "duplicate": False,
         "part_sort_key": f"{canonical}:{part_index}",
+    }
+
+
+def _observed_combined(
+    facets: list[tuple[str, int | None]], count: int = 1
+) -> dict[str, Any]:
+    """An observed part covering multiple instruments (a doubling/combined part)."""
+    label = " / ".join(f"{c}_{i}" for c, i in facets)
+    return {
+        "instruments": [
+            {"canonical": c, "part_index": i, "section": None} for c, i in facets
+        ],
+        "clef": "treble",
+        "predicted_part": label,
+        "count": count,
+        "min_confidence": 0.9,
+        "max_confidence": 0.95,
+        "needs_review": False,
+        "duplicate": False,
+        "part_sort_key": label,
     }
 
 
@@ -58,6 +78,9 @@ def _piece(
         _observed("cornet", 1),
         _observed("euphonium", 1),
     ]
+    distinct = {
+        f["canonical"] for o in obs for f in o.get("instruments", []) if f.get("canonical")
+    }
     return {
         "piece_id": piece_id,
         "piece_folder": f"folder_{piece_id}",
@@ -65,7 +88,7 @@ def _piece(
         "piece_title_guess": f"Title {piece_id}",
         "has_score": has_score,
         "score_types": ["full_score"] if has_score else [],
-        "distinct_instruments": len({o["canonical_instrument"] for o in obs}),
+        "distinct_instruments": len(distinct),
         "families": [],
         "sections": [],
         "needs_review_count": needs_review_count,
@@ -269,7 +292,9 @@ def test_reconcile_present_missing_unexpected():
     assert present[("cornet", 1)] is True
     assert present[("cornet", 2)] is False
     assert present[("tuba", None)] is False
-    assert any(u["canonical_instrument"] == "trombone" for u in unexpected)
+    assert any(
+        any(f["canonical"] == "trombone" for f in u["instruments"]) for u in unexpected
+    )
 
 
 def test_reconcile_null_index_consumes_in_order():
@@ -289,7 +314,44 @@ def test_reconcile_extra_same_instrument_is_unexpected():
     expected_parts, unexpected = expected.reconcile_parts(slots, observed)
     assert expected_parts[0]["present"] is True
     assert len(unexpected) == 1
-    assert unexpected[0]["canonical_instrument"] == "cornet"
+    assert unexpected[0]["instruments"][0]["canonical"] == "cornet"
+
+
+def test_reconcile_combined_part_satisfies_multiple_slots():
+    # "Flute 1 & Piccolo" is one physical part that covers TWO expected slots.
+    slots = [
+        {"canonical": "flute", "part_index": 1, "label": "Flute 1", "required": True},
+        {"canonical": "piccolo", "part_index": None, "label": "Piccolo", "required": True},
+    ]
+    observed = [_observed_combined([("flute", 1), ("piccolo", None)])]
+    expected_parts, unexpected = expected.reconcile_parts(slots, observed)
+    present = {(e["canonical_instrument"], e["part_index"]): e["present"] for e in expected_parts}
+    assert present[("flute", 1)] is True
+    assert present[("piccolo", None)] is True
+    assert unexpected == []
+
+
+def test_reconcile_anchored_doubling_not_flagged_unexpected():
+    # Only flute is expected; the piccolo doubling on the same part is silently accepted
+    # because the part is anchored by a matched instrument.
+    slots = [
+        {"canonical": "flute", "part_index": 1, "label": "Flute 1", "required": True},
+    ]
+    observed = [_observed_combined([("flute", 1), ("piccolo", None)])]
+    expected_parts, unexpected = expected.reconcile_parts(slots, observed)
+    assert expected_parts[0]["present"] is True
+    assert unexpected == []
+
+
+def test_reconcile_fully_unmatched_combined_part_is_unexpected():
+    # Neither instrument on the combined part is expected -> the whole part is unexpected.
+    slots = [{"canonical": "cornet", "part_index": 1, "label": "Cornet 1", "required": True}]
+    observed = [_observed_combined([("oboe", None), ("english_horn", None)])]
+    expected_parts, unexpected = expected.reconcile_parts(slots, observed)
+    assert expected_parts[0]["present"] is False
+    assert len(unexpected) == 1
+    canonicals = {f["canonical"] for f in unexpected[0]["instruments"]}
+    assert canonicals == {"oboe", "english_horn"}
 
 
 def test_collapse_clef_editions_merges_bc_and_tc():
@@ -455,6 +517,28 @@ def test_infer_piece_missing_required_flags_review():
     assert rec["missing_required_count"] == 1
     assert "Euph" in rec["missing_required_parts"]
     assert rec["needs_review"] is True
+
+
+def test_infer_piece_unexpected_part_is_warning_not_review():
+    # An extra part the score doesn't enumerate is informational: it is reported but must NOT
+    # trigger needs_review when everything expected is present.
+    piece = _piece(observed=[_observed("cornet", 1), _observed("tuba", None)])
+    parts = [
+        {"canonical_instrument": "cornet", "part_index": 1, "label": "Cornet 1", "required": True},
+    ]
+    rec = expected.infer_piece(
+        piece, None, "run1",
+        config=dict(expected.DEFAULT_LOOKUP_CONFIG),
+        prompt_template="{title_guess}",
+        lookup_enabled=True,
+        lookup_fn=lambda p, c: _score_result(parts),
+    )
+    assert rec["unexpected_part_count"] == 1
+    assert rec["missing_required_count"] == 0
+    assert rec["completeness_tier"] == "complete"
+    assert rec["needs_review"] is False
+    body = "\n".join(expected.render_piece_instrumentation_body(rec))
+    assert "Observed but not expected" in body
 
 
 def test_infer_piece_low_confidence_conservative():
