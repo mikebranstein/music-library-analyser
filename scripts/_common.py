@@ -4,9 +4,65 @@ import hashlib
 import json
 import logging
 import os
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
+
+# Unified log line format used by every pipeline script (change 1: shared logging).
+LOG_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+
+
+# --- Shared output-vocabulary constants (change 5) -------------------------------------------
+# Downstream scripts (05-08) must filter Script 04's records by these exact string values.
+# Import them from here instead of hardcoding literals so a rename can never silently break a
+# consumer's filter.
+
+
+class ProcessingStatus:
+    """Values of the ``processing_status`` field on every pipeline record."""
+
+    SUCCESS = "success"
+    ERROR = "error"
+    SKIPPED_UNREADABLE = "skipped_unreadable"
+
+
+class LookupStatus:
+    """Values of Script 04's ``lookup_status`` field."""
+
+    MATCHED = "matched"
+    LOW_CONFIDENCE = "low_confidence"
+    NO_MATCH = "no_match"
+    DISABLED = "disabled"
+    ERROR = "error"
+
+
+class CompletenessTier:
+    """Values of Script 04's ``completeness_tier`` field."""
+
+    COMPLETE = "complete"
+    NEAR_COMPLETE = "near_complete"
+    INCOMPLETE = "incomplete"
+    SEVERELY_INCOMPLETE = "severely_incomplete"
+    UNKNOWN = "unknown"
+
+
+# Canonical display/iteration order for report tables that group by these fields.
+LOOKUP_STATUS_ORDER: tuple[str, ...] = (
+    LookupStatus.MATCHED,
+    LookupStatus.LOW_CONFIDENCE,
+    LookupStatus.NO_MATCH,
+    LookupStatus.DISABLED,
+    LookupStatus.ERROR,
+)
+COMPLETENESS_TIER_ORDER: tuple[str, ...] = (
+    CompletenessTier.COMPLETE,
+    CompletenessTier.NEAR_COMPLETE,
+    CompletenessTier.INCOMPLETE,
+    CompletenessTier.SEVERELY_INCOMPLETE,
+    CompletenessTier.UNKNOWN,
+)
 
 
 def utc_now_iso() -> str:
@@ -121,3 +177,116 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
                 continue
             records.append(item)
     return records
+
+
+# --- Shared script scaffolding ---------------------------------------------------------------
+
+
+def setup_logging(log_level: str) -> None:
+    """Configure root logging with the shared pipeline format (change 1)."""
+    logging.basicConfig(
+        level=getattr(logging, log_level.upper(), logging.INFO),
+        format=LOG_FORMAT,
+    )
+
+
+def make_checkpoint_path(output: Path, filename: str) -> Path:
+    """Return the checkpoint path for an output file (change 1).
+
+    Checkpoints live beside their output; ``filename`` is the per-script dotfile name
+    (e.g. ``".expected_parts_checkpoint.json"``).
+    """
+    return output.parent / filename
+
+
+def pct(part: int, whole: int) -> float:
+    """Percentage of ``part`` out of ``whole`` (0.0 when ``whole`` is falsy) (change 1)."""
+    return (100.0 * part / whole) if whole else 0.0
+
+
+def md_cell(value: Any) -> str:
+    """Escape a value for safe inclusion in a Markdown table cell (change 1)."""
+    return str(value if value is not None else "").replace("|", "\\|")
+
+
+def new_record_envelope(run_id: str, record_version: str) -> dict[str, Any]:
+    """Return the common header shared by every pipeline output record (change 3).
+
+    Callers add their own domain fields on top of this envelope.
+    """
+    return {
+        "record_version": record_version,
+        "run_id": run_id,
+        "processing_status": ProcessingStatus.SUCCESS,
+        "processing_timestamp": utc_now_iso(),
+    }
+
+
+def load_checkpoint(
+    path: Path,
+    record_version: str,
+    logger: logging.Logger | None = None,
+) -> dict[str, Any]:
+    """Load a checkpoint, discarding it when its ``record_version`` no longer matches (change 2).
+
+    Returns an empty dict when the checkpoint is missing or stale, so incremental reuse simply
+    reprocesses everything after a schema bump.
+    """
+    checkpoint = read_json(path) or {}
+    if checkpoint and checkpoint.get("record_version") != record_version:
+        (logger or logging.getLogger(__name__)).warning(
+            "Checkpoint version mismatch (found=%s expected=%s). Ignoring checkpoint.",
+            checkpoint.get("record_version"),
+            record_version,
+        )
+        return {}
+    return checkpoint
+
+
+def build_checkpoint(
+    record_version: str,
+    run_id: str,
+    fingerprints: dict[str, str],
+    **extra: Any,
+) -> dict[str, Any]:
+    """Assemble a checkpoint payload with the standard fields plus per-script ``extra`` (change 2)."""
+    checkpoint: dict[str, Any] = {
+        "record_version": record_version,
+        "last_run_id": run_id,
+        "last_run_timestamp": utc_now_iso(),
+        "fingerprints": fingerprints,
+    }
+    checkpoint.update(extra)
+    return checkpoint
+
+
+_T = TypeVar("_T")
+_R = TypeVar("_R")
+
+
+def run_with_progress(
+    items: list[_T],
+    worker: Callable[[_T], _R],
+    max_workers: int = 1,
+) -> list[_R]:
+    """Apply ``worker`` to each item, in parallel when ``max_workers > 1`` (change 4).
+
+    Results preserve input order regardless of concurrency. Runs sequentially for a single worker
+    or a single item (so there is no thread-pool overhead in the common case). Per-item progress
+    logging belongs in ``worker`` itself.
+    """
+    workers = max(1, max_workers)
+    if workers <= 1 or len(items) <= 1:
+        return [worker(item) for item in items]
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(worker, items))
+
+
+def piece_sort_key(record: dict[str, Any]) -> tuple[str, str]:
+    """Canonical ordering for piece-level records: by catalog number then folder (change 6).
+
+    Records without a catalog number sort last (``"~"`` sentinel). Every script that emits or
+    reports piece records should use this so output ordering is identical across the pipeline.
+    """
+    catalog = record.get("catalog_number") or "~"
+    return (catalog, record.get("piece_folder") or "")

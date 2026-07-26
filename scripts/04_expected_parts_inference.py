@@ -22,7 +22,6 @@ import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -35,16 +34,35 @@ except Exception:  # pragma: no cover - optional dependency
     yaml = None
 
 from scripts._common import (
+    COMPLETENESS_TIER_ORDER as TIER_ORDER,
+)
+from scripts._common import (
+    LOOKUP_STATUS_ORDER as STATUS_ORDER,
+)
+from scripts._common import (
+    CompletenessTier,
+    LookupStatus,
+    ProcessingStatus,
     atomic_write_json,
     atomic_write_jsonl,
     atomic_write_text,
-    read_json,
+    build_checkpoint,
+    load_checkpoint,
+    make_checkpoint_path,
+    md_cell,
+    new_record_envelope,
+    pct,
+    piece_sort_key,
     read_jsonl,
+    run_with_progress,
+    setup_logging,
     sha256_text,
     utc_now_iso,
 )
 
 RECORD_VERSION = "2.0"
+
+CHECKPOINT_FILENAME = ".expected_parts_checkpoint.json"
 
 app = typer.Typer(add_completion=False)
 
@@ -94,17 +112,6 @@ DEFAULT_PROMPT_TEMPLATE = (
     '  "expected_parts": [], "evidence_sources": [], "notes": ""}}\n'
     f"{RESULT_END}\n"
 )
-
-
-def setup_logging(level: str) -> None:
-    logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
-
-
-def get_checkpoint_path(output: Path) -> Path:
-    return output.parent / ".expected_parts_checkpoint.json"
 
 
 # --- Config + prompt loading -----------------------------------------------------------------
@@ -455,12 +462,12 @@ def reconcile_parts(
 def completeness_tier(score: float, missing_required: int, score_missing: bool) -> str:
     """Map the required-part completeness fraction onto a tier label."""
     if missing_required == 0 and not score_missing:
-        return "complete"
+        return CompletenessTier.COMPLETE
     if score >= NEAR_COMPLETE:
-        return "near_complete"
+        return CompletenessTier.NEAR_COMPLETE
     if score >= INCOMPLETE:
-        return "incomplete"
-    return "severely_incomplete"
+        return CompletenessTier.INCOMPLETE
+    return CompletenessTier.SEVERELY_INCOMPLETE
 
 
 # --- Work identity ---------------------------------------------------------------------------
@@ -490,17 +497,15 @@ def build_work_identity(
 
 
 def _base_record(piece: dict[str, Any], run_id: str) -> dict[str, Any]:
-    return {
-        "record_version": RECORD_VERSION,
-        "run_id": run_id,
+    rec = new_record_envelope(run_id, RECORD_VERSION)
+    rec.update({
         "piece_id": piece.get("piece_id"),
         "piece_folder": piece.get("piece_folder"),
         "catalog_number": piece.get("catalog_number"),
         "piece_title_guess": piece.get("piece_title_guess"),
         "has_score": bool(piece.get("has_score")),
-        "processing_status": "success",
-        "processing_timestamp": utc_now_iso(),
-    }
+    })
+    return rec
 
 
 def conservative_record(
@@ -539,7 +544,7 @@ def conservative_record(
         "score_expected": False,
         "score_missing": False,
         "completeness_score": None,
-        "completeness_tier": "unknown",
+        "completeness_tier": CompletenessTier.UNKNOWN,
         "observed_instrument_count": len(observed_canonicals(piece)),
         "expected_part_count": 0,
         "missing_required_count": 0,
@@ -588,7 +593,7 @@ def infer_piece_from_lookup(
         "ensemble_display_name": str(result.get("ensemble_display_name") or "Unknown"),
         "detection_method": "authority_lookup",
         "inference_method": "authority_lookup",
-        "lookup_status": "matched",
+        "lookup_status": LookupStatus.MATCHED,
         "lookup_model": lookup_model,
         "lookup_notes": str(result.get("notes") or ""),
         "identity_match_confidence": round(
@@ -628,7 +633,7 @@ def infer_piece(
     """Infer expected parts for one piece via online lookup, degrading conservatively."""
     model = str(config.get("model") or "")
     if not lookup_enabled:
-        return conservative_record(piece, doc, run_id, "disabled", lookup_model=model)
+        return conservative_record(piece, doc, run_id, LookupStatus.DISABLED, lookup_model=model)
 
     query = build_lookup_query(piece, doc)
     prompt = render_prompt(prompt_template, query)
@@ -637,12 +642,12 @@ def infer_piece(
     except Exception as exc:
         logger.warning("Lookup failed for piece %s: %s", piece.get("piece_id"), exc)
         return conservative_record(
-            piece, doc, run_id, "error", lookup_notes=str(exc), lookup_model=model
+            piece, doc, run_id, LookupStatus.ERROR, lookup_notes=str(exc), lookup_model=model
         )
 
     if not isinstance(result, dict) or not result.get("match_found"):
         return conservative_record(
-            piece, doc, run_id, "no_match",
+            piece, doc, run_id, LookupStatus.NO_MATCH,
             evidence=result.get("evidence_sources") if isinstance(result, dict) else None,
             lookup_notes=str(result.get("notes") or "") if isinstance(result, dict) else "",
             lookup_model=model,
@@ -653,7 +658,7 @@ def infer_piece(
     threshold = float(config.get("confidence_threshold", 0.5) or 0.0)
     if confidence < threshold:
         return conservative_record(
-            piece, doc, run_id, "low_confidence",
+            piece, doc, run_id, LookupStatus.LOW_CONFIDENCE,
             evidence=result.get("evidence_sources"),
             identity_match_confidence=confidence,
             lookup_notes=str(result.get("notes") or ""),
@@ -667,8 +672,8 @@ def infer_piece(
 
 
 def build_error_record(piece: dict[str, Any], run_id: str, message: str) -> dict[str, Any]:
-    rec = conservative_record(piece, None, run_id, "error", lookup_notes=message)
-    rec["processing_status"] = "error"
+    rec = conservative_record(piece, None, run_id, LookupStatus.ERROR, lookup_notes=message)
+    rec["processing_status"] = ProcessingStatus.ERROR
     rec["detection_method"] = "error"
     rec["error_detail"] = message
     return rec
@@ -698,20 +703,7 @@ def config_fingerprint(config: dict[str, Any], prompt_template: str, lookup_enab
     return sha256_text(basis)
 
 
-def _sort_key(record: dict[str, Any]) -> tuple[str, str]:
-    catalog = record.get("catalog_number") or "~"
-    return (catalog, record.get("piece_folder") or "")
-
-
 # --- Reporting -------------------------------------------------------------------------------
-
-
-def _pct(part: int, whole: int) -> float:
-    return (100.0 * part / whole) if whole else 0.0
-
-
-def _md_cell(value: str | None) -> str:
-    return (value or "").replace("|", "\\|")
 
 
 def build_report(records: list[dict[str, Any]], meta: dict[str, Any]) -> str:
@@ -758,8 +750,8 @@ def build_report(records: list[dict[str, Any]], meta: dict[str, Any]) -> str:
     out.append("| --- | --- |")
     out.append(f"| Pieces in output | {total} |")
     out.append(f"| Processed this run | {meta['processed']} (reused {meta['reused']}) |")
-    out.append(f"| Confident lookups | {matched} ({_pct(matched, total):.1f}%) |")
-    out.append(f"| Complete pieces | {complete} ({_pct(complete, total):.1f}%) |")
+    out.append(f"| Confident lookups | {matched} ({pct(matched, total):.1f}%) |")
+    out.append(f"| Complete pieces | {complete} ({pct(complete, total):.1f}%) |")
     out.append(f"| Pieces needing review | {needs_review} |")
     out.append(f"| Processing errors | {len(errors)} |")
     out.append("")
@@ -768,7 +760,7 @@ def build_report(records: list[dict[str, Any]], meta: dict[str, Any]) -> str:
     out.append("")
     out.append("| Status | Pieces |")
     out.append("| --- | --- |")
-    for status in ("matched", "low_confidence", "no_match", "disabled", "error"):
+    for status in STATUS_ORDER:
         if status in status_counts:
             out.append(f"| {status} | {status_counts[status]} |")
     out.append("")
@@ -777,7 +769,7 @@ def build_report(records: list[dict[str, Any]], meta: dict[str, Any]) -> str:
     out.append("")
     out.append("| Tier | Pieces |")
     out.append("| --- | --- |")
-    for tier in ("complete", "near_complete", "incomplete", "severely_incomplete", "unknown"):
+    for tier in TIER_ORDER:
         if tier in tier_counts:
             out.append(f"| {tier} | {tier_counts[tier]} |")
     out.append("")
@@ -787,7 +779,7 @@ def build_report(records: list[dict[str, Any]], meta: dict[str, Any]) -> str:
     out.append("| Ensemble | Pieces |")
     out.append("| --- | --- |")
     for name in sorted(ensemble_counts, key=lambda k: (-ensemble_counts[k], k)):
-        out.append(f"| {_md_cell(name)} | {ensemble_counts[name]} |")
+        out.append(f"| {md_cell(name)} | {ensemble_counts[name]} |")
     out.append("")
 
     out.append("## Most Commonly Missing Parts")
@@ -797,7 +789,7 @@ def build_report(records: list[dict[str, Any]], meta: dict[str, Any]) -> str:
         out.append("| --- | --- |")
         ranked = sorted(missing_part_counts, key=lambda k: (-missing_part_counts[k], k))
         for label in ranked[:25]:
-            out.append(f"| {_md_cell(label)} | {missing_part_counts[label]} |")
+            out.append(f"| {md_cell(label)} | {missing_part_counts[label]} |")
     else:
         out.append("No required parts are missing across the collection.")
     out.append("")
@@ -805,20 +797,20 @@ def build_report(records: list[dict[str, Any]], meta: dict[str, Any]) -> str:
     out.append("## Per-Piece Breakdown")
     out.append("")
     limit = meta.get("detail_limit", 200)
-    shown = sorted(records, key=_sort_key)[:limit]
+    shown = sorted(records, key=piece_sort_key)[:limit]
     out.append("| Catalog | Piece | Ensemble | Lookup | Completeness | Missing required | Review |")
     out.append("| --- | --- | --- | --- | --- | --- | --- |")
     for rec in shown:
         catalog = rec.get("catalog_number") or ""
-        name = _md_cell(rec.get("piece_title_guess") or rec.get("piece_folder"))
-        ensemble = _md_cell(rec.get("ensemble_type"))
+        name = md_cell(rec.get("piece_title_guess") or rec.get("piece_folder"))
+        ensemble = md_cell(rec.get("ensemble_type"))
         status = rec.get("lookup_status", "")
         score = rec.get("completeness_score")
-        pct = "-" if score is None else f"{score * 100:.0f}% ({rec.get('completeness_tier')})"
-        missing = _md_cell(", ".join(rec.get("missing_required_parts", [])) or "-")
+        completeness = "-" if score is None else f"{score * 100:.0f}% ({rec.get('completeness_tier')})"
+        missing = md_cell(", ".join(rec.get("missing_required_parts", [])) or "-")
         review = "yes" if rec.get("needs_review") else ""
         out.append(
-            f"| {catalog} | {name} | {ensemble} | {status} | {pct} | {missing} | {review} |"
+            f"| {catalog} | {name} | {ensemble} | {status} | {completeness} | {missing} | {review} |"
         )
     if len(records) > limit:
         out.append("")
@@ -886,7 +878,7 @@ def build_instrumentation_report(records: list[dict[str, Any]], meta: dict[str, 
     )
     out.append("")
 
-    for rec in sorted(records, key=_sort_key):
+    for rec in sorted(records, key=piece_sort_key):
         catalog = rec.get("catalog_number") or "?"
         title = rec.get("piece_title_guess") or rec.get("piece_folder") or rec.get("piece_id")
         out.append(f"## {catalog} - {title}")
@@ -897,17 +889,17 @@ def build_instrumentation_report(records: list[dict[str, Any]], meta: dict[str, 
         status = rec.get("lookup_status", "unknown")
         confidence = rec.get("identity_match_confidence")
         score = rec.get("completeness_score")
-        pct = "-" if score is None else f"{score * 100:.0f}% ({rec.get('completeness_tier')})"
+        completeness = "-" if score is None else f"{score * 100:.0f}% ({rec.get('completeness_tier')})"
 
-        out.append(f"- **Ensemble:** {_md_cell(ensemble)} (`{ensemble_type}`)")
+        out.append(f"- **Ensemble:** {md_cell(ensemble)} (`{ensemble_type}`)")
         out.append(
-            f"- **Lookup:** {status} - confidence {confidence} - completeness {pct}"
+            f"- **Lookup:** {status} - confidence {confidence} - completeness {completeness}"
         )
         identity = _format_identity((rec.get("work_identity") or {}).get("resolved", {}))
         if identity:
-            out.append(f"- **Edition:** {_md_cell(identity)}")
+            out.append(f"- **Edition:** {md_cell(identity)}")
         if rec.get("lookup_notes"):
-            out.append(f"- **Notes:** {_md_cell(rec['lookup_notes'])}")
+            out.append(f"- **Notes:** {md_cell(rec['lookup_notes'])}")
         out.append("")
 
         expected_parts = rec.get("expected_parts") or []
@@ -920,15 +912,15 @@ def build_instrumentation_report(records: list[dict[str, Any]], meta: dict[str, 
                 required = "required" if part.get("required") else "optional"
                 observed = "yes" if part.get("present") else "MISSING"
                 out.append(
-                    f"| {idx_cell} | {_md_cell(part.get('canonical_instrument'))} "
-                    f"| {_md_cell(part.get('label'))} | {_md_cell(part.get('section'))} "
+                    f"| {idx_cell} | {md_cell(part.get('canonical_instrument'))} "
+                    f"| {md_cell(part.get('label'))} | {md_cell(part.get('section'))} "
                     f"| {required} | {observed} |"
                 )
             out.append("")
             unexpected = rec.get("unexpected_parts") or []
             if unexpected:
                 labels = ", ".join(
-                    _md_cell(u.get("predicted_part") or u.get("canonical_instrument"))
+                    md_cell(u.get("predicted_part") or u.get("canonical_instrument"))
                     for u in unexpected
                 )
                 out.append(f"_Observed but not expected: {labels}_")
@@ -948,9 +940,9 @@ def build_instrumentation_report(records: list[dict[str, Any]], meta: dict[str, 
             for src in evidence:
                 if not isinstance(src, dict):
                     continue
-                stitle = _md_cell(src.get("title") or src.get("url") or "source")
+                stitle = md_cell(src.get("title") or src.get("url") or "source")
                 url = src.get("url") or ""
-                snippet = _md_cell(src.get("snippet") or "")
+                snippet = md_cell(src.get("snippet") or "")
                 line = f"- [{stitle}]({url})" if url else f"- {stitle}"
                 if snippet:
                     line += f' - "{snippet}"'
@@ -1049,15 +1041,8 @@ def main(
 
     cfg_fp = config_fingerprint(config, prompt_template, lookup_enabled)
 
-    checkpoint_path = get_checkpoint_path(output)
-    checkpoint = read_json(checkpoint_path) or {}
-    if checkpoint and checkpoint.get("record_version") != RECORD_VERSION:
-        logger.warning(
-            "Checkpoint version mismatch (found=%s expected=%s). Ignoring checkpoint.",
-            checkpoint.get("record_version"),
-            RECORD_VERSION,
-        )
-        checkpoint = {}
+    ckpt_path = make_checkpoint_path(output, CHECKPOINT_FILENAME)
+    checkpoint = load_checkpoint(ckpt_path, RECORD_VERSION, logger)
     previous_records = {
         rec["piece_id"]: rec
         for rec in read_jsonl(output)
@@ -1148,12 +1133,10 @@ def main(
             processed += 1
     else:
         logger.info("Running %d lookup(s) with concurrency %d.", len(to_process), workers)
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            for record in pool.map(_process, to_process):
-                rebuilt.append(record)
-                processed += 1
+        rebuilt.extend(run_with_progress(to_process, _process, workers))
+        processed += len(to_process)
 
-    rebuilt.sort(key=_sort_key)
+    rebuilt.sort(key=piece_sort_key)
     atomic_write_jsonl(output, rebuilt)
 
     if write_report:
@@ -1180,19 +1163,18 @@ def main(
         atomic_write_text(output_instrumentation.resolve(), instrumentation)
         logger.info("Wrote instrumentation report: %s", output_instrumentation.resolve())
 
-    new_checkpoint = {
-        "record_version": RECORD_VERSION,
-        "last_run_id": run_id,
-        "last_run_timestamp": utc_now_iso(),
-        "pieces_input": pieces.as_posix(),
-        "output": output.as_posix(),
-        "config_source": config_source,
-        "config_fingerprint": cfg_fp,
-        "lookup_enabled": lookup_enabled,
-        "fingerprints": fingerprints,
-        "record_count": len(rebuilt),
-    }
-    atomic_write_json(checkpoint_path, new_checkpoint)
+    new_checkpoint = build_checkpoint(
+        RECORD_VERSION,
+        run_id,
+        fingerprints,
+        pieces_input=pieces.as_posix(),
+        output=output.as_posix(),
+        config_source=config_source,
+        config_fingerprint=cfg_fp,
+        lookup_enabled=lookup_enabled,
+        record_count=len(rebuilt),
+    )
+    atomic_write_json(ckpt_path, new_checkpoint)
 
     logger.info(
         "Expected-parts inference completed: total=%d processed=%d reused=%d output=%s",

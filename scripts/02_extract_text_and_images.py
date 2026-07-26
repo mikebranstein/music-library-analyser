@@ -53,15 +53,22 @@ from scripts._common import (
     atomic_write_json,
     atomic_write_jsonl,
     atomic_write_text,
+    build_checkpoint,
+    load_checkpoint,
+    make_checkpoint_path,
     normalize_rel_path,
+    pct,
     read_json,
     read_jsonl,
+    setup_logging,
     sha256_text,
     utc_now_iso,
 )
 
 RECORD_VERSION = "2.2"
 EXTRACTION_METHOD = "pymupdf_embedded"
+
+CHECKPOINT_FILENAME = ".extraction_checkpoint.json"
 
 # Wave-2 heuristic thresholds (zone/blank/staff detection).
 BLANK_INK_THRESHOLD = 0.004  # text_density below this (with no text) => blank page
@@ -109,17 +116,6 @@ class OcrConfig:
     dpi: int = DEFAULT_OCR_DPI
     lang: str = DEFAULT_OCR_LANG
     engine_version: str = ""
-
-
-def setup_logging(log_level: str) -> None:
-    logging.basicConfig(
-        level=getattr(logging, log_level.upper(), logging.INFO),
-        format="%(asctime)s | %(levelname)s | %(message)s",
-    )
-
-
-def get_checkpoint_path(output_text: Path) -> Path:
-    return output_text.parent / ".extraction_checkpoint.json"
 
 
 def is_readable_record(record: dict[str, Any]) -> bool:
@@ -1083,10 +1079,6 @@ def sort_documents(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(records, key=lambda r: r.get("pdf_path", ""))
 
 
-def _pct(part: int, whole: int) -> float:
-    return (100.0 * part / whole) if whole else 0.0
-
-
 def _is_notable_skew(angle: float | None) -> bool:
     return angle is not None and SKEW_MIN_DEG <= abs(angle) <= SKEW_MAX_DEG
 
@@ -1189,7 +1181,7 @@ def build_markdown_report(
         if r.get("estimated_dpi") is not None and r["estimated_dpi"] < LOW_DPI_THRESHOLD
     ]
 
-    text_pct = _pct(pages_with_text, total_pages)
+    text_pct = pct(pages_with_text, total_pages)
     overall = "✅ Healthy"
     if docs_partial or render_errors:
         overall = "❌ Errors present"
@@ -1653,11 +1645,8 @@ def main(
         skipped,
     )
 
-    checkpoint_path = get_checkpoint_path(output_text)
-    checkpoint = read_json(checkpoint_path) or {}
-    if checkpoint and checkpoint.get("record_version") != RECORD_VERSION:
-        logger.warning("Checkpoint version mismatch; ignoring checkpoint")
-        checkpoint = {}
+    checkpoint_path = make_checkpoint_path(output_text, CHECKPOINT_FILENAME)
+    checkpoint = load_checkpoint(checkpoint_path, RECORD_VERSION, logger)
     prior_fingerprints: dict[str, str] = (
         checkpoint.get("fingerprints", {}) if mode == "incremental" else {}
     )
@@ -1771,22 +1760,21 @@ def main(
     atomic_write_jsonl(output_pages, page_records)
     atomic_write_jsonl(output_documents, document_records)
 
-    new_checkpoint = {
-        "record_version": RECORD_VERSION,
-        "last_run_id": run_id,
-        "last_run_timestamp": utc_now_iso(),
-        "inventory_input": normalize_rel_path(inventory),
-        "extracted_text_output": normalize_rel_path(output_text),
-        "pages_output": normalize_rel_path(output_pages),
-        "documents_output": normalize_rel_path(output_documents),
-        "library_root": normalize_rel_path(library_root),
-        "fingerprints": {item.pdf_path: item.file_fingerprint for item in items},
-        "pdf_count_processed": processed_pdfs,
-        "page_count_processed": pages_done,
-        "reused_pdf_count": reused_pdfs,
-        "ocr_enabled": ocr_config.enabled,
-        "ocr_engine_version": ocr_config.engine_version,
-    }
+    new_checkpoint = build_checkpoint(
+        RECORD_VERSION,
+        run_id,
+        {item.pdf_path: item.file_fingerprint for item in items},
+        inventory_input=normalize_rel_path(inventory),
+        extracted_text_output=normalize_rel_path(output_text),
+        pages_output=normalize_rel_path(output_pages),
+        documents_output=normalize_rel_path(output_documents),
+        library_root=normalize_rel_path(library_root),
+        pdf_count_processed=processed_pdfs,
+        page_count_processed=pages_done,
+        reused_pdf_count=reused_pdfs,
+        ocr_enabled=ocr_config.enabled,
+        ocr_engine_version=ocr_config.engine_version,
+    )
     atomic_write_json(checkpoint_path, new_checkpoint)
 
     total_elapsed = time.monotonic() - start_time

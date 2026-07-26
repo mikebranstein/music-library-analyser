@@ -16,15 +16,20 @@ except Exception:  # pragma: no cover
 from scripts._common import (
     atomic_write_json,
     atomic_write_jsonl,
+    build_checkpoint,
     file_fingerprint,
+    load_checkpoint,
+    make_checkpoint_path,
     normalize_rel_path,
-    read_json,
     read_jsonl,
+    setup_logging,
     sha256_text,
     utc_now_iso,
 )
 
 RECORD_VERSION = "1.0"
+
+CHECKPOINT_FILENAME = ".inventory_checkpoint.json"
 
 app = typer.Typer(add_completion=False)
 
@@ -37,13 +42,6 @@ class PdfEntry:
     piece_id: str
 
 
-def setup_logging(log_level: str) -> None:
-    logging.basicConfig(
-        level=getattr(logging, log_level.upper(), logging.INFO),
-        format="%(asctime)s | %(levelname)s | %(message)s",
-    )
-
-
 def to_iso_utc(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
 
@@ -52,10 +50,6 @@ def hash_hex(hash_value: str) -> str:
     if ":" in hash_value:
         return hash_value.split(":", maxsplit=1)[1]
     return hash_value
-
-
-def get_checkpoint_path(output: Path) -> Path:
-    return output.parent / ".inventory_checkpoint.json"
 
 
 def assert_output_path_writable(output: Path) -> None:
@@ -317,15 +311,10 @@ def main(
     assert_output_path_writable(output)
     logging.info("Inventory run starting: mode=%s root=%s", mode, library_root)
 
-    checkpoint_path = get_checkpoint_path(output)
-    checkpoint = read_json(checkpoint_path) or {}
-    if checkpoint and checkpoint.get("record_version") != RECORD_VERSION:
-        logging.warning(
-            "Checkpoint version mismatch (found=%s expected=%s). Ignoring checkpoint.",
-            checkpoint.get("record_version"),
-            RECORD_VERSION,
-        )
-        checkpoint = {}
+    checkpoint_path = make_checkpoint_path(output, CHECKPOINT_FILENAME)
+    # Loaded only to warn on (and ignore) a stale-version checkpoint; incremental reuse below is
+    # driven by per-record fingerprints, not the checkpoint payload.
+    load_checkpoint(checkpoint_path, RECORD_VERSION)
 
     previous_records_map = load_previous_record_map(output)
 
@@ -398,15 +387,14 @@ def main(
     rebuilt_records.sort(key=lambda rec: rec["pdf_path"])
     atomic_write_jsonl(output, rebuilt_records)
 
-    new_checkpoint = {
-        "record_version": RECORD_VERSION,
-        "last_run_id": run_id,
-        "last_run_timestamp": utc_now_iso(),
-        "library_root": normalize_rel_path(library_root),
-        "output": normalize_rel_path(output),
-        "fingerprints": {rec["pdf_path"]: rec["file_fingerprint"] for rec in rebuilt_records},
-        "record_count": len(rebuilt_records),
-    }
+    new_checkpoint = build_checkpoint(
+        RECORD_VERSION,
+        run_id,
+        {rec["pdf_path"]: rec["file_fingerprint"] for rec in rebuilt_records},
+        library_root=normalize_rel_path(library_root),
+        output=normalize_rel_path(output),
+        record_count=len(rebuilt_records),
+    )
     atomic_write_json(checkpoint_path, new_checkpoint)
 
     logging.info(

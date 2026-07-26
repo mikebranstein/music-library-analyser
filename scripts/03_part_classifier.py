@@ -29,12 +29,19 @@ from scripts._common import (
     atomic_write_json,
     atomic_write_jsonl,
     atomic_write_text,
-    read_json,
+    build_checkpoint,
+    load_checkpoint,
+    make_checkpoint_path,
+    md_cell,
+    pct,
     read_jsonl,
+    setup_logging,
     utc_now_iso,
 )
 
 RECORD_VERSION = "1.1"
+
+CHECKPOINT_FILENAME = ".part_classifier_checkpoint.json"
 
 app = typer.Typer(add_completion=False)
 
@@ -173,17 +180,6 @@ INSTRUMENT_ORDER: dict[str, int] = {
 }
 SCORE_TYPE_ORDER: dict[str, int] = {"full": 0, "condensed": 1, "short": 2, "conductor": 3}
 CLEF_ORDER: dict[str, int] = {"treble": 1, "bass": 2}
-
-
-def setup_logging(log_level: str) -> None:
-    logging.basicConfig(
-        level=getattr(logging, log_level.upper(), logging.INFO),
-        format="%(asctime)s | %(levelname)s | %(message)s",
-    )
-
-
-def get_checkpoint_path(output: Path) -> Path:
-    return output.parent / ".part_classifier_checkpoint.json"
 
 
 # --- Lexicon loading -------------------------------------------------------------------------
@@ -745,10 +741,6 @@ def build_piece_rollups(
 # --- Reporting -------------------------------------------------------------------------------
 
 
-def _pct(part: int, whole: int) -> float:
-    return (100.0 * part / whole) if whole else 0.0
-
-
 def _part_status_icon(rec: dict[str, Any]) -> str:
     """One-glyph status for the per-document detail table."""
     status = rec.get("processing_status")
@@ -763,11 +755,6 @@ def _part_status_icon(rec: dict[str, Any]) -> str:
     if rec.get("confidence", 0.0) < LOW_CONFIDENCE:
         return "⚠️"
     return "✅"
-
-
-def _md_cell(value: Any) -> str:
-    """Escape a value for safe inclusion in a Markdown table cell."""
-    return str(value if value is not None else "").replace("|", "\\|")
 
 
 def build_report(
@@ -845,7 +832,7 @@ def build_report(
     out.append(f"| Classification errors | {len(errors)} |")
     out.append(
         f"| Parts classified | {len(parts)} "
-        f"({_pct(len(parts), len(classified)):.1f}% of classified) |"
+        f"({pct(len(parts), len(classified)):.1f}% of classified) |"
     )
     out.append(f"| Scores detected | {len(scores)} |")
     out.append(f"| Distinct instruments | {len(instrument_counts)} |")
@@ -873,7 +860,7 @@ def build_report(
         out.append("| --- | --- |")
         for canonical in sorted(instrument_counts, key=lambda k: (-instrument_counts[k], k)):
             display = INSTRUMENT_DISPLAY.get(canonical, canonical)
-            out.append(f"| {_md_cell(display)} | {instrument_counts[canonical]} |")
+            out.append(f"| {md_cell(display)} | {instrument_counts[canonical]} |")
         out.append("")
     else:
         out.append("No documents were classified this run.")
@@ -909,7 +896,7 @@ def build_report(
         out.append("| --- | --- |")
         for rec in errors[:15]:
             detail = (rec.get("match_details") or {}).get("matched_alias") or ""
-            out.append(f"| {_md_cell(rec.get('pdf_path'))} | {_md_cell(detail)} |")
+            out.append(f"| {md_cell(rec.get('pdf_path'))} | {md_cell(detail)} |")
         if len(errors) > 15:
             out.append(f"| … and {len(errors) - 15} more | |")
         out.append("")
@@ -923,8 +910,8 @@ def build_report(
         for rec in unmatched[:20]:
             segment = (rec.get("match_details") or {}).get("part_segment") or ""
             out.append(
-                f"| {_md_cell(rec.get('pdf_filename'))} | {_md_cell(segment)} | "
-                f"{_md_cell(rec.get('evidence_source'))} |"
+                f"| {md_cell(rec.get('pdf_filename'))} | {md_cell(segment)} | "
+                f"{md_cell(rec.get('evidence_source'))} |"
             )
         if len(unmatched) > 20:
             out.append(f"| … and {len(unmatched) - 20} more | | |")
@@ -938,9 +925,9 @@ def build_report(
         out.append("| --- | --- | --- | --- |")
         for rec in sorted(low_conf, key=lambda r: r["confidence"])[:20]:
             out.append(
-                f"| {_md_cell(rec.get('pdf_filename'))} | "
-                f"{_md_cell(rec.get('predicted_part'))} | "
-                f"{rec['confidence']:.2f} | {_md_cell(rec.get('evidence_source'))} |"
+                f"| {md_cell(rec.get('pdf_filename'))} | "
+                f"{md_cell(rec.get('predicted_part'))} | "
+                f"{rec['confidence']:.2f} | {md_cell(rec.get('evidence_source'))} |"
             )
         if len(low_conf) > 20:
             out.append(f"| … and {len(low_conf) - 20} more | | | |")
@@ -954,9 +941,9 @@ def build_report(
         out.append("| --- | --- | --- |")
         for rec in sorted(duplicates, key=lambda r: (r.get("piece_folder") or "", r.get("predicted_part") or "")):
             out.append(
-                f"| {_md_cell(rec.get('piece_folder'))} | "
-                f"{_md_cell(rec.get('pdf_filename'))} | "
-                f"{_md_cell(rec.get('predicted_part'))} |"
+                f"| {md_cell(rec.get('piece_folder'))} | "
+                f"{md_cell(rec.get('pdf_filename'))} | "
+                f"{md_cell(rec.get('predicted_part'))} |"
             )
         out.append("")
 
@@ -998,7 +985,7 @@ def build_report(
     for name in sorted(pieces, key=lambda k: (pieces[k]["catalog"], k)):
         p = pieces[name]
         out.append(
-            f"| {_md_cell(p['catalog'])} | {_md_cell(name) or '(root)'} | {p['docs']} | "
+            f"| {md_cell(p['catalog'])} | {md_cell(name) or '(root)'} | {p['docs']} | "
             f"{p['classified']} | {p['scores']} | {p['unmatched']} | {p['low']} | "
             f"{p['dupes']} | {p['review']} |"
         )
@@ -1015,11 +1002,11 @@ def build_report(
     out.append("| --- | --- | --- | --- | --- | --- | --- |")
     for rec in shown:
         out.append(
-            f"| {_part_status_icon(rec)} | {_md_cell(rec.get('pdf_filename'))} | "
-            f"{_md_cell(rec.get('piece_folder'))} | "
-            f"{_md_cell(rec.get('predicted_part'))} | "
-            f"{_md_cell(rec.get('section'))} | {rec.get('confidence', 0.0):.2f} | "
-            f"{_md_cell(rec.get('evidence_source'))} |"
+            f"| {_part_status_icon(rec)} | {md_cell(rec.get('pdf_filename'))} | "
+            f"{md_cell(rec.get('piece_folder'))} | "
+            f"{md_cell(rec.get('predicted_part'))} | "
+            f"{md_cell(rec.get('section'))} | {rec.get('confidence', 0.0):.2f} | "
+            f"{md_cell(rec.get('evidence_source'))} |"
         )
     out.append("")
     out.append("</details>")
@@ -1142,15 +1129,10 @@ def main(
     if not doc_map:
         logger.warning("No Script 02 documents found; classifying filename-only.")
 
-    checkpoint_path = get_checkpoint_path(output)
-    checkpoint = read_json(checkpoint_path) or {}
-    if checkpoint and checkpoint.get("record_version") != RECORD_VERSION:
-        logger.warning(
-            "Checkpoint version mismatch (found=%s expected=%s). Ignoring checkpoint.",
-            checkpoint.get("record_version"),
-            RECORD_VERSION,
-        )
-        checkpoint = {}
+    checkpoint_path = make_checkpoint_path(output, CHECKPOINT_FILENAME)
+    # Loaded only to warn on (and ignore) a stale-version checkpoint; incremental reuse below is
+    # driven by per-record fingerprints, not the checkpoint payload.
+    load_checkpoint(checkpoint_path, RECORD_VERSION, logger)
     previous_records_map = load_previous_record_map(output)
 
     rebuilt: list[dict[str, Any]] = []
@@ -1222,22 +1204,21 @@ def main(
         atomic_write_text(output_report.resolve(), report)
         logger.info("Wrote Markdown report: %s", output_report.resolve())
 
-    new_checkpoint = {
-        "record_version": RECORD_VERSION,
-        "last_run_id": run_id,
-        "last_run_timestamp": utc_now_iso(),
-        "inventory_input": inventory.as_posix(),
-        "output": output.as_posix(),
-        "pieces_output": output_pieces.as_posix(),
-        "rules_source": rules_source,
-        "llm_enabled": use_llm,
-        "fingerprints": {
+    new_checkpoint = build_checkpoint(
+        RECORD_VERSION,
+        run_id,
+        {
             rec["pdf_path"]: rec.get("file_fingerprint")
             for rec in rebuilt
             if rec.get("pdf_path")
         },
-        "record_count": len(rebuilt),
-    }
+        inventory_input=inventory.as_posix(),
+        output=output.as_posix(),
+        pieces_output=output_pieces.as_posix(),
+        rules_source=rules_source,
+        llm_enabled=use_llm,
+        record_count=len(rebuilt),
+    )
     atomic_write_json(checkpoint_path, new_checkpoint)
 
     logger.info(
