@@ -153,9 +153,10 @@ DEFAULT_PROMPT_TEMPLATE = (
     "populate expected_parts from authoritative text. If you match an edition but cannot find its\n"
     "instrumentation in text, you MUST still return candidate_score_images (title, instrumentation,\n"
     "contents, or score-first-page images) so the local OCR step can recover the parts -- do not\n"
-    "return match_found=true with both expected_parts and candidate_score_images empty. Library\n"
-    "catalog records (e.g. LIBRIS / libris.kb.se) often embed a score first-page/cover image on the\n"
-    "record page; capture its direct image URL even when the record text lists no instrumentation.\n\n"
+    "return match_found=true with both expected_parts and candidate_score_images empty.\n\n"
+    "For wind/concert band works, consult the Wind Repertory Project (windrep.org); its work pages\n"
+    "routinely list full instrumentation and are freely fetchable. (WRP covers wind/concert band,\n"
+    "not British-style brass band.)\n\n"
     "Respond with exactly one JSON object between the sentinel lines and nothing else:\n"
     f"{RESULT_START}\n"
     '{{"match_found": true, "identity_match_confidence": 0.0, "ensemble_type": "",\n'

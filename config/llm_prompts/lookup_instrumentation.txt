@@ -58,6 +58,12 @@ Use this source trust order:
 4. **Digitized score images or preview pages** from an authoritative host, when they show title pages, contents, instrumentation lists, score headers, or part-list pages.
 5. **Reputable secondary source**, composer/arranger site, archive page, or dealer listing.
 
+For **wind band / concert band** works, consult the **Wind Repertory Project** (`windrep.org`) — a large,
+server-rendered MediaWiki reference whose work pages routinely list full instrumentation/parts, program
+notes, and errata. It is freely fetchable and often the clearest instrumentation source when publisher
+and distributor pages omit a part list. Treat a matching WRP work page as a strong instrumentation
+source (tier 3-4). Note WRP covers wind/concert band repertoire, not British-style brass band works.
+
 Prefer sources that explicitly list instrumentation or parts. Do not rely on generic genre labels alone when an instrumentation list is available elsewhere.
 
 If sources conflict:
@@ -94,16 +100,6 @@ When you find such an image (or an image-viewer page that exposes a direct image
   include the stable catalog/parent page in `source_url` so the local step can refresh it if
   needed.
 * Do not fabricate image URLs. Only report URLs you actually located.
-
-**Library catalog records often embed a score image.** National-library and union-catalog record
-pages — for example LIBRIS (`libris.kb.se`) and similar national or academic library catalogs —
-frequently display a scanned image of the score's **first page or cover** directly on the record
-page. Whenever you open such a record, inspect it for that embedded image, follow it to its
-**direct image URL** (the endpoint that returns the image bytes, not the HTML record page), and add
-it to `candidate_score_images` with the appropriate `kind` (usually `score_first_page` or
-`title_page`), keeping the record page URL in `source_url`. Do this **even when the record's text
-does not list the instrumentation** — the local OCR step can often recover the parts from that
-first-page image.
 
 **Required image fallback.** If you identify a plausible edition but cannot find its instrumentation
 in an authoritative **text** source, you must still make the local OCR step useful: search
