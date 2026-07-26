@@ -240,6 +240,20 @@ def test_normalize_expected_parts():
     assert slots[1]["part_index"] is None
 
 
+def test_normalize_expected_parts_canonicalizes_to_taxonomy():
+    # The lookup LLM emits full instrument names; they must be mapped onto the same canonical
+    # tokens Script 03 uses for observed parts, and the section derived from the taxonomy.
+    raw = [
+        {"canonical_instrument": "Alto Saxophone", "part_index": 1, "label": "Alto Saxophone I"},
+        {"canonical_instrument": "alto_saxophone", "part_index": 2, "label": "Alto Saxophone II"},
+        {"canonical_instrument": "drum kit", "part_index": 1, "label": "Drum kit"},
+    ]
+    slots = expected.normalize_expected_parts(raw)
+    assert [s["canonical"] for s in slots] == ["alto_sax", "alto_sax", "drum_set"]
+    assert slots[0]["section"] == "saxophones"
+    assert slots[0]["label"] == "Alto Saxophone I"
+
+
 # --- Reconciliation --------------------------------------------------------------------------
 
 
@@ -374,6 +388,31 @@ def test_infer_piece_confident_complete():
     assert rec["completeness_tier"] == "complete"
     assert rec["needs_review"] is False
     assert rec["ensemble_type"] == "concert_band"
+
+
+def test_infer_piece_lookup_full_names_reconcile_with_observed_abbreviations():
+    # Regression: the lookup LLM emits full instrument names (e.g. "Alto Saxophone") while Script
+    # 03 emits abbreviated canonical tokens (e.g. "alto_sax"). Without canonicalization the two
+    # never match, producing phantom missing_required + unexpected parts for the same instrument.
+    piece = _piece(observed=[_observed("alto_sax", 1), _observed("alto_sax", 2)])
+    parts = [
+        {"canonical_instrument": "Alto Saxophone", "part_index": 1,
+         "label": "Alto Saxophone I", "required": True},
+        {"canonical_instrument": "alto_saxophone", "part_index": 2,
+         "label": "Alto Saxophone II", "required": True},
+    ]
+    rec = expected.infer_piece(
+        piece, None, "run1",
+        config=dict(expected.DEFAULT_LOOKUP_CONFIG),
+        prompt_template="{title_guess}",
+        lookup_enabled=True,
+        lookup_fn=lambda p, c: _score_result(parts),
+    )
+    assert rec["missing_required_count"] == 0
+    assert rec["missing_required_parts"] == []
+    assert rec["unexpected_part_count"] == 0
+    assert rec["completeness_tier"] == "complete"
+    assert rec["needs_review"] is False
 
 
 def test_infer_piece_clef_editions_not_unexpected_and_shown_in_report():

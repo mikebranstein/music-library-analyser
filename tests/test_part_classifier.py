@@ -90,6 +90,19 @@ def test_short_alias_does_not_match_inside_word():
     assert alias == "clarinet"
 
 
+def test_reversed_word_order_eb_clarinets():
+    # This library names files with the qualifier AFTER "Clarinet" (e.g. "Clarinet Eb"),
+    # so the taxonomy must classify these distinct instruments, not fall back to plain clarinet.
+    _, compiled = _lexicon_and_compiled()
+    eb, _, _ = classifier.match_instrument(classifier.normalize("Clarinet Eb"), compiled)
+    assert eb == "eb_clarinet"
+    alto, _, _ = classifier.match_instrument(classifier.normalize("Clarinet Eb Alto"), compiled)
+    assert alto == "alto_clarinet"
+    # A plain Bb clarinet part is unaffected.
+    plain, _, _ = classifier.match_instrument(classifier.normalize("Clarinet 3"), compiled)
+    assert plain == "clarinet"
+
+
 def test_clef_and_transposition_and_index():
     lexicon, _ = _lexicon_and_compiled()
     assert classifier.extract_clef(classifier.normalize("Baritone (BC)"), lexicon) == "bass"

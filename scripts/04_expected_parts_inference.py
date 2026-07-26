@@ -77,7 +77,9 @@ from scripts._common import (
     atomic_write_jsonl,
     atomic_write_text,
     build_checkpoint,
+    canonicalize_instrument,
     load_checkpoint,
+    load_instrument_taxonomy,
     make_checkpoint_path,
     md_cell,
     new_record_envelope,
@@ -111,6 +113,20 @@ METHOD_FALLBACK = "conservative_fallback"
 
 # Order Script 03 score types are preferred when picking a piece's best local score to OCR.
 SCORE_TYPE_PREFERENCE = {"full": 0, "conductor": 1, "condensed": 2, "short": 3}
+
+# Shared instrument taxonomy (canonical tokens + section map), loaded once from the same YAML
+# lexicon Script 03 uses so LLM-derived expected parts canonicalize identically to observed parts.
+_RULES_PATH = Path(__file__).resolve().parent.parent / "config" / "regex_rules.yaml"
+_INSTRUMENT_TAXONOMY: dict[str, dict[str, str]] | None = None
+
+
+def _instrument_taxonomy() -> dict[str, dict[str, str]]:
+    """Return the cached instrument taxonomy (alias->canonical and canonical->section maps)."""
+    global _INSTRUMENT_TAXONOMY
+    if _INSTRUMENT_TAXONOMY is None:
+        _INSTRUMENT_TAXONOMY = load_instrument_taxonomy(_RULES_PATH)
+    return _INSTRUMENT_TAXONOMY
+
 
 # Sentinels the lookup prompt wraps its JSON result in.
 RESULT_START = "<<<SCORE_JSON>>>"
@@ -871,18 +887,25 @@ def normalize_expected_parts(raw_parts: Any) -> list[dict[str, Any]]:
     """Coerce lookup ``expected_parts`` into internal slot dicts.
 
     Output slots use the same shape as ``reconcile_parts`` expects: ``canonical``, ``part_index``,
-    ``label``, ``section``, ``required``. Entries without a canonical instrument are dropped.
+    ``label``, ``section``, ``required``. Entries without a canonical instrument are dropped. Each
+    ``canonical_instrument`` from the lookup is mapped onto the shared taxonomy token (e.g.
+    ``alto_saxophone`` -> ``alto_sax``) so it reconciles against Script 03's observed parts, and the
+    ``section`` is taken from the taxonomy for that canonical (falling back to the lookup's section)
+    so expected and observed parts are grouped identically.
     """
     slots: list[dict[str, Any]] = []
     if not isinstance(raw_parts, list):
         return slots
+    taxonomy = _instrument_taxonomy()
+    alias_to_canonical = taxonomy["alias_to_canonical"]
+    section_map = taxonomy["canonical_to_section"]
     for entry in raw_parts:
         if not isinstance(entry, dict):
             continue
-        canonical = entry.get("canonical_instrument") or entry.get("canonical")
-        if not canonical or not isinstance(canonical, str):
+        raw_canonical = entry.get("canonical_instrument") or entry.get("canonical")
+        if not raw_canonical or not isinstance(raw_canonical, str):
             continue
-        canonical = canonical.strip().lower()
+        canonical = canonicalize_instrument(raw_canonical, alias_to_canonical)
         if not canonical:
             continue
         required = entry.get("required")
@@ -890,7 +913,7 @@ def normalize_expected_parts(raw_parts: Any) -> list[dict[str, Any]]:
             "canonical": canonical,
             "part_index": _coerce_index(entry.get("part_index")),
             "label": str(entry.get("label") or canonical),
-            "section": entry.get("section"),
+            "section": section_map.get(canonical, entry.get("section")),
             "required": True if required is None else bool(required),
         })
     return slots

@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -177,6 +178,87 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
                 continue
             records.append(item)
     return records
+
+
+# --- Shared instrument taxonomy (single canonical vocabulary for the whole pipeline) ---------
+# Script 03 classifies observed parts into canonical snake_case instrument tokens (e.g.
+# ``alto_sax``) using ``config/regex_rules.yaml``. Downstream stages that obtain instrument names
+# from other sources (e.g. Script 04's LLM-derived expected parts) must map those names onto the
+# SAME canonical tokens, otherwise reconciliation mismatches a part against itself (e.g. an
+# LLM-supplied ``alto_saxophone`` never matching an observed ``alto_sax``). These helpers load and
+# apply that shared vocabulary so every stage tracks an instrument the same way end to end.
+
+_INSTRUMENT_SEPARATORS_RE = re.compile(r"[-_]")
+_INSTRUMENT_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def normalize_instrument_name(text: str) -> str:
+    """Lowercase an instrument token and collapse separators/whitespace into single spaces.
+
+    Mirrors Script 03's alias normalization so a name from any source keys the same lookup entry.
+    """
+    lowered = (text or "").lower()
+    lowered = _INSTRUMENT_SEPARATORS_RE.sub(" ", lowered)
+    lowered = _INSTRUMENT_WHITESPACE_RE.sub(" ", lowered)
+    return lowered.strip()
+
+
+def load_instrument_taxonomy(rules_path: Path) -> dict[str, dict[str, str]]:
+    """Load the shared canonical instrument taxonomy from the YAML lexicon.
+
+    Returns ``{"alias_to_canonical": {normalized_name: canonical}, "canonical_to_section":
+    {canonical: section}}`` built from the ``instruments`` and ``sections`` blocks of ``rules_path``
+    (the same file Script 03 uses). Every canonical key maps to itself, and each alias maps to its
+    canonical. Degrades to empty maps when PyYAML or the file is unavailable so callers no-op
+    gracefully rather than failing.
+    """
+    alias_to_canonical: dict[str, str] = {}
+    canonical_to_section: dict[str, str] = {}
+    empty = {"alias_to_canonical": alias_to_canonical, "canonical_to_section": canonical_to_section}
+    try:
+        import yaml  # type: ignore
+    except ImportError:
+        return empty
+    if not rules_path.exists():
+        return empty
+    try:
+        with rules_path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except (OSError, yaml.YAMLError):
+        return empty
+
+    instruments = data.get("instruments")
+    if isinstance(instruments, dict):
+        for canonical, aliases in instruments.items():
+            canon = str(canonical).strip().lower()
+            if not canon:
+                continue
+            alias_to_canonical.setdefault(normalize_instrument_name(canon), canon)
+            if isinstance(aliases, list):
+                for alias in aliases:
+                    norm = normalize_instrument_name(str(alias))
+                    if norm:
+                        alias_to_canonical.setdefault(norm, canon)
+    sections = data.get("sections")
+    if isinstance(sections, dict):
+        for section, canonicals in sections.items():
+            if isinstance(canonicals, list):
+                for canonical in canonicals:
+                    canonical_to_section[str(canonical).strip().lower()] = str(section)
+    return {"alias_to_canonical": alias_to_canonical, "canonical_to_section": canonical_to_section}
+
+
+def canonicalize_instrument(value: str, alias_to_canonical: dict[str, str]) -> str:
+    """Map an instrument name onto its canonical taxonomy token.
+
+    Normalizes ``value`` and looks it up in ``alias_to_canonical``. Unknown names fall back to a
+    uniform snake_case form of the input so the format stays consistent even when the taxonomy has
+    no entry. Returns "" only for empty input.
+    """
+    norm = normalize_instrument_name(value)
+    if not norm:
+        return ""
+    return alias_to_canonical.get(norm) or norm.replace(" ", "_")
 
 
 # --- Shared script scaffolding ---------------------------------------------------------------
