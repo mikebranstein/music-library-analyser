@@ -407,9 +407,12 @@ def run_copilot_lookup(prompt: str, config: dict[str, Any]) -> dict[str, Any]:
     args = build_cli_args(config, prompt)
     timeout = float(config.get("timeout_seconds", 600) or 600)
     stream = bool(config.get("stream_output", True))
+    piece_id = config.get("piece_id")
+    prefix = f"[{piece_id}] " if piece_id else ""
 
     logger.info(
-        "Invoking Copilot CLI (model=%s); this can take up to %.0fs...",
+        "%sInvoking Copilot CLI (model=%s); this can take up to %.0fs...",
+        prefix,
         config.get("model") or "CLI default",
         timeout,
     )
@@ -459,7 +462,9 @@ def run_copilot_lookup(prompt: str, config: dict[str, Any]) -> dict[str, Any]:
             f"{stdout.strip()[-500:]}"
         )
 
-    logger.info("Copilot CLI completed in %.1fs (%d chars captured).", elapsed, len(stdout))
+    logger.info(
+        "%sCopilot CLI completed in %.1fs (%d chars captured).", prefix, elapsed, len(stdout)
+    )
     return parse_lookup_response(stdout)
 
 
@@ -1441,7 +1446,7 @@ def infer_piece(
             and windrep_prompt_template
         ):
             logger.info("[%s] Stage W2: querying LLM WindRep lookup", piece_id)
-            windrep_config = {**config, "allowed_domains": ["windrep.org"]}
+            windrep_config = {**config, "allowed_domains": ["windrep.org"], "piece_id": piece_id}
             windrep_prompt = render_prompt(windrep_prompt_template, windrep_query)
             try:
                 windrep_result = lookup_fn(windrep_prompt, windrep_config)
@@ -1477,7 +1482,7 @@ def infer_piece(
     query = build_lookup_query(piece, doc)
     prompt = render_prompt(prompt_template, query)
     try:
-        result = lookup_fn(prompt, config)
+        result = lookup_fn(prompt, {**config, "piece_id": piece_id})
     except Exception as exc:
         logger.warning("Lookup failed for piece %s: %s", piece.get("piece_id"), exc)
         return conservative_record(
