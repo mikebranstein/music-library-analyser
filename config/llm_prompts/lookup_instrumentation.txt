@@ -95,6 +95,26 @@ When you find such an image (or an image-viewer page that exposes a direct image
   needed.
 * Do not fabricate image URLs. Only report URLs you actually located.
 
+**Library catalog records often embed a score image.** National-library and union-catalog record
+pages — for example LIBRIS (`libris.kb.se`) and similar national or academic library catalogs —
+frequently display a scanned image of the score's **first page or cover** directly on the record
+page. Whenever you open such a record, inspect it for that embedded image, follow it to its
+**direct image URL** (the endpoint that returns the image bytes, not the HTML record page), and add
+it to `candidate_score_images` with the appropriate `kind` (usually `score_first_page` or
+`title_page`), keeping the record page URL in `source_url`. Do this **even when the record's text
+does not list the instrumentation** — the local OCR step can often recover the parts from that
+first-page image.
+
+**Required image fallback.** If you identify a plausible edition but cannot find its instrumentation
+in an authoritative **text** source, you must still make the local OCR step useful: search
+specifically for digitized score/part images of that edition — a title page, an
+"Instrumentation" / "Besetzung" / "Stimmen" list, a contents page, the score's first page with
+staff labels, or a part-cover / part-name list — and report their **direct image URLs** in
+`candidate_score_images`. Returning `match_found: true` with **both** `expected_parts` and
+`candidate_score_images` empty is the least useful outcome and should be avoided whenever any such
+image can be located. Only if, after searching, neither instrumentation text nor any usable score
+image exists for the edition may both be empty; explain that in `notes`.
+
 You may still report `expected_parts` when an authoritative **text** source (publisher page,
 distributor listing, catalog record, printed instrumentation text) explicitly lists the
 instrumentation. Do not populate `expected_parts` from images.

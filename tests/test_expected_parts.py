@@ -550,6 +550,67 @@ def test_infer_piece_stage_c_no_images_stays_conservative():
     assert rec["ocr_source"] is None
 
 
+# --- Lookup diagnostics: summary log + raw-result persistence --------------------------------
+
+
+def test_log_lookup_summary_handles_dict_and_non_dict():
+    # Should never raise, regardless of the result shape.
+    expected._log_lookup_summary("p1", {"match_found": True, "identity_match_confidence": 0.8,
+                                         "expected_parts": [{}], "candidate_score_images": []})
+    expected._log_lookup_summary("p1", "not a dict")
+    expected._log_lookup_summary("p1", None)
+
+
+def test_persist_lookup_result_writes_file_when_dir_set(tmp_path: Path):
+    debug_dir = tmp_path / "lookups"
+    config = {"lookup_debug_dir": str(debug_dir)}
+    result = _score_result([], match_found=True, confidence=0.9)
+    result["candidate_score_images"] = [{"url": "https://x/y.jpg", "kind": "title_page"}]
+
+    expected._persist_lookup_result(config, "p1", "the prompt", result)
+
+    dest = debug_dir / "lookup_p1.json"
+    assert dest.exists()
+    payload = json.loads(dest.read_text(encoding="utf-8"))
+    assert payload["piece_id"] == "p1"
+    assert payload["prompt"] == "the prompt"
+    assert payload["result"]["candidate_score_images"][0]["url"] == "https://x/y.jpg"
+
+
+def test_persist_lookup_result_noop_without_dir(tmp_path: Path):
+    # No lookup_debug_dir configured -> nothing written, no error.
+    expected._persist_lookup_result({}, "p1", "prompt", {"match_found": False})
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_persist_lookup_result_sanitizes_piece_id(tmp_path: Path):
+    debug_dir = tmp_path / "lookups"
+    config = {"lookup_debug_dir": str(debug_dir)}
+    expected._persist_lookup_result(config, "a/b:c d", "prompt", {"match_found": False})
+    written = list(debug_dir.glob("lookup_*.json"))
+    assert len(written) == 1
+    assert "/" not in written[0].name and ":" not in written[0].name
+
+
+def test_infer_piece_persists_lookup_result(tmp_path: Path):
+    debug_dir = tmp_path / "lookups"
+    config = dict(expected.DEFAULT_LOOKUP_CONFIG)
+    config["lookup_debug_dir"] = str(debug_dir)
+    parts = [
+        {"canonical_instrument": "cornet", "part_index": 1, "label": "Cornet 1", "required": True},
+    ]
+    rec = expected.infer_piece(
+        _piece(observed=[_observed("cornet", 1)]), None, "run1",
+        config=config,
+        prompt_template="{title_guess}",
+        lookup_enabled=True,
+        lookup_fn=lambda p, c: _score_result(parts, match_found=True, confidence=0.9),
+        summarize_template="{score_text}",
+    )
+    assert rec["lookup_status"] == "matched"
+    assert (debug_dir / "lookup_p1.json").exists()
+
+
 # --- Instrumentation report ------------------------------------------------------------------
 
 

@@ -148,8 +148,14 @@ DEFAULT_PROMPT_TEMPLATE = (
     "named printed part with a lowercase snake_case canonical_instrument, a part_index (or null),\n"
     "a label, a section, and a required flag. If you cannot confidently identify the edition, set\n"
     "match_found to false and explain in notes. Never invent an edition or a source URL.\n\n"
-    "Report score/instrumentation image URLs you find in candidate_score_images (do NOT OCR them\n"
-    "yourself; a local step reads them). Only populate expected_parts from authoritative text.\n\n"
+    "Report score/instrumentation image URLs (direct .jpg/.png or full-resolution image-endpoint\n"
+    "URLs) in candidate_score_images (do NOT OCR them yourself; a local step reads them). Only\n"
+    "populate expected_parts from authoritative text. If you match an edition but cannot find its\n"
+    "instrumentation in text, you MUST still return candidate_score_images (title, instrumentation,\n"
+    "contents, or score-first-page images) so the local OCR step can recover the parts -- do not\n"
+    "return match_found=true with both expected_parts and candidate_score_images empty. Library\n"
+    "catalog records (e.g. LIBRIS / libris.kb.se) often embed a score first-page/cover image on the\n"
+    "record page; capture its direct image URL even when the record text lists no instrumentation.\n\n"
     "Respond with exactly one JSON object between the sentinel lines and nothing else:\n"
     f"{RESULT_START}\n"
     '{{"match_found": true, "identity_match_confidence": 0.0, "ensemble_type": "",\n'
@@ -417,6 +423,62 @@ def run_copilot_lookup(prompt: str, config: dict[str, Any]) -> dict[str, Any]:
 
     logger.info("Copilot CLI completed in %.1fs (%d chars captured).", elapsed, len(stdout))
     return parse_lookup_response(stdout)
+
+
+def _log_lookup_summary(piece_id: Any, result: Any) -> None:
+    """Log a one-line summary of the lookup result so Stage C decisions are explainable.
+
+    This surfaces *why* the remote-image stage does or does not run: it reports whether the model
+    matched an edition, its confidence, how many parts it returned, and how many candidate score
+    images it offered for download.
+    """
+    if not isinstance(result, dict):
+        logger.info("[%s] Stage B result: lookup returned no JSON object", piece_id)
+        return
+    parts = result.get("expected_parts")
+    part_count = len(parts) if isinstance(parts, list) else 0
+    image_count = len(extract_image_urls(result))
+    logger.info(
+        "[%s] Stage B result: match_found=%s confidence=%.2f expected_parts=%d "
+        "candidate_score_images=%d",
+        piece_id,
+        bool(result.get("match_found")),
+        float(result.get("identity_match_confidence") or 0.0),
+        part_count,
+        image_count,
+    )
+
+
+def _safe_filename(value: Any, fallback: str = "piece") -> str:
+    """Return a filesystem-safe slug for use in a debug filename."""
+    slug = "".join(c if (c.isalnum() or c in "._-") else "_" for c in str(value or ""))
+    return slug or fallback
+
+
+def _persist_lookup_result(config: dict[str, Any], piece_id: Any, prompt: str, result: Any) -> None:
+    """Persist the parsed lookup result (with the prompt) for auditing, if a debug dir is set.
+
+    Writes one JSON file per piece so a run can be inspected after the fact -- in particular to see
+    exactly what ``candidate_score_images`` (if any) the model returned. Best-effort: never fails
+    the inference.
+    """
+    debug_dir = config.get("lookup_debug_dir")
+    if not debug_dir:
+        return
+    try:
+        out_dir = Path(debug_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "piece_id": piece_id,
+            "captured_at": utc_now_iso(),
+            "prompt": prompt,
+            "result": result,
+        }
+        dest = out_dir / f"lookup_{_safe_filename(piece_id)}.json"
+        atomic_write_json(dest, payload)
+        logger.info("[%s] Saved raw lookup result: %s", piece_id, dest)
+    except Exception as exc:
+        logger.debug("Could not persist lookup result for %s: %s", piece_id, exc)
 
 
 # --- Local score text (Stage A) --------------------------------------------------------------
@@ -1050,6 +1112,9 @@ def infer_piece(
             piece, doc, run_id, LookupStatus.ERROR, lookup_notes=str(exc), lookup_model=model
         )
 
+    _log_lookup_summary(piece_id, result)
+    _persist_lookup_result(config, piece_id, prompt, result)
+
     if not isinstance(result, dict) or not result.get("match_found"):
         logger.info("[%s] Stage B: no authoritative match found; recording conservative fallback",
                     piece_id)
@@ -1073,14 +1138,21 @@ def infer_piece(
         )
 
     # --- Stage C: remote image OCR (online matched an edition but returned no parts) ------
-    if (
-        confidence >= threshold
-        and config.get("image_ocr_enabled", True)
-        and image_fetch_fn is not None
-        and image_ocr_fn is not None
-    ):
-        image_urls = extract_image_urls(result)
-        if image_urls:
+    if confidence >= threshold and not result.get("expected_parts"):
+        stage_c_ready = (
+            config.get("image_ocr_enabled", True)
+            and image_fetch_fn is not None
+            and image_ocr_fn is not None
+        )
+        image_urls = extract_image_urls(result) if stage_c_ready else []
+        if not stage_c_ready:
+            logger.info("[%s] Stage C skipped: image OCR is disabled", piece_id)
+        elif not image_urls:
+            logger.info(
+                "[%s] Stage C skipped: lookup matched an edition but returned no "
+                "candidate_score_images to download", piece_id,
+            )
+        else:
             logger.info(
                 "[%s] Stage C: edition matched (confidence %.2f) but no parts returned; "
                 "OCRing %d candidate score image(s)", piece_id, confidence, len(image_urls),
@@ -1100,6 +1172,10 @@ def infer_piece(
                     logger.info("[%s] Stage C succeeded: instrumentation from OCR'd score images",
                                 piece_id)
                     return record
+            else:
+                logger.info(
+                    "[%s] Stage C: no candidate image produced usable OCR text", piece_id
+                )
 
     if confidence < threshold:
         logger.info(
@@ -1500,6 +1576,10 @@ def main(
         True, "--stream-lookup/--no-stream-lookup",
         help="Stream the Copilot CLI's output live so long lookups don't look frozen",
     ),
+    save_lookups: bool = typer.Option(
+        True, "--save-lookups/--no-save-lookups",
+        help="Save each raw lookup result (prompt + parsed JSON) under cache/llm/lookups",
+    ),
     concurrency: int = typer.Option(
         4, "--concurrency", "-j",
         help="Number of pieces to look up in parallel (I/O-bound). 1 = sequential; 3-4 recommended",
@@ -1536,6 +1616,9 @@ def main(
     if timeout > 0:
         config["timeout_seconds"] = timeout
     config["stream_output"] = stream_lookup
+    config["lookup_debug_dir"] = (
+        str(Path("cache/llm/lookups").resolve()) if save_lookups else None
+    )
 
     template_path = Path(config.get("prompt_template_path", "")).resolve()
     prompt_template, prompt_source = load_prompt_template(template_path)

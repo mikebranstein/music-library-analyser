@@ -62,6 +62,7 @@ Primary outputs:
 - Reconcile the resulting part slots against observed parts (count-based, robust to null part indices) into present / missing / unexpected sets
 - Score required-part completeness + tier, flag `score_missing` and `needs_review`, and record `detection_method`, `ocr_source`, `local_score_path`, `evidence_sources`, `candidate_score_images`, and resolved work identity
 - Toggle stages with `--local-score/--no-local-score`, `--lookup/--no-lookup`, and `--image-ocr/--no-image-ocr`; degrade conservatively (all stages off/failed, CLI missing/error, `no_match`, or `low_confidence`): declare no missing parts, set `completeness_score: null`, and flag for review — never fabricate a missing part
+- Each lookup logs a one-line Stage B result summary (`match_found`, confidence, `expected_parts`, `candidate_score_images` counts) so it is clear when/why Stage C image download runs; `--save-lookups` (default on) also persists each raw lookup result (prompt + parsed JSON) under `cache/llm/lookups/` for auditing
 - Emit `data/expected_parts.jsonl` (schema 2.1), a summary report (`data/expected_parts_report.md`), and a per-piece instrumentation report listing each piece's expected parts (`data/expected_instrumentation.md`); `--mode incremental` caches per-piece results by fingerprint to avoid re-spending AI credits or re-OCR
 
 5. `05_quality_checks.py`
