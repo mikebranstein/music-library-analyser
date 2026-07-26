@@ -50,8 +50,9 @@ Primary outputs:
 3. `03_part_classifier.py`
 - Classify each PDF's instrument/part and whether it is a score (filename-first, deterministic)
 - Isolate the part segment from the filename, match against an instrument lexicon (`config/regex_rules.yaml`), and confirm/recover with Script 02 page text
-- Extract clef, transposition, and part index; flag duplicate labels within a piece
-- Emit `data/part_predictions.jsonl` and a Markdown report (`data/part_classification_report.md`); an LLM fallback hook exists but is disabled/unwired
+- Extract clef, transposition, and part index; assign a `section` and a conventional-score-order `part_sort_key`; flag duplicate labels within a piece
+- Emit downstream-ready signals: `confidence_tier`, `needs_review`, and parsed `catalog_number` / `piece_title_guess` work-identity seeds
+- Write `data/part_predictions.jsonl`, a per-piece `data/observed_parts_by_piece.jsonl` rollup, and a Markdown report (`data/part_classification_report.md`); an LLM fallback hook exists but is disabled/unwired
 
 4. `04_expected_parts_inference.py`
 - Build work identity fingerprint
@@ -99,6 +100,7 @@ project-root/
     documents.jsonl
     extraction_report.md
     part_predictions.jsonl
+    observed_parts_by_piece.jsonl
     expected_parts.jsonl
     quality_metrics.jsonl
     piece_reports/

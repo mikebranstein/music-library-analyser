@@ -65,6 +65,7 @@ project-root/
     pages.jsonl
     documents.jsonl
     part_predictions.jsonl
+    observed_parts_by_piece.jsonl
     expected_parts.jsonl
     quality_metrics.jsonl
     piece_reports/
@@ -245,19 +246,36 @@ even without the file or PyYAML.
 Outputs:
 
 - `data/part_predictions.jsonl` (one record per readable PDF)
+- `data/observed_parts_by_piece.jsonl` (one record per `piece_id`: observed-parts rollup for
+  Scripts 04/06/07 — added in schema 1.1)
 - `data/part_classification_report.md` (Markdown summary)
 - `data/.part_classifier_checkpoint.json` (checkpoint; supports `--mode incremental`)
 
-Key fields:
+Key per-document fields (`part_predictions.jsonl`):
 
 - predicted_part (human label, e.g. `Horn in F 2`, `Baritone (BC)`, `Full Score`; nullable)
 - canonical_instrument (snake_case key, e.g. `baritone_horn`, `tuba`; nullable)
 - family (woodwind/brass/percussion/strings/score/unknown)
+- section (coarser lexicon-driven grouping, e.g. `cornets_trumpets`, `low_brass`, `tubas`;
+  `score`/`unknown` fallbacks) — schema 1.1
+- catalog_number, piece_title_guess (work-identity seeds parsed from the folder) — schema 1.1
 - part_index (e.g., 1,2,3; nullable)
 - clef (`bass`/`treble`; nullable), transposition (`F`/`Bb`/`Eb`; nullable)
 - is_score, score_type (`full`/`condensed`/`short`/`conductor`; nullable)
-- confidence (0..1), evidence_source (`filename`/`text`/`combined`/`none`/`llm`)
+- confidence (0..1), confidence_tier (`high`/`medium`/`low`/`none`) — schema 1.1
+- evidence_source (`filename`/`text`/`combined`/`none`/`llm`)
+- needs_review (bool; true when unmatched, below threshold, or a duplicate) — schema 1.1
+- part_sort_key (string; conventional score order) — schema 1.1
 - alternates (top-2 other instrument candidates), match_details, duplicate_in_piece
+
+Key per-piece fields (`observed_parts_by_piece.jsonl`, schema 1.1):
+
+- piece_id, piece_folder, catalog_number, piece_title_guess
+- document_count, classified_count, has_score, score_types
+- distinct_instruments, families, sections
+- needs_review_count, unmatched_count, low_confidence_count, duplicate_count
+- observed_parts (list, sorted by part_sort_key): each carries canonical_instrument, part_index,
+  clef, section, predicted_part, count, min/max_confidence, needs_review, duplicate
 
 
 ## 4.4 Script 04: Expected Parts Inference (`04_expected_parts_inference.py`)
@@ -268,11 +286,15 @@ Estimate which parts should exist for each piece so missing parts can be flagged
 
 Inputs:
 
-- `data/documents.jsonl` for work-identity seeds (`first_page_text`,
-  `first_page_header_candidates`, `piece_folder`, `pdf_filename`, `identity_candidates`)
-- `data/part_predictions.jsonl` for observed parts per piece (group by `piece_id`; use
-  `canonical_instrument` + `part_index` + `clef` as the observed-part key, and `confidence` /
-  `duplicate_in_piece` to weight or flag entries)
+- `data/observed_parts_by_piece.jsonl` (Script 03 rollup, schema 1.1) — **preferred** observed-parts
+  source: already grouped by `piece_id` with the `(canonical_instrument, part_index, clef)` key,
+  `has_score`, per-part `count`/`needs_review`/`duplicate`, and `catalog_number` /
+  `piece_title_guess` identity seeds. Use this instead of re-grouping the per-document file.
+- `data/documents.jsonl` for additional work-identity seeds (`first_page_text`,
+  `first_page_header_candidates`, `identity_candidates`)
+- `data/part_predictions.jsonl` only when per-document detail is needed (e.g. `confidence_tier`,
+  `evidence_source`, `match_details`); the observed-part key and `confidence`/`duplicate_in_piece`
+  are already rolled up per piece
 
 Approach:
 
@@ -379,7 +401,8 @@ Inputs:
 
 Script 05 should consume and threshold these existing metrics rather than recompute them;
 re-rendering is only needed for optional model-assisted vision checks. Thresholds live in
-`config/quality_thresholds.yaml`.
+`config/quality_thresholds.yaml`. Script 03's `needs_review` flag can additionally prioritize which
+documents warrant a manual/visual quality pass.
 
 Checks (mostly derived from Script 02 metrics):
 
@@ -433,8 +456,11 @@ Create one report per piece folder in Markdown or JSON.
 
 Inputs (join on `piece_id`):
 
-- `data/documents.jsonl`, `data/part_predictions.jsonl`, `data/expected_parts.jsonl`,
-  `data/quality_metrics.jsonl`, and `data/pages.jsonl` (for thumbnail references)
+- `data/documents.jsonl`, `data/part_predictions.jsonl`, `data/observed_parts_by_piece.jsonl`,
+  `data/expected_parts.jsonl`, `data/quality_metrics.jsonl`, and `data/pages.jsonl` (for thumbnail
+  references). List detected parts in conventional score order using Script 03's `part_sort_key`,
+  and surface `needs_review` / `confidence_tier` in the confidence summary rather than re-deriving
+  them from the raw `confidence` float.
 
 Report sections:
 
@@ -462,10 +488,10 @@ Metrics:
 - total pieces processed
 - pieces with complete sets
 - pieces with missing critical parts
-- pieces with no score
+- pieces with no score (from Script 03 `has_score` in the per-piece rollup)
 - distribution of quality bands
-- top missing instruments overall
-- confidence distribution
+- top missing instruments overall (aggregate by Script 03 `section` and `canonical_instrument`)
+- confidence distribution (aggregate Script 03 `confidence_tier` / `needs_review_count`)
 
 Outputs:
 
@@ -482,6 +508,10 @@ Generate a prioritized queue so your manual effort targets the highest-value fix
 Queue priority formula (example):
 
 `priority = missing_critical_weight + quality_penalty + low_confidence_penalty`
+
+The `low_confidence_penalty` is driven directly by Script 03's `needs_review` flag and
+`confidence_tier` (and the per-piece `needs_review_count` / `low_confidence_count` /
+`duplicate_count` rollup counts), so no re-thresholding of the raw confidence float is required.
 
 Include:
 
@@ -589,7 +619,8 @@ Deliverable:
 ## Phase 2: Extraction + Baseline Classification (2-4 days)
 
 Status: extraction done (Script 02, schema `2.2`, with OCR/OSD); rule-based classification done
-(Script 03, schema `1.0`).
+(Script 03, schema `1.1` — adds `section`, `confidence_tier`, `needs_review`, `catalog_number`,
+`part_sort_key`, and a per-piece `observed_parts_by_piece.jsonl` rollup for Scripts 04/06/07).
 
 - Implement Script 02 extraction (done: text, headers, geometry, scanned/DPI, image metrics,
   OCR/OSD via Tesseract, and a per-document rollup)

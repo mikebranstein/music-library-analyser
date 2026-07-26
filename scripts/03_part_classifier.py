@@ -34,7 +34,7 @@ from scripts._common import (
     utc_now_iso,
 )
 
-RECORD_VERSION = "1.0"
+RECORD_VERSION = "1.1"
 
 app = typer.Typer(add_completion=False)
 
@@ -118,6 +118,26 @@ DEFAULT_LEXICON: dict[str, Any] = {
         ["conductor score", "conductor"], ["conductor", "conductor"], ["score", "full"],
     ],
     "separators": ["-", "_"],
+    # Coarser grouping than family; overridable via YAML. section -> [canonical instruments].
+    "sections": {
+        "flutes": ["piccolo", "flute"],
+        "double_reeds": ["oboe", "english_horn", "bassoon"],
+        "clarinets": [
+            "eb_clarinet", "clarinet", "alto_clarinet", "bass_clarinet", "contrabass_clarinet",
+        ],
+        "saxophones": [
+            "soprano_sax", "alto_sax", "tenor_sax", "baritone_sax", "bass_sax",
+        ],
+        "cornets_trumpets": ["soprano_cornet", "cornet", "trumpet", "flugelhorn"],
+        "horns": ["horn", "tenor_horn"],
+        "low_brass": ["trombone", "bass_trombone", "baritone_horn", "euphonium"],
+        "tubas": ["tuba"],
+        "strings": ["string_bass"],
+        "percussion": [
+            "timpani", "mallet_percussion", "snare_drum", "bass_drum", "cymbals",
+            "percussion", "drum_set",
+        ],
+    },
 }
 
 # Display names used to compose the human-readable ``predicted_part`` label.
@@ -144,7 +164,15 @@ SCORE_DISPLAY: dict[str, str] = {
 
 CLEF_ABBREV: dict[str, str] = {"bass": "BC", "treble": "TC"}
 
+HIGH_CONFIDENCE = 0.90
 LOW_CONFIDENCE = 0.75
+
+# Deterministic ordering used to build ``part_sort_key`` (conventional score order).
+INSTRUMENT_ORDER: dict[str, int] = {
+    canonical: i for i, canonical in enumerate(DEFAULT_LEXICON["families"])
+}
+SCORE_TYPE_ORDER: dict[str, int] = {"full": 0, "condensed": 1, "short": 2, "conductor": 3}
+CLEF_ORDER: dict[str, int] = {"treble": 1, "bass": 2}
 
 
 def setup_logging(log_level: str) -> None:
@@ -170,6 +198,7 @@ def load_lexicon(rules_path: Path) -> tuple[dict[str, Any], str]:
         "transposition_markers": dict(DEFAULT_LEXICON["transposition_markers"]),
         "score_keywords": [list(pair) for pair in DEFAULT_LEXICON["score_keywords"]],
         "separators": list(DEFAULT_LEXICON["separators"]),
+        "sections": {k: list(v) for k, v in DEFAULT_LEXICON["sections"].items()},
     }
     if yaml is None:
         logger.warning("PyYAML unavailable; using built-in instrument lexicon.")
@@ -198,6 +227,10 @@ def load_lexicon(rules_path: Path) -> tuple[dict[str, Any], str]:
         lexicon["score_keywords"] = [list(pair) for pair in data["score_keywords"]]
     if isinstance(data.get("separators"), list) and data["separators"]:
         lexicon["separators"] = list(data["separators"])
+    if isinstance(data.get("sections"), dict) and data["sections"]:
+        for section, canonicals in data["sections"].items():
+            if isinstance(canonicals, list):
+                lexicon["sections"][section] = list(canonicals)
     return lexicon, "yaml"
 
 
@@ -209,6 +242,64 @@ def compile_aliases(lexicon: dict[str, Any]) -> list[tuple[str, str]]:
             entries.append((canonical, normalize(alias)))
     entries.sort(key=lambda e: len(e[1]), reverse=True)
     return entries
+
+
+def build_section_map(lexicon: dict[str, Any]) -> dict[str, str]:
+    """Invert the lexicon ``sections`` mapping into canonical_instrument -> section."""
+    mapping: dict[str, str] = {}
+    for section, canonicals in (lexicon.get("sections") or {}).items():
+        if isinstance(canonicals, list):
+            for canonical in canonicals:
+                mapping[canonical] = section
+    return mapping
+
+
+def section_for(canonical: str | None, family: str, section_map: dict[str, str]) -> str:
+    """Coarser grouping than family; falls back to family, then score/unknown."""
+    if canonical is None:
+        return "score" if family == "score" else "unknown"
+    return section_map.get(canonical, family)
+
+
+def confidence_tier(confidence: float) -> str:
+    """Map the deterministic confidence float onto the master-plan decision tiers."""
+    if confidence >= HIGH_CONFIDENCE:
+        return "high"
+    if confidence >= LOW_CONFIDENCE:
+        return "medium"
+    if confidence > 0.0:
+        return "low"
+    return "none"
+
+
+def compute_part_sort_key(
+    canonical: str | None,
+    part_index: int | None,
+    clef: str | None,
+    is_score: bool,
+    score_type: str | None,
+) -> str:
+    """Stable lexically-sortable key for conventional score order (scores first)."""
+    if is_score:
+        return f"0-{SCORE_TYPE_ORDER.get(score_type or 'full', 9):02d}"
+    instr_rank = INSTRUMENT_ORDER.get(canonical, 999) if canonical else 999
+    idx = part_index if part_index is not None else 0
+    clef_rank = CLEF_ORDER.get(clef or "", 0)
+    return f"1-{instr_rank:03d}-{idx:02d}-{clef_rank}"
+
+
+def parse_piece_identity(
+    piece_folder: str, pdf_filename: str
+) -> tuple[str | None, str | None]:
+    """Extract a catalog number and best-effort piece title from the folder/filename."""
+    base = (piece_folder or "").split("/")[-1].strip()
+    if not base:
+        base = Path(pdf_filename or "").stem.strip()
+    match = re.match(r"^(\d{1,5})[\s._-]+(.*)$", base)
+    if match:
+        title = match.group(2).strip().strip("-_").strip() or None
+        return match.group(1), title
+    return None, (base or None)
 
 
 # --- Text helpers ----------------------------------------------------------------------------
@@ -364,10 +455,12 @@ def classify_document(
     page1_zones: dict[str, Any] | None,
     lexicon: dict[str, Any],
     compiled: list[tuple[str, str]],
+    section_map: dict[str, str],
     run_id: str,
 ) -> dict[str, Any]:
     pdf_filename = inv_record.get("pdf_filename", "")
     piece_folder = inv_record.get("piece_folder", "")
+    catalog_number, piece_title_guess = parse_piece_identity(piece_folder, pdf_filename)
     part_segment = isolate_part_segment(pdf_filename, piece_folder)
     seg_norm = normalize(part_segment)
 
@@ -433,6 +526,16 @@ def classify_document(
     predicted_part = compose_label(
         canonical, transposition, part_index, clef, is_score, score_type
     )
+    section = section_for(canonical, family, section_map)
+    part_sort_key = compute_part_sort_key(
+        canonical, part_index, clef, is_score, score_type
+    )
+    confidence = round(confidence, 3)
+    tier = confidence_tier(confidence)
+    # Base review flag; duplicate_in_piece is OR'd in during ensemble harmonization.
+    needs_review = bool(
+        (not is_score and canonical is None) or confidence < LOW_CONFIDENCE
+    )
 
     return {
         "record_version": RECORD_VERSION,
@@ -441,15 +544,19 @@ def classify_document(
         "piece_id": inv_record.get("piece_id"),
         "piece_folder": piece_folder,
         "pdf_filename": pdf_filename,
+        "catalog_number": catalog_number,
+        "piece_title_guess": piece_title_guess,
         "predicted_part": predicted_part,
         "canonical_instrument": canonical,
         "family": family,
+        "section": section,
         "part_index": part_index,
         "clef": clef,
         "transposition": transposition,
         "is_score": is_score,
         "score_type": score_type,
-        "confidence": round(confidence, 3),
+        "confidence": confidence,
+        "confidence_tier": tier,
         "evidence_source": evidence,
         "alternates": alternates,
         "match_details": {
@@ -459,6 +566,8 @@ def classify_document(
             "text_match": text_match,
         },
         "duplicate_in_piece": False,
+        "needs_review": needs_review,
+        "part_sort_key": part_sort_key,
         "file_fingerprint": inv_record.get("file_fingerprint"),
         "processing_status": "success",
         "processing_timestamp": utc_now_iso(),
@@ -466,22 +575,30 @@ def classify_document(
 
 
 def build_skipped_record(inv_record: dict[str, Any], run_id: str) -> dict[str, Any]:
+    piece_folder = inv_record.get("piece_folder", "")
+    catalog_number, piece_title_guess = parse_piece_identity(
+        piece_folder, inv_record.get("pdf_filename", "")
+    )
     return {
         "record_version": RECORD_VERSION,
         "run_id": run_id,
         "pdf_path": inv_record.get("pdf_path"),
         "piece_id": inv_record.get("piece_id"),
-        "piece_folder": inv_record.get("piece_folder", ""),
+        "piece_folder": piece_folder,
         "pdf_filename": inv_record.get("pdf_filename", ""),
+        "catalog_number": catalog_number,
+        "piece_title_guess": piece_title_guess,
         "predicted_part": None,
         "canonical_instrument": None,
         "family": "unknown",
+        "section": "unknown",
         "part_index": None,
         "clef": None,
         "transposition": None,
         "is_score": False,
         "score_type": None,
         "confidence": 0.0,
+        "confidence_tier": "none",
         "evidence_source": "none",
         "alternates": [],
         "match_details": {
@@ -491,6 +608,8 @@ def build_skipped_record(inv_record: dict[str, Any], run_id: str) -> dict[str, A
             "text_match": False,
         },
         "duplicate_in_piece": False,
+        "needs_review": True,
+        "part_sort_key": compute_part_sort_key(None, None, None, False, None),
         "file_fingerprint": inv_record.get("file_fingerprint"),
         "processing_status": "skipped_unreadable",
         "processing_timestamp": utc_now_iso(),
@@ -514,6 +633,113 @@ def apply_ensemble(records: list[dict[str, Any]]) -> None:
         if len(group) > 1:
             for rec in group:
                 rec["duplicate_in_piece"] = True
+                rec["needs_review"] = True
+
+
+def build_piece_rollups(
+    records: list[dict[str, Any]], run_id: str
+) -> list[dict[str, Any]]:
+    """Aggregate per-document predictions into one observed-parts record per piece.
+
+    The observed-part key is ``(canonical_instrument, part_index, clef)`` \u2014 the exact shape
+    Scripts 04/06 compare against \u2014 so downstream gap analysis never drifts on key shape.
+    """
+    pieces: dict[Any, dict[str, Any]] = {}
+    for rec in records:
+        piece_id = rec.get("piece_id")
+        piece = pieces.get(piece_id)
+        if piece is None:
+            piece = {
+                "piece_id": piece_id,
+                "piece_folder": rec.get("piece_folder", ""),
+                "catalog_number": rec.get("catalog_number"),
+                "piece_title_guess": rec.get("piece_title_guess"),
+                "documents": [],
+            }
+            pieces[piece_id] = piece
+        # Prefer the first non-null identity seed seen for the piece.
+        if not piece["catalog_number"] and rec.get("catalog_number"):
+            piece["catalog_number"] = rec["catalog_number"]
+        if not piece["piece_title_guess"] and rec.get("piece_title_guess"):
+            piece["piece_title_guess"] = rec["piece_title_guess"]
+        piece["documents"].append(rec)
+
+    rollups: list[dict[str, Any]] = []
+    for piece in pieces.values():
+        docs = piece["documents"]
+        classified = [d for d in docs if d.get("processing_status") == "success"]
+        scores = [d for d in classified if d.get("is_score")]
+        parts = [d for d in classified if not d.get("is_score")]
+
+        observed: dict[tuple[Any, Any, Any], dict[str, Any]] = {}
+        for d in parts:
+            key = (
+                d.get("canonical_instrument"),
+                d.get("part_index"),
+                d.get("clef"),
+            )
+            entry = observed.get(key)
+            conf = d.get("confidence", 0.0)
+            if entry is None:
+                observed[key] = {
+                    "canonical_instrument": key[0],
+                    "part_index": key[1],
+                    "clef": key[2],
+                    "section": d.get("section", "unknown"),
+                    "predicted_part": d.get("predicted_part"),
+                    "count": 1,
+                    "min_confidence": conf,
+                    "max_confidence": conf,
+                    "needs_review": bool(d.get("needs_review")),
+                    "duplicate": bool(d.get("duplicate_in_piece")),
+                    "part_sort_key": d.get("part_sort_key", ""),
+                }
+            else:
+                entry["count"] += 1
+                entry["min_confidence"] = min(entry["min_confidence"], conf)
+                entry["max_confidence"] = max(entry["max_confidence"], conf)
+                entry["needs_review"] = entry["needs_review"] or bool(d.get("needs_review"))
+                entry["duplicate"] = entry["duplicate"] or bool(d.get("duplicate_in_piece"))
+
+        observed_parts = sorted(observed.values(), key=lambda e: e["part_sort_key"])
+        families = sorted({d.get("family") for d in classified if d.get("family")})
+        sections = sorted({d.get("section") for d in classified if d.get("section")})
+        distinct_instruments = len(
+            {d.get("canonical_instrument") for d in parts if d.get("canonical_instrument")}
+        )
+
+        rollups.append(
+            {
+                "record_version": RECORD_VERSION,
+                "run_id": run_id,
+                "piece_id": piece["piece_id"],
+                "piece_folder": piece["piece_folder"],
+                "catalog_number": piece["catalog_number"],
+                "piece_title_guess": piece["piece_title_guess"],
+                "document_count": len(docs),
+                "classified_count": len(classified),
+                "has_score": bool(scores),
+                "score_types": sorted({s.get("score_type") for s in scores if s.get("score_type")}),
+                "distinct_instruments": distinct_instruments,
+                "families": families,
+                "sections": sections,
+                "needs_review_count": sum(1 for d in docs if d.get("needs_review")),
+                "unmatched_count": sum(
+                    1 for d in parts if d.get("canonical_instrument") is None
+                ),
+                "low_confidence_count": sum(
+                    1
+                    for d in parts
+                    if d.get("canonical_instrument") is not None
+                    and d.get("confidence", 0.0) < LOW_CONFIDENCE
+                ),
+                "duplicate_count": sum(1 for d in docs if d.get("duplicate_in_piece")),
+                "observed_parts": observed_parts,
+            }
+        )
+
+    rollups.sort(key=lambda p: (p.get("catalog_number") or "", p.get("piece_folder") or ""))
+    return rollups
 
 
 # --- Reporting -------------------------------------------------------------------------------
@@ -627,6 +853,7 @@ def build_report(
     out.append(f"| Unmatched parts | {len(unmatched)} |")
     out.append(f"| Low-confidence parts (< {LOW_CONFIDENCE:.2f}) | {len(low_conf)} |")
     out.append(f"| Duplicate labels within a piece | {len(duplicates)} |")
+    out.append(f"| Documents needing review | {sum(1 for r in records if r.get('needs_review'))} |")
     out.append("")
 
     # Instrument coverage
@@ -741,13 +968,18 @@ def build_report(
     # Per-piece breakdown
     out.append("## Per-Piece Breakdown")
     out.append("")
-    pieces: dict[str, dict[str, int]] = {}
+    pieces: dict[str, dict[str, Any]] = {}
     for rec in records:
         p = pieces.setdefault(
             rec.get("piece_folder") or "",
-            {"docs": 0, "classified": 0, "scores": 0, "unmatched": 0, "low": 0, "dupes": 0},
+            {"catalog": rec.get("catalog_number") or "", "docs": 0, "classified": 0,
+             "scores": 0, "unmatched": 0, "low": 0, "dupes": 0, "review": 0},
         )
+        if not p["catalog"] and rec.get("catalog_number"):
+            p["catalog"] = rec["catalog_number"]
         p["docs"] += 1
+        if rec.get("needs_review"):
+            p["review"] += 1
         if rec["processing_status"] == "success":
             p["classified"] += 1
             if rec["is_score"]:
@@ -758,13 +990,17 @@ def build_report(
                 p["low"] += 1
             if rec["duplicate_in_piece"]:
                 p["dupes"] += 1
-    out.append("| Piece | Docs | Classified | Scores | Unmatched | Low-conf | Duplicates |")
-    out.append("| --- | --- | --- | --- | --- | --- | --- |")
-    for name in sorted(pieces):
+    out.append(
+        "| Catalog | Piece | Docs | Classified | Scores | Unmatched | Low-conf | "
+        "Duplicates | Review |"
+    )
+    out.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    for name in sorted(pieces, key=lambda k: (pieces[k]["catalog"], k)):
         p = pieces[name]
         out.append(
-            f"| {_md_cell(name) or '(root)'} | {p['docs']} | {p['classified']} | "
-            f"{p['scores']} | {p['unmatched']} | {p['low']} | {p['dupes']} |"
+            f"| {_md_cell(p['catalog'])} | {_md_cell(name) or '(root)'} | {p['docs']} | "
+            f"{p['classified']} | {p['scores']} | {p['unmatched']} | {p['low']} | "
+            f"{p['dupes']} | {p['review']} |"
         )
     out.append("")
 
@@ -775,14 +1011,14 @@ def build_report(
     shown = records[:limit]
     out.append(f"<details><summary>Show {len(shown)} of {total} documents</summary>")
     out.append("")
-    out.append("| | Document | Piece | Predicted | Family | Conf | Evidence |")
+    out.append("| | Document | Piece | Predicted | Section | Conf | Evidence |")
     out.append("| --- | --- | --- | --- | --- | --- | --- |")
     for rec in shown:
         out.append(
             f"| {_part_status_icon(rec)} | {_md_cell(rec.get('pdf_filename'))} | "
             f"{_md_cell(rec.get('piece_folder'))} | "
             f"{_md_cell(rec.get('predicted_part'))} | "
-            f"{_md_cell(rec.get('family'))} | {rec.get('confidence', 0.0):.2f} | "
+            f"{_md_cell(rec.get('section'))} | {rec.get('confidence', 0.0):.2f} | "
             f"{_md_cell(rec.get('evidence_source'))} |"
         )
     out.append("")
@@ -809,6 +1045,7 @@ def build_report(
     out.append(f"| Lexicon source | {meta['rules_source']} |")
     out.append(f"| LLM fallback | {'enabled' if meta['llm_enabled'] else 'disabled'} |")
     out.append(f"| Predictions output | `{meta['output']}` |")
+    out.append(f"| Observed-parts output | `{meta['pieces_output']}` |")
     out.append("")
     out.append("Status legend: ✅ matched (≥ threshold) • 🎼 score • ⚠️ unmatched/low-confidence "
                "• ❌ error • ⏭️ skipped (unreadable).")
@@ -851,6 +1088,10 @@ def main(
     output: Path = typer.Option(
         Path("data/part_predictions.jsonl"), help="Prediction output JSONL"
     ),
+    output_pieces: Path = typer.Option(
+        Path("data/observed_parts_by_piece.jsonl"),
+        help="Per-piece observed-parts rollup output JSONL",
+    ),
     output_report: Path = typer.Option(
         Path("data/part_classification_report.md"), help="Markdown summary output"
     ),
@@ -890,6 +1131,7 @@ def main(
 
     lexicon, rules_source = load_lexicon(rules.resolve())
     compiled = compile_aliases(lexicon)
+    section_map = build_section_map(lexicon)
 
     # Optional Script 02 datasets, indexed by pdf_path.
     doc_map = {r["pdf_path"]: r for r in read_jsonl(documents.resolve()) if "pdf_path" in r}
@@ -935,7 +1177,7 @@ def main(
         try:
             record = classify_document(
                 inv, doc_map.get(pdf_path), page1_map.get(pdf_path),
-                lexicon, compiled, run_id,
+                lexicon, compiled, section_map, run_id,
             )
         except Exception as exc:
             logger.exception("Unexpected classification error on %s", pdf_path)
@@ -948,6 +1190,15 @@ def main(
     apply_ensemble(rebuilt)
     rebuilt.sort(key=lambda rec: rec.get("pdf_path") or "")
     atomic_write_jsonl(output, rebuilt)
+
+    output_pieces = output_pieces.resolve()
+    piece_rollups = build_piece_rollups(rebuilt, run_id)
+    atomic_write_jsonl(output_pieces, piece_rollups)
+    logger.info(
+        "Wrote per-piece observed-parts rollup (%d pieces): %s",
+        len(piece_rollups),
+        output_pieces,
+    )
 
     if write_report:
         meta = {
@@ -964,6 +1215,7 @@ def main(
             "documents": documents.resolve().as_posix(),
             "pages": pages.resolve().as_posix(),
             "output": output.as_posix(),
+            "pieces_output": output_pieces.as_posix(),
             "detail_limit": report_detail_limit,
         }
         report = build_report(rebuilt, meta)
@@ -976,6 +1228,7 @@ def main(
         "last_run_timestamp": utc_now_iso(),
         "inventory_input": inventory.as_posix(),
         "output": output.as_posix(),
+        "pieces_output": output_pieces.as_posix(),
         "rules_source": rules_source,
         "llm_enabled": use_llm,
         "fingerprints": {

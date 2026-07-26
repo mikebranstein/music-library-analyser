@@ -163,22 +163,36 @@ duplicate), not an automatic edit to the prediction.
 
 - `record_version`, `run_id`
 - `pdf_path`, `piece_id`, `piece_folder`, `pdf_filename`
+- `catalog_number` (string; nullable) and `piece_title_guess` (string; nullable) — see §16.2
 - `predicted_part` (human label; nullable)
 - `canonical_instrument` (snake_case key; nullable)
 - `family` (`woodwind`/`brass`/`percussion`/`strings`/`score`/`unknown`)
+- `section` (lexicon-driven section grouping; `score`/`unknown` fallbacks) — see §16.5
 - `part_index` (int; nullable)
 - `clef` (`bass`/`treble`; nullable)
 - `transposition` (`F`/`Bb`/`Eb`/...; nullable)
 - `is_score` (bool), `score_type` (`full`/`condensed`/`conductor`/`short`; nullable)
-- `confidence` (float 0..1)
+- `confidence` (float 0..1), `confidence_tier` (`high`/`medium`/`low`/`none`) — see §16.1
 - `evidence_source` (`filename`/`text`/`combined`/`none`/`llm`)
 - `alternates` (list of `{canonical_instrument, score}`, top 2)
 - `match_details` (`{part_segment, matched_alias, filename_match, text_match}`)
-- `duplicate_in_piece` (bool)
-- `processing_status` (`success`/`skipped_unreadable`), `processing_timestamp`
+- `duplicate_in_piece` (bool), `needs_review` (bool) — see §16.1
+- `part_sort_key` (string; conventional score order) — see §16.4
+- `processing_status` (`success`/`skipped_unreadable`/`error`), `processing_timestamp`
+
+`data/observed_parts_by_piece.jsonl` — one record per `piece_id` (see §16.3):
+
+- `record_version`, `run_id`, `piece_id`, `piece_folder`, `catalog_number`, `piece_title_guess`
+- `document_count`, `classified_count`, `has_score`, `score_types` (list)
+- `distinct_instruments`, `families` (list), `sections` (list)
+- `needs_review_count`, `unmatched_count`, `low_confidence_count`, `duplicate_count`
+- `observed_parts` (list, sorted by `part_sort_key`): each
+  `{canonical_instrument, part_index, clef, section, predicted_part, count, min_confidence,
+  max_confidence, needs_review, duplicate, part_sort_key}`
 
 Checkpoint: `data/.part_classifier_checkpoint.json` with `record_version`, `last_run_id`,
-timestamps, IO paths, `fingerprints` (pdf_path -> file_fingerprint), and counts.
+timestamps, IO paths (incl. `pieces_output`), `fingerprints` (pdf_path -> file_fingerprint), and
+counts.
 
 ## 11. Idempotency & Incremental Mode
 
@@ -201,8 +215,10 @@ Outputs are rebuilt in memory, sorted by `pdf_path`, and written atomically.
 | `--pages` | Path | `data/pages.jsonl` | Script 02 page features (optional) |
 | `--rules` | Path | `config/regex_rules.yaml` | Instrument lexicon (optional) |
 | `--output` | Path | `data/part_predictions.jsonl` | Prediction output |
+| `--output-pieces` | Path | `data/observed_parts_by_piece.jsonl` | Per-piece observed-parts rollup |
 | `--output-report` | Path | `data/part_classification_report.md` | Markdown summary |
 | `--report / --no-report` | flag | enabled | Toggle the report |
+| `--report-detail-limit` | int | `200` | Max rows in the per-document detail table |
 | `--mode` | str | `full` | `full` or `incremental` |
 | `--use-llm / --no-llm` | flag | disabled | Enable the (unwired) LLM fallback hook |
 | `--log-level` | str | `INFO` | Logging level |
@@ -249,6 +265,75 @@ Outputs are rebuilt in memory, sorted by `pdf_path`, and written atomically.
     low-confidence, 0 duplicates. 13 filename-only (0.75) and 13 text-confirmed (`combined`,
     0.90-0.95). Correctly handled `Basses - Tuba` -> Tuba, `Horn 1 in F` -> `Horn in F 1`,
     `Trombone 3 (Bass)` -> `Trombone 3 (BC)`, and `Baritone (BC)/(TC)` clefs.
+
+## 16. v1.1 Enhancements: Downstream-Enabling Fields (features 1-5)
+
+### 16.0 Gap analysis
+
+Script 03 v1.0 emits accurate per-document predictions, but Scripts 04-08 must re-derive several
+signals that Script 03 is best-positioned to produce once, deterministically. Gaps addressed here:
+
+| # | Feature | v1.0 gap | Downstream consumer |
+|---|---------|----------|---------------------|
+| 1 | `needs_review` + `confidence_tier` | Only a raw `confidence` float; each script re-implements the High/Medium/Low thresholds (Section 5 decision model) | 05 quality bands, 06 confidence summary, 08 low-confidence penalty |
+| 2 | `catalog_number` + `piece_title_guess` | Leading catalog number is parsed then discarded during part-segment isolation | 04 authority lookup (catalog number is a primary search key) |
+| 3 | Per-piece observed-parts rollup | Only per-document records exist; 04/06 re-group by `piece_id` and re-derive the observed-part key | 04 gap analysis, 06 piece report, 07 "pieces with no score" |
+| 4 | `part_sort_key` | No ordering key; parts sort alphabetically | 06 conventional score-order listing |
+| 5 | `section` | No section grouping | 07 top-missing-instruments / section rollups |
+
+`record_version` is bumped `1.0 -> 1.1`. All changes are **additive** (new fields + one new output
+file); existing fields keep their meaning. The version bump invalidates old checkpoints (a full
+reclassify is performed once).
+
+### 16.1 `confidence_tier` + `needs_review`
+
+- `confidence_tier` maps the deterministic `confidence` float onto the master-plan decision tiers:
+  `high` (>= 0.90), `medium` (>= 0.75 and < 0.90), `low` (> 0 and < 0.75), `none` (== 0).
+- `needs_review` (bool) is `true` when any of: the document is a non-score with no instrument
+  match; `confidence < 0.75`; `duplicate_in_piece` is `true`; or `processing_status != success`.
+  It is finalized after ensemble harmonization so duplicate flags are included.
+
+### 16.2 `catalog_number` + `piece_title_guess`
+
+Parsed from the `piece_folder` (falling back to the filename stem): a leading run of digits becomes
+`catalog_number` (kept as a string to preserve leading zeros) and the remainder becomes
+`piece_title_guess`. Example: `241 Chick Corea Ole` -> (`241`, `Chick Corea Ole`). Both are
+nullable when no catalog number is present. These are best-effort identity seeds for Script 04, not
+authoritative metadata.
+
+### 16.3 Per-piece observed-parts rollup (`data/observed_parts_by_piece.jsonl`)
+
+One record per `piece_id`, aggregating its documents. The observed-part key is
+`(canonical_instrument, part_index, clef)` \u2014 the exact shape Scripts 04/06 compare against \u2014 so
+gap analysis never breaks on key-shape drift. Each `observed_parts` entry carries a `count`,
+`min_confidence`/`max_confidence`, and rolled-up `needs_review`/`duplicate` flags. Piece-level
+counts (`needs_review_count`, `unmatched_count`, `low_confidence_count`, `duplicate_count`,
+`has_score`, `distinct_instruments`) feed Scripts 06/07 directly.
+
+### 16.4 `part_sort_key`
+
+A stable string key for conventional score order. Scores sort first (ordered by `score_type`),
+then parts by instrument order (the built-in lexicon's family insertion order), then `part_index`,
+then clef. Storing it as a zero-padded string keeps it correct under plain lexical sort in JSONL,
+Markdown tables, and downstream tooling.
+
+### 16.5 `section`
+
+A coarser grouping than `family`, driven by a new overridable `sections` key in
+`config/regex_rules.yaml` (with an identical built-in default): e.g. `cornets_trumpets`, `horns`,
+`low_brass`, `tubas`, `clarinets`, `saxophones`, `percussion`. Falls back to `family` for an
+unmapped instrument, `score` for scores, and `unknown` for no match.
+
+### 16.6 v1.1 implementation notes log
+
+- Plan authored: 2026-07-26.
+- Implementation completed: 2026-07-26 \u2014 added `confidence_tier`, `needs_review`,
+  `catalog_number`, `piece_title_guess`, `section`, and `part_sort_key` to the per-document record;
+  added the `data/observed_parts_by_piece.jsonl` rollup output and the `--output-pieces` CLI option;
+  added a `sections` lexicon block (built-in + YAML). Report enriched with a Needs-review metric and
+  catalog numbers in the per-piece table.
+- Validation completed: 2026-07-26 \u2014 see the top-level test/lint/live-run results recorded with
+  this change.
 
 </content>
 </invoke>

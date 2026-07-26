@@ -116,6 +116,20 @@ score_keywords:
 # characters that separate the piece title from the part in a filename
 separators: ["-", "_"]
 
+# coarser grouping than family (section -> canonical instruments); used for part_sort_key
+# context and downstream section rollups. Falls back to family for unmapped instruments.
+sections:
+  flutes: ["piccolo", "flute"]
+  double_reeds: ["oboe", "english_horn", "bassoon"]
+  clarinets: ["eb_clarinet", "clarinet", "alto_clarinet", "bass_clarinet", "contrabass_clarinet"]
+  saxophones: ["soprano_sax", "alto_sax", "tenor_sax", "baritone_sax", "bass_sax"]
+  cornets_trumpets: ["soprano_cornet", "cornet", "trumpet", "flugelhorn"]
+  horns: ["horn", "tenor_horn"]
+  low_brass: ["trombone", "bass_trombone", "baritone_horn", "euphonium"]
+  tubas: ["tuba"]
+  strings: ["string_bass"]
+  percussion: ["timpani", "mallet_percussion", "snare_drum", "bass_drum", "cymbals", "percussion", "drum_set"]
+
 # legacy keys retained for backward compatibility with earlier drafts
 part_patterns: {}
 filename_normalization:

@@ -31,6 +31,14 @@ def _lexicon_and_compiled():
     return lexicon, classifier.compile_aliases(lexicon)
 
 
+def _classify(inv, doc=None, page1=None):
+    lexicon, compiled = _lexicon_and_compiled()
+    section_map = classifier.build_section_map(lexicon)
+    return classifier.classify_document(
+        inv, doc, page1, lexicon, compiled, section_map, "run1"
+    )
+
+
 # --- Unit tests -----------------------------------------------------------------------------
 
 
@@ -109,7 +117,6 @@ def test_compose_label_variants():
 
 
 def test_classify_filename_only_confidence():
-    lexicon, compiled = _lexicon_and_compiled()
     inv = {
         "pdf_path": "P/Song - Cornet 2.pdf",
         "pdf_filename": "Song - Cornet 2.pdf",
@@ -117,7 +124,7 @@ def test_classify_filename_only_confidence():
         "piece_id": "abc",
         "file_fingerprint": "fp1",
     }
-    rec = classifier.classify_document(inv, None, None, lexicon, compiled, "run1")
+    rec = _classify(inv)
     assert rec["canonical_instrument"] == "cornet"
     assert rec["part_index"] == 2
     assert rec["evidence_source"] == "filename"
@@ -125,7 +132,6 @@ def test_classify_filename_only_confidence():
 
 
 def test_classify_combined_confidence_with_text():
-    lexicon, compiled = _lexicon_and_compiled()
     inv = {
         "pdf_path": "P/Song - Trumpet 1.pdf",
         "pdf_filename": "Song - Trumpet 1.pdf",
@@ -134,14 +140,13 @@ def test_classify_combined_confidence_with_text():
         "file_fingerprint": "fp1",
     }
     doc = {"first_page_header_candidates": ["Trumpet"], "first_page_text": "Trumpet in Bb"}
-    rec = classifier.classify_document(inv, doc, None, lexicon, compiled, "run1")
+    rec = _classify(inv, doc)
     assert rec["canonical_instrument"] == "trumpet"
     assert rec["evidence_source"] == "combined"
     assert rec["confidence"] >= 0.90
 
 
 def test_text_only_recovery():
-    lexicon, compiled = _lexicon_and_compiled()
     inv = {
         "pdf_path": "P/scan001.pdf",
         "pdf_filename": "scan001.pdf",
@@ -150,14 +155,13 @@ def test_text_only_recovery():
         "file_fingerprint": "fp1",
     }
     doc = {"first_page_header_candidates": ["Flute"], "first_page_text": "Flute solo"}
-    rec = classifier.classify_document(inv, doc, None, lexicon, compiled, "run1")
+    rec = _classify(inv, doc)
     assert rec["canonical_instrument"] == "flute"
     assert rec["evidence_source"] == "text"
     assert rec["confidence"] == 0.50
 
 
 def test_no_match_is_unknown():
-    lexicon, compiled = _lexicon_and_compiled()
     inv = {
         "pdf_path": "P/mystery.pdf",
         "pdf_filename": "mystery.pdf",
@@ -165,7 +169,7 @@ def test_no_match_is_unknown():
         "piece_id": "abc",
         "file_fingerprint": "fp1",
     }
-    rec = classifier.classify_document(inv, None, None, lexicon, compiled, "run1")
+    rec = _classify(inv)
     assert rec["canonical_instrument"] is None
     assert rec["family"] == "unknown"
     assert rec["evidence_source"] == "none"
@@ -184,6 +188,124 @@ def test_apply_ensemble_flags_duplicates():
     assert records[0]["duplicate_in_piece"] is True
     assert records[1]["duplicate_in_piece"] is True
     assert records[2]["duplicate_in_piece"] is False
+    # Duplicates are also flagged for review.
+    assert records[0]["needs_review"] is True
+    assert records[1]["needs_review"] is True
+
+
+# --- v1.1 field tests -----------------------------------------------------------------------
+
+
+def test_confidence_tier_bands():
+    assert classifier.confidence_tier(0.95) == "high"
+    assert classifier.confidence_tier(0.90) == "high"
+    assert classifier.confidence_tier(0.80) == "medium"
+    assert classifier.confidence_tier(0.75) == "medium"
+    assert classifier.confidence_tier(0.50) == "low"
+    assert classifier.confidence_tier(0.0) == "none"
+
+
+def test_needs_review_and_tier_on_records():
+    # Filename-only match at the threshold is trusted (no review).
+    filename_rec = _classify(
+        {"pdf_path": "P/Song - Cornet 2.pdf", "pdf_filename": "Song - Cornet 2.pdf",
+         "piece_folder": "Song", "piece_id": "p", "file_fingerprint": "f"}
+    )
+    assert filename_rec["confidence_tier"] == "medium"
+    assert filename_rec["needs_review"] is False
+
+    # Text-only recovery is low confidence -> review.
+    text_rec = _classify(
+        {"pdf_path": "P/scan.pdf", "pdf_filename": "scan.pdf",
+         "piece_folder": "P", "piece_id": "p", "file_fingerprint": "f"},
+        {"first_page_header_candidates": ["Flute"], "first_page_text": "Flute solo"},
+    )
+    assert text_rec["confidence_tier"] == "low"
+    assert text_rec["needs_review"] is True
+
+    # No match at all -> review.
+    unknown_rec = _classify(
+        {"pdf_path": "P/mystery.pdf", "pdf_filename": "mystery.pdf",
+         "piece_folder": "P", "piece_id": "p", "file_fingerprint": "f"}
+    )
+    assert unknown_rec["confidence_tier"] == "none"
+    assert unknown_rec["needs_review"] is True
+
+
+def test_parse_piece_identity():
+    assert classifier.parse_piece_identity("241 Chick Corea Ole", "x.pdf") == (
+        "241", "Chick Corea Ole"
+    )
+    assert classifier.parse_piece_identity("681 A Night On A Lonely Moor", "x.pdf") == (
+        "681", "A Night On A Lonely Moor"
+    )
+    # No catalog number -> title only.
+    assert classifier.parse_piece_identity("Some Folder", "x.pdf") == (None, "Some Folder")
+
+
+def test_catalog_number_on_record():
+    rec = _classify(
+        {"pdf_path": "241 Chick Corea Ole/241 Chick Corea Ole - Cornet 1.pdf",
+         "pdf_filename": "241 Chick Corea Ole - Cornet 1.pdf",
+         "piece_folder": "241 Chick Corea Ole", "piece_id": "p", "file_fingerprint": "f"}
+    )
+    assert rec["catalog_number"] == "241"
+    assert rec["piece_title_guess"] == "Chick Corea Ole"
+
+
+def test_section_assignment():
+    cornet = _classify(
+        {"pdf_path": "P/Song - Cornet 1.pdf", "pdf_filename": "Song - Cornet 1.pdf",
+         "piece_folder": "Song", "piece_id": "p", "file_fingerprint": "f"}
+    )
+    assert cornet["section"] == "cornets_trumpets"
+    tuba = _classify(
+        {"pdf_path": "P/Song - Tuba.pdf", "pdf_filename": "Song - Tuba.pdf",
+         "piece_folder": "Song", "piece_id": "p", "file_fingerprint": "f"}
+    )
+    assert tuba["section"] == "tubas"
+    # Score and unmatched fall back to score/unknown.
+    score = _classify(
+        {"pdf_path": "P/Song - Full Score.pdf", "pdf_filename": "Song - Full Score.pdf",
+         "piece_folder": "Song", "piece_id": "p", "file_fingerprint": "f"}
+    )
+    assert score["section"] == "score"
+
+
+def test_part_sort_key_orders_scores_first_and_by_index():
+    score_key = classifier.compute_part_sort_key(None, None, None, True, "full")
+    cornet1 = classifier.compute_part_sort_key("cornet", 1, None, False, None)
+    cornet2 = classifier.compute_part_sort_key("cornet", 2, None, False, None)
+    trombone1 = classifier.compute_part_sort_key("trombone", 1, None, False, None)
+    assert score_key < cornet1  # scores sort first
+    assert cornet1 < cornet2  # part index orders within an instrument
+    assert cornet1 < trombone1  # cornet precedes trombone in lexicon order
+
+
+def test_build_piece_rollups():
+    recs = [
+        _classify({"pdf_path": "S/S - Cornet 1.pdf", "pdf_filename": "S - Cornet 1.pdf",
+                   "piece_folder": "241 S", "piece_id": "p1", "file_fingerprint": "a"}),
+        _classify({"pdf_path": "S/S - Cornet 1 dup.pdf", "pdf_filename": "S - Cornet 1.pdf",
+                   "piece_folder": "241 S", "piece_id": "p1", "file_fingerprint": "b"}),
+        _classify({"pdf_path": "S/S - Full Score.pdf", "pdf_filename": "S - Full Score.pdf",
+                   "piece_folder": "241 S", "piece_id": "p1", "file_fingerprint": "c"}),
+    ]
+    classifier.apply_ensemble(recs)
+    rollups = classifier.build_piece_rollups(recs, "run1")
+    assert len(rollups) == 1
+    piece = rollups[0]
+    assert piece["piece_id"] == "p1"
+    assert piece["catalog_number"] == "241"
+    assert piece["document_count"] == 3
+    assert piece["has_score"] is True
+    assert piece["distinct_instruments"] == 1
+    assert piece["duplicate_count"] == 2
+    # The two Cornet 1 docs collapse to one observed-part key with count 2.
+    cornet_entries = [p for p in piece["observed_parts"] if p["canonical_instrument"] == "cornet"]
+    assert len(cornet_entries) == 1
+    assert cornet_entries[0]["count"] == 2
+    assert cornet_entries[0]["duplicate"] is True
 
 
 # --- End-to-end test ------------------------------------------------------------------------
@@ -201,6 +323,7 @@ def test_full_run_end_to_end(tmp_path: Path):
     documents = tmp_path / "documents.jsonl"
     pages = tmp_path / "pages.jsonl"
     output = tmp_path / "part_predictions.jsonl"
+    pieces = tmp_path / "observed_parts_by_piece.jsonl"
     report = tmp_path / "part_classification_report.md"
 
     inv_records = [
@@ -231,6 +354,7 @@ def test_full_run_end_to_end(tmp_path: Path):
             "--documents", str(documents),
             "--pages", str(pages),
             "--output", str(output),
+            "--output-pieces", str(pieces),
             "--output-report", str(report),
             "--mode", "full",
         ],
@@ -263,6 +387,16 @@ def test_full_run_end_to_end(tmp_path: Path):
     assert checkpoint is not None
     assert checkpoint["record_count"] == 5
 
+    # Per-piece rollup is written and aggregates the piece correctly.
+    piece_rollups = read_jsonl(pieces)
+    assert len(piece_rollups) == 1
+    piece = piece_rollups[0]
+    assert piece["piece_id"] == "p1"
+    assert piece["has_score"] is True
+    assert piece["duplicate_count"] == 2
+    cornet = [p for p in piece["observed_parts"] if p["canonical_instrument"] == "cornet"]
+    assert cornet and cornet[0]["count"] == 2
+
 
 def test_incremental_reuse(tmp_path: Path):
     inventory = tmp_path / "raw_inventory.jsonl"
@@ -282,6 +416,7 @@ def test_incremental_reuse(tmp_path: Path):
         "--documents", str(tmp_path / "documents.jsonl"),
         "--pages", str(tmp_path / "pages.jsonl"),
         "--output", str(output),
+        "--output-pieces", str(tmp_path / "observed_parts_by_piece.jsonl"),
         "--no-report",
     ]
     assert runner.invoke(classifier.app, [*base_args, "--mode", "full"]).exit_code == 0
