@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -451,9 +452,11 @@ def _run_cli(tmp_path: Path, monkeypatch, results_by_piece: dict[str, dict[str, 
     instr_path = tmp_path / "instrumentation.md"
 
     calls = {"count": 0}
+    calls_lock = threading.Lock()
 
     def fake_run(prompt: str, config: dict[str, Any]) -> dict[str, Any]:
-        calls["count"] += 1
+        with calls_lock:
+            calls["count"] += 1
         # Match on title text embedded in the prompt.
         for piece_id, result in results_by_piece.items():
             if f"Title {piece_id}" in prompt:
@@ -530,3 +533,27 @@ def test_e2e_incremental_reuse(tmp_path: Path, monkeypatch):
     assert r2.exit_code == 0, r2.output
     # Unchanged piece must be reused, not looked up again.
     assert calls2["count"] == 0
+
+
+def test_e2e_parallel_lookups(tmp_path: Path, monkeypatch):
+    pieces = [
+        _piece("p1", observed=[_observed("cornet", 1)]),
+        _piece("p2", observed=[_observed("cornet", 1)]),
+        _piece("p3", observed=[_observed("cornet", 1)]),
+    ]
+    _write_jsonl(tmp_path / "pieces.jsonl", pieces)
+    _write_jsonl(tmp_path / "documents.jsonl", [])
+
+    parts = [
+        {"canonical_instrument": "cornet", "part_index": 1, "label": "Cornet 1", "required": True},
+    ]
+    results = {pid: _score_result(parts) for pid in ("p1", "p2", "p3")}
+
+    result, out_path, _, calls = _run_cli(
+        tmp_path, monkeypatch, results, extra=["--concurrency", "3"]
+    )
+    assert result.exit_code == 0, result.output
+    records = [json.loads(line) for line in out_path.read_text().splitlines() if line.strip()]
+    assert {r["piece_id"] for r in records} == {"p1", "p2", "p3"}
+    assert calls["count"] == 3
+    assert all(r["lookup_status"] == "matched" for r in records)

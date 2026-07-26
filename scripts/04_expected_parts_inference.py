@@ -22,6 +22,7 @@ import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -1000,6 +1001,10 @@ def main(
         True, "--stream-lookup/--no-stream-lookup",
         help="Stream the Copilot CLI's output live so long lookups don't look frozen",
     ),
+    concurrency: int = typer.Option(
+        1, "--concurrency", "-j",
+        help="Number of pieces to look up in parallel (I/O-bound). 1 = sequential; 3-4 recommended",
+    ),
     log_level: str = typer.Option("INFO", help="DEBUG, INFO, WARNING, ERROR"),
 ) -> None:
     """Infer expected parts per piece via online score lookup and flag missing parts."""
@@ -1074,6 +1079,7 @@ def main(
     )
 
     seen = 0
+    to_process: list[tuple[int, dict[str, Any], str, str]] = []
     for piece in piece_records:
         piece_id = piece.get("piece_id")
         if not piece_id:
@@ -1098,13 +1104,27 @@ def main(
                         title, catalog)
             continue
 
-        logger.info("[%d/%d] %s: %s (cat %s)", seen, total_pieces,
+        to_process.append((seen, piece, str(title), str(catalog)))
+
+    # Parallel lookups are I/O-bound (each waits on the Copilot subprocess + network), so a small
+    # thread pool overlaps the waiting without loading the CPU. Live streaming is disabled when
+    # running in parallel so multiple CLIs don't interleave into unreadable output.
+    workers = max(1, concurrency)
+    if workers > 1 and config.get("stream_output"):
+        logger.info(
+            "Disabling live CLI streaming for parallel lookups (concurrency=%d).", workers
+        )
+        config = {**config, "stream_output": False}
+
+    def _process(item: tuple[int, dict[str, Any], str, str]) -> dict[str, Any]:
+        idx, piece, title, catalog = item
+        logger.info("[%d/%d] %s: %s (cat %s)", idx, total_pieces,
                     "Looking up" if lookup_enabled else "Recording (no lookup)", title, catalog)
         piece_start = time.perf_counter()
         try:
             record = infer_piece(
                 piece,
-                doc_map.get(piece_id),
+                doc_map.get(piece["piece_id"]),
                 run_id,
                 config=config,
                 prompt_template=prompt_template,
@@ -1112,16 +1132,26 @@ def main(
                 lookup_fn=run_copilot_lookup,
             )
         except Exception as exc:
-            logger.exception("Unexpected inference error on piece %s", piece_id)
+            logger.exception("Unexpected inference error on piece %s", piece.get("piece_id"))
             record = build_error_record(piece, run_id, str(exc))
         logger.info(
             "[%d/%d] Done: %s -> status=%s tier=%s (%.1fs)",
-            seen, total_pieces, title,
+            idx, total_pieces, title,
             record.get("lookup_status"), record.get("completeness_tier"),
             time.perf_counter() - piece_start,
         )
-        rebuilt.append(record)
-        processed += 1
+        return record
+
+    if workers <= 1 or len(to_process) <= 1:
+        for item in to_process:
+            rebuilt.append(_process(item))
+            processed += 1
+    else:
+        logger.info("Running %d lookup(s) with concurrency %d.", len(to_process), workers)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for record in pool.map(_process, to_process):
+                rebuilt.append(record)
+                processed += 1
 
     rebuilt.sort(key=_sort_key)
     atomic_write_jsonl(output, rebuilt)
