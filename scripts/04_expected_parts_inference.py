@@ -1002,7 +1002,7 @@ def main(
         help="Stream the Copilot CLI's output live so long lookups don't look frozen",
     ),
     concurrency: int = typer.Option(
-        1, "--concurrency", "-j",
+        4, "--concurrency", "-j",
         help="Number of pieces to look up in parallel (I/O-bound). 1 = sequential; 3-4 recommended",
     ),
     log_level: str = typer.Option("INFO", help="DEBUG, INFO, WARNING, ERROR"),
