@@ -39,7 +39,7 @@ supplied score text, not from the observed instruments.
    or a legible contents/part-list page.
 2. If it does, report one `expected_parts` entry per named printed part.
 3. Infer `ensemble_type` from the instrumentation you read (do not assume it from the folder or
-   title). Use lowercase snake_case (e.g. `british_brass_band`, `concert_band`, `orchestra`).
+   title). Use lowercase snake_case (e.g. `concert_band`, `wind_ensemble`, `orchestra`).
 
 If the text is too short, too noisy, cropped, or does not clearly show instrumentation:
 
@@ -54,17 +54,17 @@ If the text is too short, too noisy, cropped, or does not clearly show instrumen
 ## Instrumentation rules
 
 * Report one entry per named printed part, not per player.
-* Use lowercase snake_case `canonical_instrument` names (e.g. `cornet`, `soprano_cornet`,
-  `flugelhorn`, `tenor_horn`, `baritone_horn`, `trombone`, `bass_trombone`, `euphonium`, `tuba`,
-  `clarinet`, `flute`, `oboe`, `bassoon`, `alto_saxophone`, `tenor_saxophone`,
-  `baritone_saxophone`, `trumpet`, `horn`, `percussion`, `timpani`, `keyboard`, `string_bass`).
+* Use lowercase snake_case `canonical_instrument` names (e.g. `flute`, `oboe`, `bassoon`,
+  `clarinet`, `alto_saxophone`, `tenor_saxophone`, `baritone_saxophone`, `trumpet`, `cornet`,
+  `horn`, `trombone`, `bass_trombone`, `euphonium`, `baritone_horn`, `tuba`, `percussion`,
+  `timpani`, `keyboard`, `string_bass`).
 * Preserve the printed label in `label`.
 * Set `part_index` to the printed part number (`1`, `2`, ...) when the score numbers or ranks the
-  part; use `null` for unnumbered named parts (e.g. `Flugelhorn`, `Timpani`, `Percussion`).
+  part; use `null` for unnumbered named parts (e.g. `Piccolo`, `Timpani`, `Percussion`).
 * Set `required` to `true` for core printed parts, `false` for parts explicitly marked optional,
   ad lib, substitute, or cue-only.
 * Use a sensible lowercase snake_case `section` (e.g. `woodwinds`, `clarinets`, `saxophones`,
-  `cornets_trumpets`, `horns`, `low_brass`, `percussion`, `strings`).
+  `trumpets`, `horns`, `low_brass`, `percussion`, `strings`).
 * Do not create extra parts from cue staves, ossia staves, condensed reductions, or short-term
   divisi unless they are separately named printed parts.
 
@@ -91,8 +91,8 @@ types exactly as shown.
   "work_identity": {{"title": null, "composer": null, "arranger": null,
     "publisher": null, "catalog_number": null, "year": null}},
   "expected_parts": [
-    {{"canonical_instrument": "cornet", "part_index": 1, "label": "Solo Cornet",
-      "section": "cornets_trumpets", "required": true}}
+    {{"canonical_instrument": "clarinet", "part_index": 1, "label": "1st Clarinet",
+      "section": "clarinets", "required": true}}
   ],
   "evidence_sources": [],
   "notes": "which labels were legible, OCR limitations, or why no instrumentation could be read"}}

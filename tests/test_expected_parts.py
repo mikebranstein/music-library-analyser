@@ -79,13 +79,13 @@ def _score_result(
     match_found: bool = True,
     confidence: float = 0.9,
     score_expected: bool = True,
-    ensemble_type: str = "british_brass_band",
+    ensemble_type: str = "concert_band",
 ) -> dict[str, Any]:
     return {
         "match_found": match_found,
         "identity_match_confidence": confidence,
         "ensemble_type": ensemble_type,
-        "ensemble_display_name": "British Brass Band",
+        "ensemble_display_name": "Concert Band",
         "score_expected": score_expected,
         "work_identity": {"title": "Found Title", "publisher": "ACME"},
         "expected_parts": parts,
@@ -373,7 +373,7 @@ def test_infer_piece_confident_complete():
     assert rec["inference_method"] == "authority_lookup"
     assert rec["completeness_tier"] == "complete"
     assert rec["needs_review"] is False
-    assert rec["ensemble_type"] == "british_brass_band"
+    assert rec["ensemble_type"] == "concert_band"
 
 
 def test_infer_piece_clef_editions_not_unexpected_and_shown_in_report():
@@ -634,6 +634,198 @@ def test_infer_piece_stage_c_no_images_stays_conservative():
     assert rec["ocr_source"] is None
 
 
+# --- Stage W: WindRep (W1 direct fetch, W2 dedicated LLM lookup) ------------------------------
+
+
+_LONG_WINDREP_TEXT = (
+    "WindRep work page: Some Piece\n\n== Instrumentation ==\n"
+    + ("Flute 1 - Oboe - Clarinet 1 - Bassoon - Trumpet 1 - Horn - Percussion. " * 10)
+)
+
+
+def test_windrep_title_variations_most_specific_first():
+    variations = expected._windrep_title_variations(
+        {"title_guess": "The Blue Ridge", "piece_folder": "734 Blue Ridge Saga"}
+    )
+    assert variations[0] == "The Blue Ridge"
+    assert "Blue Ridge" in variations  # leading article dropped
+    assert "Blue Ridge Saga" in variations  # leading catalog number stripped from folder
+    # No duplicates and no empty entries.
+    assert len(variations) == len(set(variations))
+    assert all(v for v in variations)
+
+
+def test_windrep_title_variations_ignores_unknown():
+    assert expected._windrep_title_variations(
+        {"title_guess": "unknown", "piece_folder": "unknown"}
+    ) == []
+
+
+def test_infer_piece_windrep_direct_fetch_matches():
+    piece = _piece(observed=[_observed("cornet", 1), _observed("euphonium", 1)])
+    parts = [
+        {"canonical_instrument": "cornet", "part_index": 1, "label": "Cornet 1", "required": True},
+        {"canonical_instrument": "euphonium", "part_index": 1, "label": "Euph", "required": True},
+    ]
+
+    def windrep_fetch(query: dict[str, Any], config: dict[str, Any]) -> str | None:
+        return _LONG_WINDREP_TEXT
+
+    def summarize(prompt: str, config: dict[str, Any]) -> dict[str, Any]:
+        return _score_result(parts)
+
+    def lookup(prompt: str, config: dict[str, Any]) -> dict[str, Any]:
+        raise AssertionError("general lookup must not run when Stage W1 succeeds")
+
+    rec = expected.infer_piece(
+        piece, None, "run1",
+        config=dict(expected.DEFAULT_LOOKUP_CONFIG),
+        prompt_template="{title_guess}",
+        lookup_enabled=True,
+        lookup_fn=lookup,
+        summarize_fn=summarize,
+        summarize_template="{score_text}",
+        windrep_fetch_fn=windrep_fetch,
+    )
+    assert rec["lookup_status"] == "matched"
+    assert rec["detection_method"] == "windrep_lookup"
+    assert rec["inference_method"] == "windrep_lookup"
+    assert rec["ocr_source"] == "windrep_fetch"
+
+
+def test_infer_piece_windrep_fetch_none_falls_through_to_lookup():
+    piece = _piece(observed=[_observed("cornet", 1)])
+    parts = [
+        {"canonical_instrument": "cornet", "part_index": 1, "label": "Cornet 1", "required": True},
+    ]
+
+    def windrep_fetch(query: dict[str, Any], config: dict[str, Any]) -> str | None:
+        return None  # unreachable / no match -> graceful fallback
+
+    rec = expected.infer_piece(
+        piece, None, "run1",
+        config=dict(expected.DEFAULT_LOOKUP_CONFIG),
+        prompt_template="{title_guess}",
+        lookup_enabled=True,
+        lookup_fn=lambda p, c: _score_result(parts),
+        windrep_fetch_fn=windrep_fetch,
+    )
+    assert rec["lookup_status"] == "matched"
+    assert rec["detection_method"] == "authority_lookup"
+
+
+def test_infer_piece_windrep_llm_lookup_matches():
+    piece = _piece(observed=[_observed("cornet", 1)])
+    parts = [
+        {"canonical_instrument": "cornet", "part_index": 1, "label": "Cornet 1", "required": True},
+    ]
+
+    seen_domains: list[Any] = []
+
+    def lookup(prompt: str, config: dict[str, Any]) -> dict[str, Any]:
+        seen_domains.append(config.get("allowed_domains"))
+        return _score_result(parts)
+
+    rec = expected.infer_piece(
+        piece, None, "run1",
+        config=dict(expected.DEFAULT_LOOKUP_CONFIG),
+        prompt_template="{title_guess}",
+        lookup_enabled=True,
+        lookup_fn=lookup,
+        windrep_fetch_fn=lambda q, c: None,  # W1 misses, W2 wins
+        windrep_prompt_template="{title_guess}",
+    )
+    assert rec["lookup_status"] == "matched"
+    assert rec["detection_method"] == "windrep_lookup"
+    assert rec["inference_method"] == "windrep_lookup"
+    # W2 constrains the lookup to windrep.org.
+    assert seen_domains[0] == ["windrep.org"]
+
+
+def test_infer_piece_windrep_disabled_skips_stage_w():
+    piece = _piece(observed=[_observed("cornet", 1)])
+    parts = [
+        {"canonical_instrument": "cornet", "part_index": 1, "label": "Cornet 1", "required": True},
+    ]
+
+    def windrep_fetch(query: dict[str, Any], config: dict[str, Any]) -> str | None:
+        raise AssertionError("Stage W must not run when windrep is disabled")
+
+    rec = expected.infer_piece(
+        piece, None, "run1",
+        config={**expected.DEFAULT_LOOKUP_CONFIG, "windrep_enabled": False},
+        prompt_template="{title_guess}",
+        lookup_enabled=True,
+        lookup_fn=lambda p, c: _score_result(parts),
+        windrep_fetch_fn=windrep_fetch,
+        windrep_prompt_template="{title_guess}",
+    )
+    assert rec["lookup_status"] == "matched"
+    assert rec["detection_method"] == "authority_lookup"
+
+
+def test_fetch_windrep_returns_none_on_timeout(monkeypatch, tmp_path: Path):
+    def boom(api_url: str, params: dict[str, str], deadline: float):
+        raise TimeoutError("connect timed out")
+
+    monkeypatch.setattr(expected, "_windrep_api_get", boom)
+    result = expected.fetch_windrep_instrumentation(
+        {"title_guess": "Some Piece", "piece_folder": "123 Some Piece"},
+        {**expected.DEFAULT_LOOKUP_CONFIG, "windrep_cache_dir": str(tmp_path / "wr")},
+    )
+    assert result is None
+
+
+def test_fetch_windrep_returns_none_on_urlerror(monkeypatch, tmp_path: Path):
+    def boom(api_url: str, params: dict[str, str], deadline: float):
+        raise expected.urllib.error.URLError("geoblocked")
+
+    monkeypatch.setattr(expected, "_windrep_api_get", boom)
+    result = expected.fetch_windrep_instrumentation(
+        {"title_guess": "Some Piece", "piece_folder": "123 Some Piece"},
+        {**expected.DEFAULT_LOOKUP_CONFIG, "windrep_cache_dir": str(tmp_path / "wr")},
+    )
+    assert result is None
+
+
+def test_fetch_windrep_parses_instrumentation_and_caches(monkeypatch, tmp_path: Path):
+    cache_dir = tmp_path / "wr"
+
+    def fake_api_get(api_url: str, params: dict[str, str], deadline: float):
+        action = params.get("action")
+        if action == "opensearch":
+            return ["Lincolnshire Posy", ["Lincolnshire Posy"], [""], [""]]
+        if action == "parse" and params.get("prop") == "sections":
+            return {"parse": {"sections": [
+                {"line": "Program Notes", "index": "1"},
+                {"line": "Instrumentation", "index": "3"},
+            ]}}
+        if action == "parse" and params.get("prop") == "wikitext":
+            assert params.get("section") == "3"
+            return {"parse": {"wikitext": {"*": "Flute 1\nOboe\nClarinet in Bb 1"}}}
+        raise AssertionError(f"unexpected API call: {params}")
+
+    monkeypatch.setattr(expected, "_windrep_api_get", fake_api_get)
+    query = {"title_guess": "Lincolnshire Posy", "piece_folder": "200 Lincolnshire Posy"}
+    config = {**expected.DEFAULT_LOOKUP_CONFIG, "windrep_cache_dir": str(cache_dir)}
+
+    result = expected.fetch_windrep_instrumentation(query, config)
+    assert result is not None
+    assert "WindRep work page: Lincolnshire Posy" in result
+    assert "Flute 1" in result
+
+    # Cached on success and reused without hitting the API again.
+    cache_files = list(cache_dir.glob("*.json"))
+    assert len(cache_files) == 1
+
+    def explode(api_url: str, params: dict[str, str], deadline: float):
+        raise AssertionError("cache should be used; API must not be called again")
+
+    monkeypatch.setattr(expected, "_windrep_api_get", explode)
+    cached = expected.fetch_windrep_instrumentation(query, config)
+    assert cached == result
+
+
 # --- Lookup diagnostics: summary log + raw-result persistence --------------------------------
 
 
@@ -722,7 +914,7 @@ def test_build_instrumentation_report_matched_piece():
     )
     report = expected.build_instrumentation_report([rec], _meta())
     assert "Expected Instrumentation by Piece" in report
-    assert "British Brass Band" in report
+    assert "Concert Band" in report
     assert "Cornet 1" in report
     assert "Euph" in report
     # cornet observed -> yes; euphonium not observed -> MISSING
@@ -766,6 +958,9 @@ def _run_cli(tmp_path: Path, monkeypatch, results_by_piece: dict[str, dict[str, 
         raise AssertionError("no canned result matched prompt")
 
     monkeypatch.setattr(expected, "run_copilot_lookup", fake_run)
+    # Keep the CLI end-to-end tests offline/deterministic: the WindRep direct fetch never touches
+    # the network here. Individual tests opt into the WindRep stage with an explicit "--windrep".
+    monkeypatch.setattr(expected, "fetch_windrep_instrumentation", lambda query, config: None)
 
     args = [
         "--pieces", str(pieces_path),
@@ -774,6 +969,7 @@ def _run_cli(tmp_path: Path, monkeypatch, results_by_piece: dict[str, dict[str, 
         "--output-report", str(report_path),
         "--output-instrumentation", str(instr_path),
         "--config", str(tmp_path / "no_config.yaml"),
+        "--no-windrep",
     ]
     if extra:
         args += extra
@@ -880,6 +1076,30 @@ def test_e2e_no_local_score_flag_skips_stage_a(tmp_path: Path, monkeypatch):
 
     records = [json.loads(line) for line in out_path.read_text().splitlines() if line.strip()]
     assert records[0]["detection_method"] == "authority_lookup"
+
+
+def test_e2e_windrep_stage_matches_via_cli(tmp_path: Path, monkeypatch):
+    """End-to-end: with --windrep, the WindRep stage runs before the general lookup."""
+    pieces = [_piece("p1", observed=[_observed("cornet", 1)])]
+    _write_jsonl(tmp_path / "pieces.jsonl", pieces)
+    _write_jsonl(tmp_path / "documents.jsonl", [])
+
+    parts = [
+        {"canonical_instrument": "cornet", "part_index": 1, "label": "Cornet 1", "required": True},
+    ]
+    results = {"p1": _score_result(parts)}
+
+    # WindRep direct fetch (W1) is stubbed to miss by _run_cli, so the dedicated WindRep LLM
+    # lookup (W2) resolves the piece and wins before the general authority lookup would run.
+    result, out_path, _report, _calls = _run_cli(
+        tmp_path, monkeypatch, results,
+        extra=["--no-local-score", "--windrep"],
+    )
+    assert result.exit_code == 0, result.output
+
+    records = [json.loads(line) for line in out_path.read_text().splitlines() if line.strip()]
+    assert records[0]["detection_method"] == "windrep_lookup"
+    assert records[0]["lookup_status"] == "matched"
 
 
 def test_e2e_full_run(tmp_path: Path, monkeypatch):

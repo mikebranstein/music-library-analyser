@@ -58,11 +58,8 @@ Use this source trust order:
 4. **Digitized score images or preview pages** from an authoritative host, when they show title pages, contents, instrumentation lists, score headers, or part-list pages.
 5. **Reputable secondary source**, composer/arranger site, archive page, or dealer listing.
 
-For **wind band / concert band** works, consult the **Wind Repertory Project** (`windrep.org`) — a large,
-server-rendered MediaWiki reference whose work pages routinely list full instrumentation/parts, program
-notes, and errata. It is freely fetchable and often the clearest instrumentation source when publisher
-and distributor pages omit a part list. Treat a matching WRP work page as a strong instrumentation
-source (tier 3-4). Note WRP covers wind/concert band repertoire, not British-style brass band works.
+A dedicated earlier stage already consulted the **Wind Repertory Project** (`windrep.org`); do **not**
+depend on it here. Prefer publisher, distributor, and library-catalog sources for the instrumentation.
 
 Prefer sources that explicitly list instrumentation or parts. Do not rely on generic genre labels alone when an instrumentation list is available elsewhere.
 
@@ -180,8 +177,6 @@ Use lowercase snake\_case.
 
 Examples of evidence patterns:
 
-* **British brass band**: soprano cornet, solo/repiano/2nd/3rd cornets, flugelhorn, tenor horns, baritones, euphoniums, EEb/BBb basses.
-* **American brass band**: cornets/trumpets, horns, trombones, euphonium/baritone, tubas, percussion, often without British brass-band section labels.
 * **Concert or wind band**: flutes, oboes, bassoons, clarinets, saxophones, trumpets, horns, trombones, euphoniums, tubas, percussion.
 * **Orchestra**: strings plus woodwinds, brass, and percussion.
 * **Other ensembles**: infer directly from the edition’s stated instrumentation.
@@ -196,24 +191,21 @@ Report one `expected_parts` entry per named printed part, not per player.
 
 Use lowercase snake\_case `canonical_instrument` names, such as:
 
-* `cornet`
-* `soprano_cornet`
-* `flugelhorn`
-* `tenor_horn`
-* `baritone_horn`
-* `trombone`
-* `bass_trombone`
-* `euphonium`
-* `tuba`
-* `clarinet`
 * `flute`
 * `oboe`
 * `bassoon`
+* `clarinet`
 * `alto_saxophone`
 * `tenor_saxophone`
 * `baritone_saxophone`
 * `trumpet`
+* `cornet`
 * `horn`
+* `trombone`
+* `bass_trombone`
+* `euphonium`
+* `baritone_horn`
+* `tuba`
 * `percussion`
 * `timpani`
 * `keyboard`
@@ -223,7 +215,7 @@ Set `part_index` to the printed part number when the edition numbers or ranks pa
 
 * `1` = first, solo, principal, or top numbered part when that is the printed designation.
 * Use `2`, `3`, etc. for printed second/third parts.
-* Use `null` for unnumbered named parts such as `Repiano Cornet`, `Flugelhorn`, `Bass Trombone`, `Timpani`, or `Percussion`.
+* Use `null` for unnumbered named parts such as `Piccolo`, `Bass Clarinet`, `Bass Trombone`, `Timpani`, or `Percussion`.
 * For combined printed labels such as `Cornet 1/2`, create separate entries only if the source clearly treats them as separate printed parts; otherwise preserve the printed label in one entry and use the most appropriate `part_index`.
 * For split/divisi within a single printed part, do not create extra entries unless separate printed parts are listed.
 * For doublings, use the primary printed part as `canonical_instrument` and describe the doubling in `label` or `notes` if needed.
@@ -246,7 +238,7 @@ Use a sensible lowercase snake\_case `section`, such as:
 * `woodwinds`
 * `clarinets`
 * `saxophones`
-* `cornets_trumpets`
+* `trumpets`
 * `horns`
 * `low_brass`
 * `percussion`
@@ -338,10 +330,10 @@ Keep the field names, nesting, and value types exactly as shown.
 },
 "expected\_parts": \[
 {
-"canonical\_instrument": "cornet",
+"canonical\_instrument": "flute",
 "part\_index": 1,
-"label": "Solo Cornet",
-"section": "cornets\_trumpets",
+"label": "Flute 1",
+"section": "woodwinds",
 "required": true
 }
 ],

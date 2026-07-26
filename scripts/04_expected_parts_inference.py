@@ -27,11 +27,13 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import subprocess
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict
@@ -100,8 +102,9 @@ logger = logging.getLogger("script04.expected")
 NEAR_COMPLETE = 0.85
 INCOMPLETE = 0.5
 
-# detection_method / inference_method values for the four resolution paths.
+# detection_method / inference_method values for the resolution paths.
 METHOD_LOCAL_SCORE = "local_score_ocr"
+METHOD_WINDREP = "windrep_lookup"
 METHOD_AUTHORITY = "authority_lookup"
 METHOD_SCORE_IMAGE = "score_image_ocr"
 METHOD_FALLBACK = "conservative_fallback"
@@ -133,6 +136,16 @@ DEFAULT_LOOKUP_CONFIG: dict[str, Any] = {
     "reocr_dpi": 300,
     # Remote image OCR (Stage C).
     "image_ocr_enabled": True,
+    # WindRep stage (runs between local score OCR and the general online lookup). Always tried;
+    # not gated on ensemble type. W1 is a direct MediaWiki fetch bounded by windrep_timeout_seconds
+    # (graceful fallback); W2 is a dedicated LLM lookup constrained to windrep.org.
+    "windrep_enabled": True,
+    "windrep_direct_enabled": True,
+    "windrep_lookup_enabled": True,
+    "windrep_timeout_seconds": 10,
+    "windrep_api_url": "https://www.windrep.org/api.php",
+    "windrep_prompt_template_path": "config/llm_prompts/windrep_lookup_instrumentation.txt",
+    "windrep_cache_dir": "cache/windrep",
 }
 
 DEFAULT_PROMPT_TEMPLATE = (
@@ -154,9 +167,8 @@ DEFAULT_PROMPT_TEMPLATE = (
     "instrumentation in text, you MUST still return candidate_score_images (title, instrumentation,\n"
     "contents, or score-first-page images) so the local OCR step can recover the parts -- do not\n"
     "return match_found=true with both expected_parts and candidate_score_images empty.\n\n"
-    "For wind/concert band works, consult the Wind Repertory Project (windrep.org); its work pages\n"
-    "routinely list full instrumentation and are freely fetchable. (WRP covers wind/concert band,\n"
-    "not British-style brass band.)\n\n"
+    "A dedicated earlier stage already checked the Wind Repertory Project (windrep.org); do not\n"
+    "depend on it here -- prefer publisher, distributor, and library-catalog sources.\n\n"
     "Respond with exactly one JSON object between the sentinel lines and nothing else:\n"
     f"{RESULT_START}\n"
     '{{"match_found": true, "identity_match_confidence": 0.0, "ensemble_type": "",\n'
@@ -482,6 +494,153 @@ def _persist_lookup_result(config: dict[str, Any], piece_id: Any, prompt: str, r
         logger.debug("Could not persist lookup result for %s: %s", piece_id, exc)
 
 
+# --- WindRep stage helpers (Stage W: between local score OCR and the general online lookup) ---
+
+WINDREP_USER_AGENT = "music-library-analyser (concert/wind band library tooling)"
+
+
+def _windrep_title_variations(query: dict[str, Any]) -> list[str]:
+    """Candidate search terms for a piece, most-specific first.
+
+    WindRep pages are titled by work, so we try the parsed title, a leading-article-stripped
+    variant, and the source folder name with any leading catalog number removed.
+    """
+    variants: list[str] = []
+    title = str(query.get("title_guess") or "").strip()
+    if title and title.lower() != "unknown":
+        variants.append(title)
+        if title.lower().startswith("the "):
+            variants.append(title[4:].strip())
+    folder = str(query.get("piece_folder") or "").strip()
+    if folder and folder.lower() != "unknown":
+        stripped = re.sub(r"^\d+\s+", "", folder).strip()
+        variants.append(stripped or folder)
+    seen: list[str] = []
+    for variant in variants:
+        if variant and variant not in seen:
+            seen.append(variant)
+    return seen
+
+
+def _windrep_api_get(api_url: str, params: dict[str, str], deadline: float) -> Any:
+    """One MediaWiki API call, bounded by the remaining time budget.
+
+    ``deadline`` is a ``time.monotonic()`` timestamp. Raises ``TimeoutError`` when too little time
+    remains, and uses the remaining budget as the socket timeout so a hung/unreachable WindRep
+    cannot exceed the overall budget.
+    """
+    remaining = deadline - time.monotonic()
+    if remaining <= 0.5:
+        raise TimeoutError("WindRep time budget exhausted")
+    url = api_url + "?" + urllib.parse.urlencode({**params, "format": "json"})
+    req = urllib.request.Request(url, headers={"User-Agent": WINDREP_USER_AGENT})
+    with urllib.request.urlopen(req, timeout=remaining) as resp:
+        return json.loads(resp.read().decode("utf-8", errors="replace"))
+
+
+def _windrep_cache_path(config: dict[str, Any], query: dict[str, Any]) -> Path | None:
+    cache_dir = config.get("windrep_cache_dir")
+    if not cache_dir:
+        return None
+    key = _safe_filename(query.get("piece_folder") or query.get("title_guess") or "piece")
+    return Path(cache_dir) / f"{key}.json"
+
+
+def _windrep_cache_read(config: dict[str, Any], query: dict[str, Any]) -> str | None:
+    path = _windrep_cache_path(config, query)
+    if not path or not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    text = data.get("text") if isinstance(data, dict) else None
+    return text if isinstance(text, str) and text.strip() else None
+
+
+def _windrep_cache_write(
+    config: dict[str, Any], query: dict[str, Any], page: str, text: str
+) -> None:
+    path = _windrep_cache_path(config, query)
+    if not path:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(
+            path,
+            {"query": query, "matched_page": page, "text": text, "fetched_at": utc_now_iso()},
+        )
+    except OSError as exc:
+        logger.debug("WindRep cache write failed: %s", exc)
+
+
+def fetch_windrep_instrumentation(query: dict[str, Any], config: dict[str, Any]) -> str | None:
+    """Resolve a piece to a WindRep work page and return its instrumentation text, or None.
+
+    Tries a few title variations against the WindRep MediaWiki API (opensearch, then full-text
+    search), then extracts the page's Instrumentation section (falling back to the whole page). The
+    whole attempt is bounded by ``windrep_timeout_seconds`` (default 10s) so an unreachable or
+    geoblocked WindRep degrades gracefully to the next stage instead of blocking the run; on any
+    failure this returns None rather than raising. Successful fetches are cached under
+    ``windrep_cache_dir``.
+    """
+    cached = _windrep_cache_read(config, query)
+    if cached is not None:
+        logger.info("WindRep: using cached page text")
+        return cached
+
+    api_url = str(config.get("windrep_api_url") or "https://www.windrep.org/api.php")
+    budget = float(config.get("windrep_timeout_seconds", 10) or 10)
+    deadline = time.monotonic() + budget
+    try:
+        page: str | None = None
+        for variant in _windrep_title_variations(query):
+            data = _windrep_api_get(
+                api_url, {"action": "opensearch", "limit": "5", "search": variant}, deadline
+            )
+            candidates = data[1] if isinstance(data, list) and len(data) > 1 else []
+            if not candidates:
+                data = _windrep_api_get(
+                    api_url,
+                    {"action": "query", "list": "search", "srlimit": "5", "srsearch": variant},
+                    deadline,
+                )
+                hits = (((data or {}).get("query") or {}).get("search")) or []
+                candidates = [h.get("title", "") for h in hits if isinstance(h, dict)]
+            candidates = [c for c in candidates if c]
+            if candidates:
+                page = candidates[0]
+                break
+        if not page:
+            logger.info("WindRep: no matching work page for query")
+            return None
+
+        sections = _windrep_api_get(
+            api_url, {"action": "parse", "page": page, "prop": "sections"}, deadline
+        )
+        section_index: str | None = None
+        for sec in (((sections or {}).get("parse") or {}).get("sections")) or []:
+            if isinstance(sec, dict) and re.search(
+                r"instrument", str(sec.get("line", "")), re.IGNORECASE
+            ):
+                section_index = str(sec.get("index"))
+                break
+        parse_params = {"action": "parse", "page": page, "prop": "wikitext"}
+        if section_index is not None:
+            parse_params["section"] = section_index
+        parsed = _windrep_api_get(api_url, parse_params, deadline)
+        wikitext = (((parsed or {}).get("parse") or {}).get("wikitext")) or {}
+        body = wikitext.get("*", "") if isinstance(wikitext, dict) else ""
+        if not isinstance(body, str) or not body.strip():
+            return None
+        text = f"WindRep work page: {page}\n\n{body}"
+        _windrep_cache_write(config, query, page, text)
+        return text
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError, KeyError, IndexError) as exc:
+        logger.info("WindRep direct fetch unavailable (%s); falling through to next stage", exc)
+        return None
+
+
 # --- Local score text (Stage A) --------------------------------------------------------------
 
 
@@ -747,7 +906,7 @@ def _unexpected_entry(obs: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-# Display abbreviations for the clef editions a brass-band part may be published in.
+# Display abbreviations for the clef editions a part may be published in.
 _CLEF_DISPLAY: dict[str, str] = {"bass": "BC", "treble": "TC"}
 
 
@@ -756,10 +915,10 @@ def collapse_clef_editions(
 ) -> list[dict[str, Any]]:
     """Merge observed parts that are the same musical part in different clef editions.
 
-    In a British brass band the *same* part is routinely published in both a bass-clef (BC,
-    concert pitch) and treble-clef (TC, transposing) edition. Script 03 keeps those as separate
-    observed entries because they are distinct physical items in the library, but for expected-parts
-    reconciliation they represent one part. Collapsing them here prevents the alternate edition from
+    The *same* part is sometimes published in both a bass-clef (BC, concert pitch) and treble-clef
+    (TC, transposing) edition. Script 03 keeps those as separate observed entries because they are
+    distinct physical items in the library, but for expected-parts reconciliation they represent
+    one part. Collapsing them here prevents the alternate edition from
     (a) double-filling an expected slot (which would inflate completeness) or (b) being reported as
     an "unexpected" surplus part.
 
@@ -1134,13 +1293,18 @@ def infer_piece(
     | None = None,
     image_fetch_fn: Callable[[str, Path, int], Path | None] | None = None,
     image_ocr_fn: Callable[[Path], str] | None = None,
+    windrep_fetch_fn: Callable[[dict[str, Any], dict[str, Any]], str | None] | None = None,
+    windrep_prompt_template: str = "",
 ) -> dict[str, Any]:
-    """Infer expected parts for one piece across up to three stages, degrading conservatively.
+    """Infer expected parts for one piece across up to four stages, degrading conservatively.
 
-    Stage A (local score OCR) runs first when a ``score_text_provider`` yields score text; Stage B
-    (online authority lookup) runs next; Stage C (remote image OCR) runs when the online lookup
-    returns candidate images but no instrumentation. The first stage to produce a confident
-    contract wins; otherwise the piece degrades to a conservative record.
+    Stage A (local score OCR) runs first when a ``score_text_provider`` yields score text; Stage W
+    (WindRep -- W1 direct MediaWiki fetch, then W2 dedicated LLM lookup) runs next and is always
+    attempted (never gated on ensemble type); Stage B (general online authority lookup, which
+    excludes WindRep) runs after; Stage C (remote image OCR) runs when the online lookup returns
+    candidate images but no instrumentation. The first stage to produce a confident contract wins;
+    otherwise the piece degrades to a conservative record. Stage W1's fetch is time-bounded and
+    fails gracefully, so an unreachable WindRep simply falls through to W2/Stage B.
     """
     model = str(config.get("model") or "")
     summarize = summarize_fn or lookup_fn
@@ -1172,6 +1336,63 @@ def infer_piece(
             )
         else:
             logger.info("[%s] Stage A: no usable local score found; trying online lookup", piece_id)
+
+    # --- Stage W: WindRep (always tried, between local score and the general lookup) ------
+    if config.get("windrep_enabled", True):
+        windrep_query = build_lookup_query(piece, doc)
+        # W1: direct MediaWiki fetch, time-bounded with a graceful fallback. The fetch function
+        # is contracted to return None (never raise) on any failure, so no guard is needed here.
+        if config.get("windrep_direct_enabled", True) and windrep_fetch_fn is not None:
+            logger.info("[%s] Stage W1: trying direct WindRep fetch", piece_id)
+            windrep_text = windrep_fetch_fn(windrep_query, config)
+            if windrep_text:
+                record = _try_contract_from_text(
+                    piece, doc, run_id, windrep_text,
+                    config=config, summarize_fn=summarize, summarize_template=summarize_template,
+                    detection_method=METHOD_WINDREP, ocr_source="windrep_fetch",
+                )
+                if record is not None:
+                    logger.info("[%s] Stage W1 succeeded: instrumentation from WindRep page",
+                                piece_id)
+                    return record
+                logger.info("[%s] Stage W1: WindRep page did not yield a confident contract",
+                            piece_id)
+            else:
+                logger.info("[%s] Stage W1: no usable WindRep page (unreachable or no match)",
+                            piece_id)
+        # W2: dedicated LLM lookup constrained to windrep.org.
+        if (
+            lookup_enabled
+            and config.get("windrep_lookup_enabled", True)
+            and windrep_prompt_template
+        ):
+            logger.info("[%s] Stage W2: querying LLM WindRep lookup", piece_id)
+            windrep_config = {**config, "allowed_domains": ["windrep.org"]}
+            windrep_prompt = render_prompt(windrep_prompt_template, windrep_query)
+            try:
+                windrep_result = lookup_fn(windrep_prompt, windrep_config)
+            except (RuntimeError, TimeoutError, OSError, ValueError) as exc:
+                logger.info("[%s] Stage W2: WindRep lookup failed (%s); falling through",
+                            piece_id, exc)
+                windrep_result = None
+            _log_lookup_summary(piece_id, windrep_result)
+            _persist_lookup_result(windrep_config, piece_id, windrep_prompt, windrep_result)
+            if (
+                isinstance(windrep_result, dict)
+                and windrep_result.get("match_found")
+                and windrep_result.get("expected_parts")
+            ):
+                windrep_conf = float(windrep_result.get("identity_match_confidence") or 0.0)
+                threshold = float(config.get("confidence_threshold", 0.5) or 0.0)
+                if windrep_conf >= threshold:
+                    logger.info("[%s] Stage W2 matched via WindRep (confidence %.2f)",
+                                piece_id, windrep_conf)
+                    return build_matched_record(
+                        piece, doc, run_id, windrep_result, model,
+                        detection_method=METHOD_WINDREP, inference_method=METHOD_WINDREP,
+                    )
+            logger.info("[%s] Stage W2: no confident WindRep match; falling through to general "
+                        "lookup", piece_id)
 
     # --- Stage B: online authority lookup ------------------------------------------------
     if not lookup_enabled:
@@ -1322,12 +1543,15 @@ def config_fingerprint(
     summarize_template: str = "",
     local_score_enabled: bool = True,
     image_ocr_enabled: bool = True,
+    windrep_enabled: bool = True,
+    windrep_prompt_template: str = "",
 ) -> str:
     """Fingerprint of the inference-affecting configuration (invalidates stale reuse)."""
     basis = "|".join([
         str(lookup_enabled),
         str(local_score_enabled),
         str(image_ocr_enabled),
+        str(windrep_enabled),
         str(config.get("model") or ""),
         str(config.get("confidence_threshold")),
         str(config.get("max_score_pages")),
@@ -1335,6 +1559,7 @@ def config_fingerprint(
         str(config.get("reocr_dpi")),
         sha256_text(prompt_template),
         sha256_text(summarize_template),
+        sha256_text(windrep_prompt_template),
     ])
     return sha256_text(basis)
 
@@ -1729,6 +1954,10 @@ def main(
         True, "--image-ocr/--no-image-ocr",
         help="Enable local OCR of images the online lookup returns (Stage C)",
     ),
+    windrep_enabled: bool = typer.Option(
+        True, "--windrep/--no-windrep",
+        help="Enable the WindRep stage (direct fetch + LLM lookup) before the general lookup",
+    ),
     model: str = typer.Option("", help="Override the Copilot CLI model (blank = config/default)"),
     timeout: int = typer.Option(0, help="Override per-piece subprocess timeout in seconds (0=cfg)"),
     stream_lookup: bool = typer.Option(
@@ -1775,6 +2004,12 @@ def main(
         image_ocr_enabled = False
     config["local_score_enabled"] = local_score_enabled
     config["image_ocr_enabled"] = image_ocr_enabled
+    if not config.get("windrep_enabled", True):
+        windrep_enabled = False
+    config["windrep_enabled"] = windrep_enabled
+    config["windrep_cache_dir"] = str(
+        Path(config.get("windrep_cache_dir") or "cache/windrep").resolve()
+    )
     if model.strip():
         config["model"] = model.strip()
     if timeout > 0:
@@ -1789,6 +2024,12 @@ def main(
 
     summarize_path = Path(config.get("summarize_prompt_template_path", "")).resolve()
     summarize_template, summarize_source = load_summarize_template(summarize_path)
+
+    windrep_prompt_template = ""
+    if windrep_enabled:
+        windrep_path = Path(config.get("windrep_prompt_template_path", "")).resolve()
+        windrep_prompt_template, windrep_source = load_prompt_template(windrep_path)
+        logger.info("WindRep lookup prompt: %s (%s)", windrep_path, windrep_source)
 
     if lookup_enabled and not shutil.which(config.get("command", "copilot")):
         logger.warning(
@@ -1862,6 +2103,7 @@ def main(
     cfg_fp = config_fingerprint(
         config, prompt_template, lookup_enabled,
         summarize_template, local_score_enabled, image_ocr_enabled,
+        windrep_enabled, windrep_prompt_template,
     )
 
     ckpt_path = make_checkpoint_path(output, CHECKPOINT_FILENAME)
@@ -1999,6 +2241,12 @@ def main(
                 score_text_provider=_score_text_provider if local_score_enabled else None,
                 image_fetch_fn=download_image if image_ocr_enabled else None,
                 image_ocr_fn=ocr_image_file if image_ocr_enabled else None,
+                windrep_fetch_fn=(
+                    fetch_windrep_instrumentation
+                    if (windrep_enabled and config.get("windrep_direct_enabled", True))
+                    else None
+                ),
+                windrep_prompt_template=windrep_prompt_template,
             )
         except Exception as exc:
             logger.exception("Unexpected inference error on piece %s", piece.get("piece_id"))

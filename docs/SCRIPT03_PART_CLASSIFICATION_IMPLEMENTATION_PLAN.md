@@ -20,7 +20,7 @@ This plan is derived from:
 
 ## 2. Research: what the data actually looks like
 
-The current library is a **brass-band** collection. Inspecting `data/documents.jsonl`
+The current library is a general **concert / wind band** collection. Inspecting `data/documents.jsonl`
 (26 documents, 2 pieces) shows a highly regular filename convention:
 
 ```

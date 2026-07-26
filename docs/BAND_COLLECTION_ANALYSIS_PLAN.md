@@ -261,7 +261,7 @@ Key per-document fields (`part_predictions.jsonl`):
 - predicted_part (human label, e.g. `Horn in F 2`, `Baritone (BC)`, `Full Score`; nullable)
 - canonical_instrument (snake_case key, e.g. `baritone_horn`, `tuba`; nullable)
 - family (woodwind/brass/percussion/strings/score/unknown)
-- section (coarser lexicon-driven grouping, e.g. `cornets_trumpets`, `low_brass`, `tubas`;
+- section (coarser lexicon-driven grouping, e.g. `trumpets`, `low_brass`, `tubas`;
   `score`/`unknown` fallbacks) — schema 1.1
 - catalog_number, piece_title_guess (work-identity seeds parsed from the folder) — schema 1.1
 - part_index (e.g., 1,2,3; nullable)

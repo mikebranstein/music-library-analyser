@@ -11,16 +11,16 @@ The **primary** inference path is an **online lookup of the actual published sco
 piece, Script 04 builds a work-identity query from the metadata it already has and asks an LLM
 (via the **GitHub Copilot CLI**) to search authoritative web sources (publisher, distributor, and
 library catalog listings) and return that specific edition's real instrumentation. The ensemble
-type is **not hardcoded** — it is whatever the found score is (British brass band, American brass
-band, British/American concert/wind band, orchestra, etc.). When the lookup is disabled, finds no
+type is **not hardcoded** — it is whatever the found score is (concert/wind band, wind ensemble,
+orchestra, etc.). When the lookup is disabled, finds no
 confident match, or fails, Script 04 falls back to a **conservative, observed-only** record and
 flags the piece for review; it never invents a "missing" part without an authoritative source.
 
 ## 2. Why lookup-primary (no hardcoded templates)
 
-Earlier drafts matched each piece to a single hardcoded British-brass-band template. That is wrong
-for a mixed library: the same folder set can contain brass band, concert/wind band, or orchestral
-arrangements, and even within brass band the American and British seatings differ. Rather than
+Earlier drafts matched each piece to a single hardcoded ensemble template. That is wrong
+for a mixed library: the same folder set can contain concert/wind band, wind ensemble, or orchestral
+arrangements, and editions differ in their exact seatings. Rather than
 enumerate every ensemble's canonical instrumentation ourselves (brittle, and still only an
 approximation of any *specific* published edition), we look up the real edition online and use its
 actual part list. Deterministic templates are removed entirely; the only non-lookup path is the
@@ -77,7 +77,7 @@ Schema the model must follow:
 {
   "match_found": true,
   "identity_match_confidence": 0.0,
-  "ensemble_type": "brass_band | concert_band | orchestra | ... (inferred, free-form)",
+  "ensemble_type": "concert_band | wind_ensemble | orchestra | ... (inferred, free-form)",
   "ensemble_display_name": "human label",
   "score_expected": true,
   "work_identity": {
