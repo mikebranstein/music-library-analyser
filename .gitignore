@@ -166,6 +166,7 @@ venv.bak/
 /data/collection_reports/
 /cache/ocr/
 /cache/render/
+/cache/llm/
 /outputs/
 /test_fixtures/
 
