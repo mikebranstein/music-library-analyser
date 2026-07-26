@@ -162,13 +162,19 @@ venv.bak/
 /data/*.parquet
 /data/.inventory_checkpoint.json
 /data/.extraction_checkpoint.json
-/data/piece_reports/
-/data/collection_reports/
-/data/expected_instrumentation/
-/cache/ocr/
-/cache/render/
-/cache/llm/
-/outputs/
+# Ignore the contents of generated directories but keep the empty dirs (via .gitkeep).
+# Ignore the *contents* (dir/*) rather than the dir itself, otherwise Git won't descend
+# into it and the .gitkeep negation below could not re-include anything.
+/data/piece_reports/*
+!/data/piece_reports/.gitkeep
+/data/collection_reports/*
+!/data/collection_reports/.gitkeep
+/data/expected_instrumentation/*
+!/data/expected_instrumentation/.gitkeep
+/cache/ocr/*
+/cache/render/*
+/cache/llm/*
+/outputs/*
 /test_fixtures/
 
 # Local, developer-only scripts and scratch files
