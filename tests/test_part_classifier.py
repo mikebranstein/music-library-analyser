@@ -471,6 +471,22 @@ def test_upper_left_label_overrides_filename_cross_section_flagged():
     assert rec["needs_review"] is True
 
 
+def test_upper_left_dual_bass_label_prefers_first_listed_string_bass():
+    # Regression (Chick Corea Ole): the part header reads "String Bass or Electric Bass". Longest-
+    # alias-wins would pick "electric bass" (bass_guitar) and report the string bass missing; the
+    # upper-left earliest-match must take the first-listed instrument, confirming the filename.
+    inv = {
+        "pdf_path": "241 Chick Corea Ole/241 Chick Corea Ole - String Bass.pdf",
+        "pdf_filename": "241 Chick Corea Ole - String Bass.pdf",
+        "piece_folder": "241 Chick Corea Ole",
+        "piece_id": "abc",
+        "file_fingerprint": "fp1",
+    }
+    page1 = {"zone_top_left": "String Bass or Electric Bass Maestoso - Freely arcoA f"}
+    rec = _classify(inv, doc=None, page1=page1)
+    assert [f["canonical"] for f in rec["instruments"]] == ["string_bass"]
+
+
 def test_full_text_cross_section_reference_does_not_override_filename():
     # Without an upper-left label, a cross-section instrument mentioned only in the body/full text
     # must NOT override the filename baseline (that is where stray references and cues live).
