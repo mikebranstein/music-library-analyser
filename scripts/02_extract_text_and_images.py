@@ -59,6 +59,7 @@ from scripts._common import (
     atomic_write_text,
     build_checkpoint,
     canonicalize_instrument,
+    has_readable_text,
     load_checkpoint,
     load_instrument_taxonomy,
     make_checkpoint_path,
@@ -736,10 +737,13 @@ def apply_llm_fields(doc_record: dict[str, Any], ocr_llm: dict[str, Any] | None)
 
 
 def _should_ocr(embedded_text: str | None, image_analysis: dict[str, Any]) -> bool:
-    """OCR pages with no searchable embedded text or that look scanned."""
-    text = embedded_text or ""
-    is_searchable = bool(text.strip()) and any(c.isalnum() for c in text)
-    return (not is_searchable) or bool(image_analysis.get("is_image_based"))
+    """OCR pages with no readable embedded text or that look scanned.
+
+    A born-digital page whose embedded text is almost entirely music-notation-font glyphs (Unicode
+    Private Use Area) is not usefully searchable even though it is non-empty, so it is treated as
+    needing OCR.
+    """
+    return (not has_readable_text(embedded_text)) or bool(image_analysis.get("is_image_based"))
 
 
 # --- Document-level OCR -> instrumentation (LLM consolidation) --------------------------------
@@ -1044,7 +1048,7 @@ def build_text_record(
     ocr: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     text_value = embedded_text or ""
-    is_searchable = bool(text_value.strip()) and any(c.isalnum() for c in text_value)
+    is_searchable = has_readable_text(embedded_text)
     signals = compute_text_signals(embedded_text)
     zones = zones or {}
     ocr_applied = ocr is not None

@@ -74,6 +74,37 @@ def normalize_rel_path(path: Path) -> str:
     return path.as_posix()
 
 
+# Music-notation fonts (used by engraving software) map noteheads, clefs, accidentals, etc. into
+# the Unicode Private Use Area (U+E000-U+F8FF). When a born-digital PDF embeds such a font, the
+# text PyMuPDF extracts is polluted with these glyph code points interleaved with the real printed
+# text (instrument names, titles, credits). They carry no readable meaning outside their font, so
+# stripping them exposes the human-readable text the classifier needs.
+_PUA_GLYPH_RE = re.compile("[\ue000-\uf8ff]+")
+
+
+def strip_music_glyphs(text: str | None) -> str:
+    """Replace Private Use Area glyph runs (U+E000-U+F8FF) with a single space.
+
+    Returns readable text with music-font glyph pollution removed. Each run collapses to one space
+    so adjacent real tokens stay separated (callers typically collapse whitespace afterwards).
+    Plain text with no PUA glyphs is returned unchanged.
+    """
+    if not text:
+        return ""
+    return _PUA_GLYPH_RE.sub(" ", text)
+
+
+def has_readable_text(text: str | None) -> bool:
+    """True when the text has alphanumeric content after music-glyph pollution is stripped.
+
+    A born-digital page whose embedded text is almost entirely notation-font glyphs has no useful
+    readable content even though it is technically non-empty, so it should be treated as needing
+    OCR rather than trusted as searchable text.
+    """
+    cleaned = strip_music_glyphs(text)
+    return bool(cleaned.strip()) and any(c.isalnum() for c in cleaned)
+
+
 def sha256_text(value: str) -> str:
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
     return f"sha256:{digest}"

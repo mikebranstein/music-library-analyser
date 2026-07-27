@@ -258,8 +258,9 @@ def test_ocr_llm_expands_generic_percussion():
     assert rec["confidence"] >= 0.70
 
 
-def test_ocr_llm_does_not_override_specific_filename():
-    # A specific filename instrument stays authoritative even when the LLM disagrees.
+def test_ocr_llm_overrides_conflicting_filename():
+    # Content-first: the in-file OCR->LLM instrument is authoritative and overrides a conflicting
+    # filename. The filename is only a last resort, so it never overrides in-file content.
     inv = {
         "pdf_path": "P/Song - Trumpet 1.pdf",
         "pdf_filename": "Song - Trumpet 1.pdf",
@@ -270,7 +271,9 @@ def test_ocr_llm_does_not_override_specific_filename():
     doc = {"ocr_llm_instruments": ["flute"]}
     rec = _classify(inv, doc)
     canonicals = [f["canonical"] for f in rec["instruments"]]
-    assert canonicals == ["trumpet"]
+    assert canonicals == ["flute"]
+    # A cross-section override is surfaced for human review.
+    assert rec["needs_review"] is True
 
 
 def test_ocr_llm_ignores_unknown_tokens():
@@ -285,6 +288,87 @@ def test_ocr_llm_ignores_unknown_tokens():
     rec = _classify(inv, doc)
     assert rec["instruments"] == []
     assert rec["evidence_source"] == "none"
+
+
+def test_page_text_footer_credit_overrides_filename_euphonium():
+    # Regression (A Night On A Lonely Moor): the filename says "Baritone" but the printed part is a
+    # Euphonium, named in the glyph-polluted footer credit block. In-file content must win over the
+    # filename, and since Baritone/Euphonium share a section the result is confident (no review).
+    inv = {
+        "pdf_path": "681 A Night On A Lonely Moor/681 A Night On A Lonely Moor_Baritone (BC).pdf",
+        "pdf_filename": "681 A Night On A Lonely Moor_Baritone (BC).pdf",
+        "piece_folder": "681 A Night On A Lonely Moor",
+        "piece_id": "abc",
+        "file_fingerprint": "fp1",
+    }
+    # Embedded text is ~half music-notation glyphs; the instrument name sits in the footer credit.
+    doc = {
+        "first_page_text": (
+            "\ue100\ue234\ue300 Soli \ue001\ue002 72 \ue010\ue011\ue012 "
+            "Sole Owner \ue020EUPHONIUM\ue021 Composed by CLIVE LONGHURST "
+            "A Night On A Lonely Moor \ue030\ue031"
+        ),
+    }
+    rec = _classify(inv, doc)
+    assert [f["canonical"] for f in rec["instruments"]] == ["euphonium"]
+    assert rec["evidence_source"] == "combined"
+    assert rec["confidence"] == 0.80
+    assert rec["needs_review"] is False
+
+
+def test_page_text_footer_credit_overrides_filename_bass_trombone():
+    # Regression: "Trombone 3 (Bass)" is actually a Bass Trombone part (named in the footer). The
+    # filename part index (3) is preserved while the in-file instrument identity wins.
+    inv = {
+        "pdf_path": "681 A Night On A Lonely Moor/681 A Night On A Lonely Moor_Trombone 3 (Bass).pdf",
+        "pdf_filename": "681 A Night On A Lonely Moor_Trombone 3 (Bass).pdf",
+        "piece_folder": "681 A Night On A Lonely Moor",
+        "piece_id": "abc",
+        "file_fingerprint": "fp1",
+    }
+    doc = {
+        "first_page_text": (
+            "\ue100\ue234 5 \ue001\ue002 Sole Owner \ue020BASS TROMBONE\ue021 "
+            "Composed by CLIVE LONGHURST A Night On A Lonely Moor \ue030"
+        ),
+    }
+    rec = _classify(inv, doc)
+    assert [f["canonical"] for f in rec["instruments"]] == ["bass_trombone"]
+    assert rec["instruments"][0]["part_index"] == 3
+    assert rec["evidence_source"] == "combined"
+    assert rec["needs_review"] is False
+
+
+def test_page_text_footer_zone_overrides_filename():
+    # The footer/credit instrument name can arrive via the page-1 bottom zone, not just the flat
+    # first_page_text; the classifier must read that zone too.
+    inv = {
+        "pdf_path": "P/Song_Baritone.pdf",
+        "pdf_filename": "Song_Baritone.pdf",
+        "piece_folder": "Song",
+        "piece_id": "abc",
+        "file_fingerprint": "fp1",
+    }
+    page1 = {"zone_bottom": "Sole Owner \ue020Euphonium\ue021 Composed by X"}
+    rec = _classify(inv, doc=None, page1=page1)
+    assert [f["canonical"] for f in rec["instruments"]] == ["euphonium"]
+
+
+def test_combined_doubling_preserved_with_page_text():
+    # A single content instrument read from the page must NOT collapse a combined/doubling part
+    # captured structurally by the filename.
+    inv = {
+        "pdf_path": "P/Song - Flute 1 & Piccolo.pdf",
+        "pdf_filename": "Song - Flute 1 & Piccolo.pdf",
+        "piece_folder": "Song",
+        "piece_id": "abc",
+        "file_fingerprint": "fp1",
+    }
+    doc = {"first_page_text": "Flute Piccolo solo passage"}
+    rec = _classify(inv, doc)
+    canonicals = {(f["canonical"], f["part_index"]) for f in rec["instruments"]}
+    assert canonicals == {("flute", 1), ("piccolo", None)}
+    assert rec["evidence_source"] == "combined"
 
 
 def test_apply_ensemble_flags_duplicates():

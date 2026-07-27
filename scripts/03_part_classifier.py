@@ -36,6 +36,7 @@ from scripts._common import (
     pct,
     read_jsonl,
     setup_logging,
+    strip_music_glyphs,
     utc_now_iso,
 )
 
@@ -509,13 +510,6 @@ def build_instrument_facets(
     return facets, primary_alternates
 
 
-# Generic percussion "family" tokens that a filename part label often collapses to (e.g. a single
-# "Percussion" book). When the document-level OCR->LLM consolidation names the specific instruments
-# such a part actually covers, we replace these generics with the specifics so downstream coverage
-# can match Snare Drum / Bass Drum / Castanets / Tambourine individually instead of one blob.
-_GENERIC_FAMILY_CANONICALS = frozenset({"percussion", "drum_set"})
-
-
 def llm_instruments(doc_record: dict[str, Any] | None, lexicon: dict[str, Any]) -> list[str]:
     """Ordered, de-duplicated canonical instrument tokens from Script 02's OCR->LLM consolidation.
 
@@ -631,22 +625,36 @@ def compose_label(
 def gather_text_signals(
     doc_record: dict[str, Any] | None,
     page1_zones: dict[str, Any] | None,
-) -> str:
-    """Concatenate the most reliable page-1 text sources for confirmation/recovery."""
-    fragments: list[str] = []
+) -> tuple[str, str]:
+    """Return (title_norm, full_norm): de-glyphed, normalized in-file text signals.
+
+    Both are stripped of Private Use Area music-font glyphs (which pollute born-digital embedded
+    text) before normalization.
+
+    - ``title_norm`` covers the regions where a part's printed instrument label reliably sits:
+      the page-1 header candidates, the top-band zones, and the bottom band (footer/credit block
+      where library publishers often print the instrument name). Preferred for instrument reads
+      because it avoids body cues that name other instruments.
+    - ``full_norm`` covers ``title_norm`` plus the entire first-page text, used as a fallback read
+      and for confirming a filename match.
+    """
+    title_fragments: list[str] = []
+    full_fragments: list[str] = []
     if doc_record:
         header = doc_record.get("first_page_header_candidates") or []
         if isinstance(header, list):
-            fragments.extend(str(h) for h in header)
-        first_text = doc_record.get("first_page_text") or ""
-        # Only the head of the (noisy) page text, where the part label usually sits.
-        fragments.append(str(first_text)[:200])
+            title_fragments.extend(str(h) for h in header)
+        first_text = str(doc_record.get("first_page_text") or "")
+        full_fragments.append(first_text)
     if page1_zones:
-        for key in ("zone_top_left", "zone_top_center", "zone_top_right"):
+        for key in ("zone_top_left", "zone_top_center", "zone_top_right", "zone_bottom"):
             value = page1_zones.get(key)
             if value:
-                fragments.append(str(value))
-    return normalize(" ".join(fragments))
+                title_fragments.append(str(value))
+    title_norm = normalize(strip_music_glyphs(" ".join(title_fragments)))
+    full_norm = normalize(strip_music_glyphs(" ".join(title_fragments + full_fragments)))
+    return title_norm, full_norm
+
 
 
 # --- Classification --------------------------------------------------------------------------
@@ -668,7 +676,7 @@ def classify_document(
     seg_norm = normalize(part_segment)
 
     score_type = detect_score(seg_norm, lexicon)
-    text_norm = gather_text_signals(doc_record, page1_zones)
+    title_norm, full_norm = gather_text_signals(doc_record, page1_zones)
 
     clef = extract_clef(seg_norm, lexicon)
     transposition = extract_transposition(seg_norm, lexicon)
@@ -679,6 +687,7 @@ def classify_document(
     filename_match = False
     text_match = False
     is_score = False
+    conflict = False
 
     if score_type is not None:
         is_score = True
@@ -687,18 +696,91 @@ def classify_document(
         clef = None
         transposition = None
     else:
-        instruments, alternates = build_instrument_facets(
+        # Content-first classification. Evidence read from INSIDE the file (the OCR->LLM
+        # consolidation, then the de-glyphed page text) is authoritative for instrument identity;
+        # the filename is only a last resort and supplies structural hints (part index) it never
+        # overrides in-file content with. Precedence: (1) LLM instruments, (2) page-text read,
+        # (3) filename.
+        filename_facets, filename_alternates = build_instrument_facets(
             seg_norm, compiled, section_map, lexicon
         )
-        if instruments:
+        filename_canon_set = {f["canonical"] for f in filename_facets}
+        filename_primary = filename_facets[0]["canonical"] if filename_facets else None
+        filename_index = filename_facets[0]["part_index"] if len(filename_facets) == 1 else None
+        filename_section = filename_facets[0]["section"] if filename_facets else None
+
+        llm_canon = llm_instruments(doc_record, lexicon)
+        # Prefer the title/credit regions (header/top/footer) over body cues; fall back to the
+        # whole page text so a footer-only instrument credit is still recovered.
+        content_canon, _content_alias, content_alts = match_instrument(
+            title_norm, compiled, min_alias_len=4
+        )
+        if content_canon is None:
+            content_canon, _content_alias, content_alts = match_instrument(
+                full_norm, compiled, min_alias_len=4
+            )
+
+        if llm_canon:
+            # (1) The document-level OCR->LLM consolidation is the strongest in-file signal. It is
+            # authoritative for instrument identity and may expand one physical part into several
+            # instruments (e.g. a "Percussion" book -> snare/bass/castanets).
+            instruments = [make_facet(c, lexicon, section_map) for c in llm_canon]
+            if len(instruments) == 1 and filename_index is not None:
+                instruments[0]["part_index"] = filename_index
+            matched_alias = llm_canon[0]
+            alternates = []
+            filename_match = bool(filename_facets)
+            text_match = True
+            if not filename_facets:
+                confidence, evidence = 0.80, "ocr_llm"
+            elif filename_primary in set(llm_canon):
+                confidence, evidence = 0.90, "combined"
+            else:
+                same_section = filename_section == instruments[0]["section"]
+                confidence = 0.80 if same_section else 0.70
+                evidence = "combined"
+                conflict = not same_section
+        elif content_canon is not None and len(filename_facets) <= 1:
+            # (2) Instrument read directly from the (de-glyphed) page text. Overrides a single or
+            # empty filename instrument -- never the other way around.
+            family = lexicon["families"].get(content_canon, "other")
+            content_section = section_for(content_canon, family, section_map)
+            instruments = [{
+                "canonical": content_canon,
+                "part_index": filename_index,
+                "family": family,
+                "section": content_section,
+            }]
+            matched_alias = content_canon
+            alternates = content_alts
+            text_match = True
+            if filename_primary == content_canon:
+                filename_match = True
+                confidence = 0.90
+                if clef or transposition:
+                    confidence = min(0.98, confidence + 0.05)
+                evidence = "combined"
+            elif filename_primary is None:
+                confidence = 0.50
+                evidence = "text"
+            else:
+                # Page text names a different instrument than the filename -> content wins.
+                filename_match = True
+                same_section = filename_section == content_section
+                confidence = 0.80 if same_section else 0.70
+                evidence = "combined"
+                conflict = not same_section
+        elif filename_facets:
+            # (3) Last resort: the filename is the only signal (or a combined/doubling part whose
+            # structure the flat page text cannot express). Confirm with page text when possible.
+            instruments = filename_facets
+            alternates = filename_alternates
+            matched_alias = filename_primary
             filename_match = True
-            matched_alias = instruments[0]["canonical"]
-            facet_canonicals = {f["canonical"] for f in instruments}
-            # Confirm with page text: does any alias of any matched instrument appear?
             text_match = any(
-                _word_search(alias, text_norm)
+                _word_search(alias, full_norm)
                 for c, alias in compiled
-                if c in facet_canonicals
+                if c in filename_canon_set
             )
             if text_match:
                 confidence = 0.90
@@ -709,44 +791,8 @@ def classify_document(
                 confidence = 0.75
                 evidence = "filename"
         else:
-            # Filename gave nothing usable; try to recover a single instrument from page text.
-            t_canonical, _t_alias, t_alts = match_instrument(
-                text_norm, compiled, min_alias_len=4
-            )
-            if t_canonical is not None:
-                matched_alias = t_canonical
-                alternates = t_alts
-                family = lexicon["families"].get(t_canonical, "other")
-                instruments = [{
-                    "canonical": t_canonical,
-                    "part_index": None,
-                    "family": family,
-                    "section": section_for(t_canonical, family, section_map),
-                }]
-                text_match = True
-                confidence = 0.50
-                evidence = "text"
-            else:
-                confidence = 0.0
-                evidence = "none"
-
-    # Expand a generic or empty part label using Script 02's document-level OCR->LLM instrument
-    # consolidation. A single "Percussion" part frequently covers several specific instruments that
-    # only the reconciled multi-pass OCR reveals; replacing the generic facet with the specifics
-    # lets downstream coverage satisfy each instrument's expected slot individually. Specific
-    # filename matches are left untouched -- the filename stays authoritative there.
-    if not is_score:
-        llm_canon = llm_instruments(doc_record, lexicon)
-        if llm_canon:
-            filename_canon = {f["canonical"] for f in instruments}
-            replaceable = (not filename_canon) or filename_canon <= _GENERIC_FAMILY_CANONICALS
-            if replaceable and set(llm_canon) != filename_canon:
-                instruments = [make_facet(c, lexicon, section_map) for c in llm_canon]
-                alternates = []
-                matched_alias = llm_canon[0]
-                text_match = False
-                confidence = max(confidence, 0.70)
-                evidence = "combined" if filename_match else "ocr_llm"
+            confidence = 0.0
+            evidence = "none"
 
     first = instruments[0] if instruments else None
     if is_score:
@@ -778,9 +824,10 @@ def classify_document(
     )
     confidence = round(confidence, 3)
     tier = confidence_tier(confidence)
-    # Base review flag; duplicate_in_piece is OR'd in during ensemble harmonization.
+    # Base review flag; duplicate_in_piece is OR'd in during ensemble harmonization. A conflict
+    # (in-file content contradicted the filename across sections) is surfaced for review too.
     needs_review = bool(
-        (not is_score and not instruments) or confidence < LOW_CONFIDENCE
+        (not is_score and not instruments) or confidence < LOW_CONFIDENCE or conflict
     )
 
     return {

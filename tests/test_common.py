@@ -4,13 +4,38 @@ from pathlib import Path
 
 from scripts._common import (
     canonicalize_instrument,
+    has_readable_text,
     load_instrument_taxonomy,
     normalize_instrument_name,
     read_jsonl,
     run_with_progress,
+    strip_music_glyphs,
 )
 
 _RULES_PATH = Path(__file__).resolve().parent.parent / "config" / "regex_rules.yaml"
+
+
+def test_strip_music_glyphs_removes_private_use_area() -> None:
+    # Music-notation fonts embed glyphs in the PUA (U+E000-U+F8FF); they must be stripped so the
+    # readable instrument name survives. Each glyph run collapses to a single space.
+    polluted = "Sole Owner \ue100\ue234EUPHONIUM\uf001 Composed by"
+    cleaned = strip_music_glyphs(polluted)
+    assert "\ue100" not in cleaned and "\uf001" not in cleaned
+    assert "EUPHONIUM" in cleaned
+    # Plain text is returned unchanged.
+    assert strip_music_glyphs("Trumpet in Bb") == "Trumpet in Bb"
+    assert strip_music_glyphs("") == ""
+    assert strip_music_glyphs(None) == ""
+
+
+def test_has_readable_text_ignores_glyph_soup() -> None:
+    # A page whose embedded text is essentially all notation glyphs has no readable content.
+    assert has_readable_text("\ue000\ue001\ue002\uf8ff") is False
+    assert has_readable_text("   ") is False
+    assert has_readable_text(None) is False
+    # Real letters/digits (even amid glyphs) count as readable.
+    assert has_readable_text("\ue000FLUTE\ue001") is True
+    assert has_readable_text("Trumpet 1") is True
 
 
 def test_read_jsonl_skips_malformed_and_non_object_lines(tmp_path: Path) -> None:
