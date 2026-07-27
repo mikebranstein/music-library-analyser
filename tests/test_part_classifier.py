@@ -103,6 +103,48 @@ def test_reversed_word_order_eb_clarinets():
     assert plain == "clarinet"
 
 
+def test_bass_clarinet_in_bb_not_plain_clarinet():
+    # Regression (The Wellerman): the transposition-qualified filename "Bass Clarinet in Bb" must
+    # classify as bass_clarinet. The redundant "clarinet in bb" alias (longer than "bass clarinet")
+    # previously shadowed it, so the part was mislabeled Clarinet and the bass clarinet was reported
+    # missing even though the file was present.
+    _, compiled = _lexicon_and_compiled()
+    canonical, _, _ = classifier.match_instrument(
+        classifier.normalize("The Wellerman - Bass Clarinet in Bb"), compiled
+    )
+    assert canonical == "bass_clarinet"
+    # A plain "Clarinet in Bb" label still resolves to clarinet (Bb captured as transposition).
+    plain, _, _ = classifier.match_instrument(classifier.normalize("Clarinet in Bb"), compiled)
+    assert plain == "clarinet"
+
+
+def test_alto_clarinet_in_eb_not_eb_clarinet():
+    # Regression: "Alto Clarinet in Eb" must classify as alto_clarinet, not the Eb (sopranino)
+    # clarinet. The eb_clarinet alias "clarinet in eb" would otherwise shadow "alto clarinet".
+    _, compiled = _lexicon_and_compiled()
+    for label in ("Alto Clarinet in Eb", "Alto Clarinet in E flat"):
+        canonical, _, _ = classifier.match_instrument(classifier.normalize(label), compiled)
+        assert canonical == "alto_clarinet", f"{label} -> {canonical}"
+    # A plain Eb (sopranino) clarinet is unaffected.
+    eb, _, _ = classifier.match_instrument(classifier.normalize("Clarinet in Eb"), compiled)
+    assert eb == "eb_clarinet"
+
+
+def test_classify_bass_clarinet_filename_only():
+    # End-to-end (filename baseline, no page text): the Wellerman bass clarinet part classifies as
+    # bass_clarinet with the transposition captured, so reconciliation no longer reports it missing.
+    inv = {
+        "pdf_path": "741 vThe Wellerman/741 The Wellerman - Bass Clarinet in Bb,.pdf",
+        "pdf_filename": "741 The Wellerman - Bass Clarinet in Bb,.pdf",
+        "piece_folder": "741 vThe Wellerman",
+        "piece_id": "abc",
+        "file_fingerprint": "fp1",
+    }
+    rec = _classify(inv)
+    assert [f["canonical"] for f in rec["instruments"]] == ["bass_clarinet"]
+    assert rec["transposition"] == "Bb"
+
+
 def test_guitar_part_is_classified():
     # Regression: "Guitar (Opt)" must classify as guitar, not fall through unmatched
     # (which previously produced a false "missing guitar" report downstream).

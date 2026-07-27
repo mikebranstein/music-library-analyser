@@ -90,9 +90,10 @@ DEFAULT_LEXICON: dict[str, Any] = {
         "bassoon": ["bassoon", "bsn", "fagotto"],
         "eb_clarinet": ["eb clarinet", "eb clarinets", "e flat clarinet", "clarinet in eb",
                         "clarinet in e flat", "clarinet eb"],
-        "clarinet": ["bb clarinet", "bb clarinets", "b flat clarinet", "clarinet in bb",
+        "clarinet": ["bb clarinet", "bb clarinets", "b flat clarinet",
                      "clarinets", "clarinet", "clar", "cl"],
-        "alto_clarinet": ["alto clarinet", "alto clarinets", "eb alto clarinet", "clarinet eb alto",
+        "alto_clarinet": ["alto clarinet in e flat", "alto clarinet in eb", "alto clarinet",
+                          "alto clarinets", "eb alto clarinet", "clarinet eb alto",
                           "clarinet alto"],
         "bass_clarinet": ["bass clarinet", "bass clarinets", "b cl", "bass cl"],
         "contrabass_clarinet": [
