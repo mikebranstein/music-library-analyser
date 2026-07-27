@@ -204,6 +204,53 @@ def test_no_match_is_unknown():
     assert rec["evidence_source"] == "none"
 
 
+def test_ocr_llm_expands_generic_percussion():
+    # A generic "Percussion" filename part is replaced by the specific instruments named by the
+    # document-level OCR->LLM consolidation, so each can satisfy its own expected slot.
+    inv = {
+        "pdf_path": "P/001 Mexican Hat Dance - Percussion.pdf",
+        "pdf_filename": "001 Mexican Hat Dance - Percussion.pdf",
+        "piece_folder": "001 Mexican Hat Dance",
+        "piece_id": "abc",
+        "file_fingerprint": "fp1",
+    }
+    doc = {"ocr_llm_instruments": ["snare_drum", "bass_drum", "castanets", "tambourine"]}
+    rec = _classify(inv, doc)
+    canonicals = [f["canonical"] for f in rec["instruments"]]
+    assert canonicals == ["snare_drum", "bass_drum", "castanets", "tambourine"]
+    assert rec["evidence_source"] == "combined"
+    assert rec["confidence"] >= 0.70
+
+
+def test_ocr_llm_does_not_override_specific_filename():
+    # A specific filename instrument stays authoritative even when the LLM disagrees.
+    inv = {
+        "pdf_path": "P/Song - Trumpet 1.pdf",
+        "pdf_filename": "Song - Trumpet 1.pdf",
+        "piece_folder": "Song",
+        "piece_id": "abc",
+        "file_fingerprint": "fp1",
+    }
+    doc = {"ocr_llm_instruments": ["flute"]}
+    rec = _classify(inv, doc)
+    canonicals = [f["canonical"] for f in rec["instruments"]]
+    assert canonicals == ["trumpet"]
+
+
+def test_ocr_llm_ignores_unknown_tokens():
+    inv = {
+        "pdf_path": "P/mystery.pdf",
+        "pdf_filename": "mystery.pdf",
+        "piece_folder": "P",
+        "piece_id": "abc",
+        "file_fingerprint": "fp1",
+    }
+    doc = {"ocr_llm_instruments": ["not_a_real_instrument"]}
+    rec = _classify(inv, doc)
+    assert rec["instruments"] == []
+    assert rec["evidence_source"] == "none"
+
+
 def test_apply_ensemble_flags_duplicates():
     def _facet(canonical, idx):
         return {"canonical": canonical, "part_index": idx, "family": "other", "section": "x"}

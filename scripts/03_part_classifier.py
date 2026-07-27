@@ -61,6 +61,7 @@ DEFAULT_LEXICON: dict[str, Any] = {
         "bass_trombone": "brass", "baritone_horn": "brass", "euphonium": "brass", "tuba": "brass",
         "string_bass": "strings", "timpani": "percussion", "mallet_percussion": "percussion",
         "snare_drum": "percussion", "bass_drum": "percussion", "cymbals": "percussion",
+        "castanets": "percussion", "tambourine": "percussion",
         "percussion": "percussion", "drum_set": "percussion",
     },
     "instruments": {
@@ -110,6 +111,8 @@ DEFAULT_LEXICON: dict[str, Any] = {
         "snare_drum": ["snare drum", "snare"],
         "bass_drum": ["bass drum"],
         "cymbals": ["cymbals", "crash cymbals", "suspended cymbal"],
+        "castanets": ["castanets", "castanet", "castenets", "castenet"],
+        "tambourine": ["tambourine", "tambourines", "tambo", "tamb"],
         "percussion": ["percussion", "perc", "battery", "aux percussion", "auxiliary percussion"],
         "drum_set": [
             "drum set", "drum kit", "drums", "trap set", "trap kit",
@@ -146,7 +149,7 @@ DEFAULT_LEXICON: dict[str, Any] = {
         "strings": ["string_bass"],
         "percussion": [
             "timpani", "mallet_percussion", "snare_drum", "bass_drum", "cymbals",
-            "percussion", "drum_set",
+            "castanets", "tambourine", "percussion", "drum_set",
         ],
     },
 }
@@ -164,7 +167,8 @@ INSTRUMENT_DISPLAY: dict[str, str] = {
     "trombone": "Trombone", "bass_trombone": "Bass Trombone", "baritone_horn": "Baritone",
     "euphonium": "Euphonium", "tuba": "Tuba", "string_bass": "String Bass",
     "timpani": "Timpani", "mallet_percussion": "Mallet Percussion", "snare_drum": "Snare Drum",
-    "bass_drum": "Bass Drum", "cymbals": "Cymbals", "percussion": "Percussion",
+    "bass_drum": "Bass Drum", "cymbals": "Cymbals",
+    "castanets": "Castanets", "tambourine": "Tambourine", "percussion": "Percussion",
     "drum_set": "Drum Set",
 }
 
@@ -427,6 +431,46 @@ def build_instrument_facets(
     return facets, primary_alternates
 
 
+# Generic percussion "family" tokens that a filename part label often collapses to (e.g. a single
+# "Percussion" book). When the document-level OCR->LLM consolidation names the specific instruments
+# such a part actually covers, we replace these generics with the specifics so downstream coverage
+# can match Snare Drum / Bass Drum / Castanets / Tambourine individually instead of one blob.
+_GENERIC_FAMILY_CANONICALS = frozenset({"percussion", "drum_set"})
+
+
+def llm_instruments(doc_record: dict[str, Any] | None, lexicon: dict[str, Any]) -> list[str]:
+    """Ordered, de-duplicated canonical instrument tokens from Script 02's OCR->LLM consolidation.
+
+    Only tokens that are known canonicals in the lexicon are kept, so a malformed or hallucinated
+    LLM token is dropped rather than trusted.
+    """
+    if not doc_record:
+        return []
+    raw = doc_record.get("ocr_llm_instruments")
+    if not isinstance(raw, list):
+        return []
+    families = lexicon.get("families", {})
+    out: list[str] = []
+    for value in raw:
+        canonical = str(value).strip()
+        if canonical and canonical in families and canonical not in out:
+            out.append(canonical)
+    return out
+
+
+def make_facet(
+    canonical: str, lexicon: dict[str, Any], section_map: dict[str, str]
+) -> dict[str, Any]:
+    """Build a single instrument facet dict for a canonical token."""
+    family = lexicon["families"].get(canonical, "other")
+    return {
+        "canonical": canonical,
+        "part_index": None,
+        "family": family,
+        "section": section_for(canonical, family, section_map),
+    }
+
+
 def primary_facet(rec: dict[str, Any]) -> dict[str, Any] | None:
     """The first instrument facet of a record (its representative instrument), or None."""
     facets = rec.get("instruments") or []
@@ -607,6 +651,24 @@ def classify_document(
             else:
                 confidence = 0.0
                 evidence = "none"
+
+    # Expand a generic or empty part label using Script 02's document-level OCR->LLM instrument
+    # consolidation. A single "Percussion" part frequently covers several specific instruments that
+    # only the reconciled multi-pass OCR reveals; replacing the generic facet with the specifics
+    # lets downstream coverage satisfy each instrument's expected slot individually. Specific
+    # filename matches are left untouched -- the filename stays authoritative there.
+    if not is_score:
+        llm_canon = llm_instruments(doc_record, lexicon)
+        if llm_canon:
+            filename_canon = {f["canonical"] for f in instruments}
+            replaceable = (not filename_canon) or filename_canon <= _GENERIC_FAMILY_CANONICALS
+            if replaceable and set(llm_canon) != filename_canon:
+                instruments = [make_facet(c, lexicon, section_map) for c in llm_canon]
+                alternates = []
+                matched_alias = llm_canon[0]
+                text_match = False
+                confidence = max(confidence, 0.70)
+                evidence = "combined" if filename_match else "ocr_llm"
 
     first = instruments[0] if instruments else None
     if is_score:

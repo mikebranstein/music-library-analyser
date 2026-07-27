@@ -12,11 +12,14 @@ Extraction/rendering uses ``pymupdf``. Image-quality metrics (blur/skew/contrast
 from __future__ import annotations
 
 import io
+import json
 import logging
 import os
 import re
 import shutil
+import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,7 +57,9 @@ from scripts._common import (
     atomic_write_jsonl,
     atomic_write_text,
     build_checkpoint,
+    canonicalize_instrument,
     load_checkpoint,
+    load_instrument_taxonomy,
     make_checkpoint_path,
     normalize_rel_path,
     pct,
@@ -65,7 +70,7 @@ from scripts._common import (
     utc_now_iso,
 )
 
-RECORD_VERSION = "2.2"
+RECORD_VERSION = "2.3"
 EXTRACTION_METHOD = "pymupdf_embedded"
 
 CHECKPOINT_FILENAME = ".extraction_checkpoint.json"
@@ -80,6 +85,18 @@ OCR_ENGINE = "tesseract"
 DEFAULT_OCR_DPI = 300  # dedicated OCR render DPI (higher than thumbnail render)
 DEFAULT_OCR_LANG = "eng"
 OCR_LOW_CONFIDENCE = 0.60  # mean word confidence (0..1) below this is flagged in the report
+# Multi-pass OCR: (render_dpi, tesseract_psm) tuples. A single fixed PSM misses text on hard
+# scans -- PSM 3 reads the sparse, high-confidence header block, while PSM 6/11 recover denser
+# body/sparse text, and a high-DPI pass sharpens small print. Every pass is retained as a
+# candidate for the document-level LLM consolidation; the highest-scoring pass also populates the
+# scalar ``ocr_text`` field for backward compatibility.
+DEFAULT_OCR_PASSES: tuple[tuple[int, int], ...] = (
+    (300, 3),
+    (300, 6),
+    (300, 11),
+    (600, 3),
+)
+OCR_CANDIDATE_MAX_CHARS = 2000  # cap per-candidate OCR text retained for the LLM phase
 _TESSERACT_COMMON_PATHS = (
     r"C:\Program Files\Tesseract-OCR\tesseract.exe",
     r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
@@ -116,6 +133,8 @@ class OcrConfig:
     dpi: int = DEFAULT_OCR_DPI
     lang: str = DEFAULT_OCR_LANG
     engine_version: str = ""
+    multipass: bool = True
+    passes: tuple[tuple[int, int], ...] = DEFAULT_OCR_PASSES
 
 
 def is_readable_record(record: dict[str, Any]) -> bool:
@@ -519,65 +538,110 @@ def _empty_ocr_result(status: str) -> dict[str, Any]:
         "ocr_confidence": None,
         "ocr_word_count": None,
         "ocr_status": status,
+        "ocr_candidates": [],
         "osd_rotation": None,
         "osd_orientation_conf": None,
         "osd_script": None,
     }
 
 
-def run_ocr(page: Any, cfg: OcrConfig) -> dict[str, Any]:
-    """Render a page at OCR DPI, run OSD + Tesseract, and return OCR fields.
+def _render_page_image(page: Any, dpi: int) -> Any:
+    """Render a page to a PIL image at the given DPI."""
+    matrix = fitz.Matrix(dpi / 72.0, dpi / 72.0)  # type: ignore[attr-defined]
+    pix = page.get_pixmap(matrix=matrix)
+    return Image.open(io.BytesIO(pix.tobytes("png")))
 
-    Never raises. OSD failures (common on sparse pages) are tolerated and leave the
-    page in its original orientation.
+
+def _ocr_pass(img: Any, lang: str, psm: int) -> tuple[str, float | None, int]:
+    """Run one Tesseract pass at a fixed PSM; return (text, mean_confidence, word_count)."""
+    data = pytesseract.image_to_data(
+        img, lang=lang, config=f"--oem 1 --psm {psm}", output_type=pytesseract.Output.DICT
+    )
+    words: list[str] = []
+    confs: list[float] = []
+    for txt, conf in zip(data.get("text", []), data.get("conf", []), strict=False):
+        token = (txt or "").strip()
+        if not token:
+            continue
+        words.append(token)
+        try:
+            c = float(conf)
+        except (TypeError, ValueError):
+            c = -1.0
+        if c >= 0:
+            confs.append(c)
+    text = " ".join(words)
+    mean_conf = round(sum(confs) / len(confs) / 100.0, 4) if confs else None
+    return text, mean_conf, len(words)
+
+
+def _candidate_score(confidence: float | None, word_count: int) -> float:
+    """Rank a candidate by confidence weighted by how much text it captured."""
+    if not confidence or word_count <= 0:
+        return 0.0
+    return confidence * (word_count ** 0.5)
+
+
+def run_ocr(page: Any, cfg: OcrConfig) -> dict[str, Any]:
+    """Render a page and run multiple OCR passes; return OCR fields plus all pass candidates.
+
+    Renders once per distinct DPI, runs OSD once to correct orientation, then runs each
+    (dpi, psm) pass. Every non-empty pass is kept in ``ocr_candidates`` for the document-level
+    LLM consolidation; the highest-scoring pass populates the scalar ``ocr_text`` fields.
+    Never raises. OSD failures (common on sparse pages) leave the page in its original
+    orientation.
     """
     if pytesseract is None or Image is None:
         return _empty_ocr_result("unavailable")
     result = _empty_ocr_result("success")
+    passes = tuple(cfg.passes) if cfg.multipass else ((cfg.dpi, 3),)
+    distinct_dpis = sorted({dpi for dpi, _ in passes})
+
+    images: dict[int, Any] = {}
     try:
-        matrix = fitz.Matrix(cfg.dpi / 72.0, cfg.dpi / 72.0)  # type: ignore[attr-defined]
-        pix = page.get_pixmap(matrix=matrix)
-        img = Image.open(io.BytesIO(pix.tobytes("png")))
+        for dpi in distinct_dpis:
+            images[dpi] = _render_page_image(page, dpi)
     except Exception as exc:
         return _empty_ocr_result(f"render failed: {exc}")
 
-    # Orientation/script detection: rotate upright before OCR when confident.
+    # Orientation/script detection once (on the lowest-DPI image); apply to all renders.
+    base_dpi = distinct_dpis[0]
     try:
-        osd = pytesseract.image_to_osd(img, output_type=pytesseract.Output.DICT)
+        osd = pytesseract.image_to_osd(images[base_dpi], output_type=pytesseract.Output.DICT)
         rotate = int(osd.get("rotate", 0) or 0)
         result["osd_rotation"] = rotate
         result["osd_orientation_conf"] = round(float(osd.get("orientation_conf", 0.0)), 3)
         result["osd_script"] = osd.get("script") or None
         if rotate in (90, 180, 270):
-            img = img.rotate(-rotate, expand=True)
+            for dpi in list(images):
+                images[dpi] = images[dpi].rotate(-rotate, expand=True)
     except Exception as exc:  # pragma: no cover - OSD fails on low-content pages
         logger.debug("OSD skipped: %s", exc)
 
-    try:
-        data = pytesseract.image_to_data(
-            img, lang=cfg.lang, output_type=pytesseract.Output.DICT
+    candidates: list[dict[str, Any]] = []
+    for dpi, psm in passes:
+        try:
+            text, conf, wc = _ocr_pass(images[dpi], cfg.lang, psm)
+        except Exception as exc:  # pragma: no cover - defensive
+            result["ocr_status"] = f"ocr failed: {exc}"
+            continue
+        if not text:
+            continue
+        candidates.append(
+            {
+                "dpi": dpi,
+                "psm": psm,
+                "text": text[:OCR_CANDIDATE_MAX_CHARS],
+                "confidence": conf,
+                "word_count": wc,
+            }
         )
-        words: list[str] = []
-        confs: list[float] = []
-        for txt, conf in zip(data.get("text", []), data.get("conf", []), strict=False):
-            token = (txt or "").strip()
-            if not token:
-                continue
-            words.append(token)
-            try:
-                c = float(conf)
-            except (TypeError, ValueError):
-                c = -1.0
-            if c >= 0:
-                confs.append(c)
-        text = " ".join(words)
-        result["ocr_text"] = text or None
-        result["ocr_word_count"] = len(words)
-        result["ocr_confidence"] = (
-            round(sum(confs) / len(confs) / 100.0, 4) if confs else None
-        )
-    except Exception as exc:  # pragma: no cover - defensive
-        result["ocr_status"] = f"ocr failed: {exc}"
+    result["ocr_candidates"] = candidates
+    if candidates:
+        best = max(candidates, key=lambda c: _candidate_score(c["confidence"], c["word_count"]))
+        result["ocr_text"] = best["text"] or None
+        result["ocr_confidence"] = best["confidence"]
+        result["ocr_word_count"] = best["word_count"]
     return result
 
 
@@ -587,7 +651,7 @@ def ocr_cache_path(
     """Content- and config-addressed cache path for a page's OCR result."""
     key = sha256_text(
         f"{item.pdf_path}|{item.file_fingerprint}|{page_num}|"
-        f"{cfg.dpi}|{cfg.lang}|{cfg.engine_version}"
+        f"{cfg.dpi}|{cfg.lang}|{cfg.engine_version}|{cfg.multipass}|{cfg.passes}"
     )
     prefix = hash_hex(key)[:12]
     return cache_dir / "ocr" / f"{item.piece_id}_p{page_num:04d}_{prefix}.json"
@@ -622,6 +686,243 @@ def _should_ocr(embedded_text: str | None, image_analysis: dict[str, Any]) -> bo
     text = embedded_text or ""
     is_searchable = bool(text.strip()) and any(c.isalnum() for c in text)
     return (not is_searchable) or bool(image_analysis.get("is_image_based"))
+
+
+# --- Document-level OCR -> instrumentation (LLM consolidation) --------------------------------
+# A single physical part PDF (especially percussion) often covers several instruments that no
+# single OCR pass reads cleanly. This stage feeds the multi-pass OCR candidates for a whole
+# document to one LLM call (Copilot CLI) that reconciles the noisy passes into a canonical
+# instrument list, which Script 03 turns into observed facets.
+
+_RULES_PATH = Path(__file__).resolve().parent.parent / "config" / "regex_rules.yaml"
+_OCR_LLM_PROMPT_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "config" / "llm_prompts" / "identify_part_instruments.txt"
+)
+OCR_LLM_RESULT_START = "<<<PART_JSON>>>"
+OCR_LLM_RESULT_END = "<<<END_PART_JSON>>>"
+OCR_LLM_PROMPT_VERSION = "1"  # bump to invalidate cached consolidations when the prompt changes
+OCR_LLM_MAX_PROMPT_CHARS = 16000  # cap the assembled OCR text fed to the LLM
+
+DEFAULT_OCR_LLM_PROMPT = (
+    "You are a music librarian assistant. Below is noisy multi-pass OCR text from the pages of a\n"
+    "SINGLE instrumental PART PDF from a concert-band library. Several OCR passes are shown; each\n"
+    "is unreliable on its own, so read them together and reconcile them.\n\n"
+    "Decide which instrument(s) this ONE part is written for. A single physical part frequently\n"
+    "covers several instruments -- e.g. a part labelled 'Percussion' may actually be Drums,\n"
+    "Castanets, and Tambourine, and a 'Drums' line may mean snare drum + bass drum.\n\n"
+    "Part context:\n"
+    "- File name: {pdf_filename}\n"
+    "- Source folder: {piece_folder}\n\n"
+    "Allowed canonical instrument tokens -- choose ONLY from this list, using the closest match:\n"
+    "{allowed_instruments}\n\n"
+    "Multi-pass OCR text:\n"
+    "{ocr_text}\n\n"
+    "Return the canonical tokens for every instrument this part covers. Use ONLY tokens from the\n"
+    "allowed list. If the OCR is too illegible to tell, return an empty instruments list with\n"
+    "confidence 0. Never invent instruments the text does not support; treat the OCR as the only\n"
+    "evidence and do not search the web.\n\n"
+    "Respond with exactly one JSON object between the sentinel lines and nothing else:\n"
+    f"{OCR_LLM_RESULT_START}\n"
+    '{{"instruments": ["snare_drum"], "confidence": 0.0, "notes": ""}}\n'
+    f"{OCR_LLM_RESULT_END}\n"
+)
+
+_OCR_LLM_TAXONOMY: dict[str, dict[str, str]] | None = None
+_OCR_LLM_ALLOWED: list[str] | None = None
+_OCR_LLM_TEMPLATE: str | None = None
+
+
+@dataclass(frozen=True)
+class OcrLlmConfig:
+    """Resolved settings for the document-level OCR->instrumentation LLM consolidation."""
+
+    enabled: bool = False
+    command: str = "copilot"
+    model: str = ""
+    timeout_seconds: float = 300.0
+    page_scope: str = "all"  # "all" | "first"
+
+
+def _ocr_llm_taxonomy() -> dict[str, dict[str, str]]:
+    """Cached instrument taxonomy (alias->canonical / canonical->section) from the shared YAML."""
+    global _OCR_LLM_TAXONOMY
+    if _OCR_LLM_TAXONOMY is None:
+        _OCR_LLM_TAXONOMY = load_instrument_taxonomy(_RULES_PATH)
+    return _OCR_LLM_TAXONOMY
+
+
+def _ocr_llm_allowed_instruments() -> list[str]:
+    """Sorted list of canonical instrument tokens the LLM may return."""
+    global _OCR_LLM_ALLOWED
+    if _OCR_LLM_ALLOWED is None:
+        tax = _ocr_llm_taxonomy()
+        _OCR_LLM_ALLOWED = sorted(set(tax.get("alias_to_canonical", {}).values()))
+    return _OCR_LLM_ALLOWED
+
+
+def _ocr_llm_template() -> str:
+    """The consolidation prompt template (file override, else the built-in)."""
+    global _OCR_LLM_TEMPLATE
+    if _OCR_LLM_TEMPLATE is None:
+        template = DEFAULT_OCR_LLM_PROMPT
+        if _OCR_LLM_PROMPT_PATH.exists():
+            try:
+                template = _OCR_LLM_PROMPT_PATH.read_text(encoding="utf-8")
+            except OSError as exc:  # pragma: no cover - best effort
+                logger.warning("Failed to read %s (%s); using built-in prompt.",
+                               _OCR_LLM_PROMPT_PATH, exc)
+        _OCR_LLM_TEMPLATE = template
+    return _OCR_LLM_TEMPLATE
+
+
+def gather_ocr_candidates_text(text_records: list[dict[str, Any]], page_scope: str) -> str:
+    """Assemble the multi-pass OCR candidates into one labelled text blob for the LLM."""
+    ordered = sorted(text_records, key=lambda r: r.get("page_num", 0))
+    if page_scope == "first":
+        ordered = ordered[:1]
+    chunks: list[str] = []
+    for rec in ordered:
+        candidates = rec.get("ocr_candidates") or []
+        if not candidates:
+            continue
+        chunks.append(f"--- Page {rec.get('page_num')} ---")
+        for c in candidates:
+            chunks.append(
+                f"[dpi={c.get('dpi')} psm={c.get('psm')} conf={c.get('confidence')}] "
+                f"{c.get('text', '')}"
+            )
+    return "\n".join(chunks).strip()[:OCR_LLM_MAX_PROMPT_CHARS]
+
+
+def build_ocr_llm_prompt(
+    template: str, item: InventoryItem, allowed: list[str], ocr_text: str
+) -> str:
+    """Fill the consolidation prompt placeholders."""
+    result = template
+    for key, value in {
+        "pdf_filename": item.pdf_filename,
+        "piece_folder": item.piece_folder,
+        "allowed_instruments": ", ".join(allowed),
+        "ocr_text": ocr_text,
+    }.items():
+        result = result.replace("{" + key + "}", str(value))
+    return result
+
+
+def parse_ocr_llm_response(stdout: str) -> dict[str, Any]:
+    """Extract the single JSON object from the CLI stdout; raises ValueError when absent."""
+    text = stdout or ""
+    if OCR_LLM_RESULT_START in text and OCR_LLM_RESULT_END in text:
+        start = text.index(OCR_LLM_RESULT_START) + len(OCR_LLM_RESULT_START)
+        end = text.index(OCR_LLM_RESULT_END, start)
+        candidate = text[start:end].strip().strip("`").strip()
+        return json.loads(candidate)
+    first = text.find("{")
+    last = text.rfind("}")
+    if first == -1 or last <= first:
+        raise ValueError("No JSON object found in OCR-LLM response.")
+    return json.loads(text[first:last + 1])
+
+
+def run_ocr_llm(prompt: str, cfg: OcrLlmConfig) -> dict[str, Any]:
+    """Invoke the Copilot CLI headlessly for one consolidation and return the parsed JSON."""
+    resolved = shutil.which(cfg.command)
+    if not resolved:
+        raise FileNotFoundError(f"Copilot CLI '{cfg.command}' not found on PATH.")
+    args = [
+        resolved, "-p", prompt,
+        "--allow-all-tools", "--allow-all-urls", "--no-color", "--no-ask-user",
+        "-s", "--log-level", "none",
+    ]
+    if cfg.model:
+        args += ["--model", cfg.model]
+    proc = subprocess.run(
+        args, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=cfg.timeout_seconds, check=False,
+    )
+    if proc.returncode != 0:
+        tail = (proc.stdout or proc.stderr or "").strip()[-500:]
+        raise RuntimeError(f"Copilot CLI exited {proc.returncode}: {tail}")
+    return parse_ocr_llm_response(proc.stdout)
+
+
+def ocr_llm_cache_path(
+    cache_dir: Path, item: InventoryItem, cfg: OcrLlmConfig, text_hash: str
+) -> Path:
+    """Content- and config-addressed cache path for a document's consolidation result."""
+    key = sha256_text(
+        f"{item.pdf_path}|{item.file_fingerprint}|{cfg.model}|{cfg.page_scope}|"
+        f"{OCR_LLM_PROMPT_VERSION}|{text_hash}"
+    )
+    prefix = hash_hex(key)[:12]
+    return cache_dir / "ocr_llm" / f"{item.piece_id}_{prefix}.json"
+
+
+def _empty_ocr_llm_result(status: str) -> dict[str, Any]:
+    return {
+        "ocr_llm_status": status,
+        "ocr_llm_instruments": [],
+        "ocr_llm_raw": [],
+        "ocr_llm_confidence": None,
+        "ocr_llm_notes": "",
+    }
+
+
+def consolidate_part_instruments(
+    item: InventoryItem,
+    text_records: list[dict[str, Any]],
+    cache_dir: Path,
+    cfg: OcrLlmConfig,
+    llm_fn: Callable[[str, OcrLlmConfig], dict[str, Any]] = run_ocr_llm,
+) -> dict[str, Any] | None:
+    """Consolidate a document's multi-pass OCR into a canonical instrument list via the LLM.
+
+    Returns None when the document has no OCR candidate text (so no LLM call is made). Otherwise
+    returns the consolidation record (cached to disk on success). Never raises.
+    """
+    ocr_text = gather_ocr_candidates_text(text_records, cfg.page_scope)
+    if not ocr_text:
+        return None
+
+    text_hash = sha256_text(ocr_text)
+    cache_path = ocr_llm_cache_path(cache_dir, item, cfg, text_hash)
+    cached = read_json(cache_path)
+    if cached is not None:
+        return cached
+
+    allowed = _ocr_llm_allowed_instruments()
+    prompt = build_ocr_llm_prompt(_ocr_llm_template(), item, allowed, ocr_text)
+    logger.info("OCR-LLM: consolidating instrumentation for %s", item.pdf_path)
+    try:
+        parsed = llm_fn(prompt, cfg)
+    except Exception as exc:
+        logger.warning("OCR-LLM consolidation failed for %s: %s", item.pdf_path, exc)
+        return _empty_ocr_llm_result(f"error: {exc}")
+
+    raw = parsed.get("instruments") if isinstance(parsed, dict) else None
+    raw_list = [str(x) for x in raw] if isinstance(raw, list) else []
+    alias_to_canonical = _ocr_llm_taxonomy().get("alias_to_canonical", {})
+    allowed_set = set(allowed)
+    canonicals: list[str] = []
+    for name in raw_list:
+        canon = canonicalize_instrument(name, alias_to_canonical)
+        if canon in allowed_set and canon not in canonicals:
+            canonicals.append(canon)
+
+    result = _empty_ocr_llm_result("success")
+    result["ocr_llm_instruments"] = canonicals
+    result["ocr_llm_raw"] = raw_list
+    if isinstance(parsed, dict):
+        result["ocr_llm_confidence"] = parsed.get("confidence")
+        result["ocr_llm_notes"] = str(parsed.get("notes") or "")
+    logger.info("OCR-LLM: %s -> %s", item.pdf_path, canonicals or "none")
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(cache_path, result)
+    except Exception:  # pragma: no cover - cache is best-effort
+        logger.debug("Failed to write OCR-LLM cache for %s", item.pdf_path)
+    return result
 
 
 def analyze_page_geometry(page: Any) -> dict[str, Any]:
@@ -711,6 +1012,7 @@ def build_text_record(
         "ocr_text": ocr_text,
         "ocr_confidence": ocr_d.get("ocr_confidence"),
         "ocr_word_count": ocr_d.get("ocr_word_count"),
+        "ocr_candidates": ocr_d.get("ocr_candidates") or [],
         "ocr_applied": ocr_applied,
         "ocr_status": ocr_d.get("ocr_status", "not_applied") if ocr_applied else "not_applied",
         "ocr_engine": OCR_ENGINE if ocr_applied else None,
@@ -802,6 +1104,7 @@ def build_document_record(
     text_records: list[dict[str, Any]],
     page_records: list[dict[str, Any]],
     status: str,
+    ocr_llm: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Aggregate per-page results into a single per-PDF rollup record."""
     pages_with_text = sum(1 for r in text_records if r.get("text_is_searchable"))
@@ -856,6 +1159,11 @@ def build_document_record(
         "pages_ocr_recovered": pages_ocr_recovered,
         "ocr_char_count": ocr_char_count,
         "pages_rotated": pages_rotated,
+        "ocr_llm_status": (ocr_llm or {}).get("ocr_llm_status", "not_applied"),
+        "ocr_llm_instruments": (ocr_llm or {}).get("ocr_llm_instruments", []),
+        "ocr_llm_raw": (ocr_llm or {}).get("ocr_llm_raw", []),
+        "ocr_llm_confidence": (ocr_llm or {}).get("ocr_llm_confidence"),
+        "ocr_llm_notes": (ocr_llm or {}).get("ocr_llm_notes", ""),
         "processing_status": status,
         "processing_timestamp": utc_now_iso(),
     }
@@ -947,6 +1255,7 @@ def process_pdf(
     enable_rendering: bool,
     enable_image_metrics: bool = True,
     ocr_config: OcrConfig | None = None,
+    ocr_llm_config: OcrLlmConfig | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], int, int]:
     """Return (text_records, page_records, document_record, page_error_count, pages_total)."""
     text_records: list[dict[str, Any]] = []
@@ -1063,8 +1372,13 @@ def process_pdf(
                 )
             )
         doc_status = "partial_error" if page_errors else "success"
+        ocr_llm_result: dict[str, Any] | None = None
+        if ocr_llm_config and ocr_llm_config.enabled:
+            ocr_llm_result = consolidate_part_instruments(
+                item, text_records, cache_dir, ocr_llm_config
+            )
         document_record = build_document_record(
-            item, run_id, text_records, page_records, doc_status
+            item, run_id, text_records, page_records, doc_status, ocr_llm_result
         )
         return text_records, page_records, document_record, page_errors, page_total
     finally:
@@ -1550,6 +1864,22 @@ def main(
     ),
     ocr_dpi: int = typer.Option(DEFAULT_OCR_DPI, help="Dedicated OCR render DPI"),
     ocr_lang: str = typer.Option(DEFAULT_OCR_LANG, help="Tesseract language(s), e.g. 'eng'"),
+    ocr_multipass: bool = typer.Option(
+        True,
+        "--ocr-multipass/--single-pass-ocr",
+        help="Run multiple OCR passes (varied PSM + DPI) and keep all as LLM candidates",
+    ),
+    ocr_llm: bool = typer.Option(
+        True,
+        "--ocr-llm/--no-ocr-llm",
+        help="Consolidate multi-pass OCR into an instrument list via the Copilot CLI (one call/PDF)",
+    ),
+    ocr_llm_command: str = typer.Option("copilot", help="Copilot CLI command for OCR-LLM"),
+    ocr_llm_model: str = typer.Option("", help="Model for OCR-LLM consolidation (else CLI default)"),
+    ocr_llm_page_scope: str = typer.Option(
+        "all", help="OCR-LLM page scope: 'all' pages or 'first' page only"
+    ),
+    ocr_llm_timeout: float = typer.Option(300.0, help="OCR-LLM Copilot CLI timeout (seconds)"),
     tesseract_cmd: str = typer.Option(
         "", help="Path to the tesseract binary (else PATH/common dirs are searched)"
     ),
@@ -1563,6 +1893,9 @@ def main(
         raise typer.BadParameter("render-dpi must be between 24 and 600")
     if ocr_dpi < 72 or ocr_dpi > 1200:
         raise typer.BadParameter("ocr-dpi must be between 72 and 1200")
+    ocr_llm_page_scope = (ocr_llm_page_scope or "all").lower().strip()
+    if ocr_llm_page_scope not in {"all", "first"}:
+        raise typer.BadParameter("ocr-llm-page-scope must be 'all' or 'first'")
 
     setup_logging(log_level)
 
@@ -1612,8 +1945,30 @@ def main(
                     )
                     enable_ocr = False
     ocr_config = OcrConfig(
-        enabled=enable_ocr, dpi=ocr_dpi, lang=ocr_lang, engine_version=ocr_engine_version
+        enabled=enable_ocr, dpi=ocr_dpi, lang=ocr_lang, engine_version=ocr_engine_version,
+        multipass=ocr_multipass,
     )
+
+    if ocr_llm and not shutil.which(ocr_llm_command):
+        logger.warning(
+            "Copilot CLI '%s' not found on PATH; disabling OCR-LLM consolidation.",
+            ocr_llm_command,
+        )
+        ocr_llm = False
+    if ocr_llm and not enable_ocr:
+        logger.warning(
+            "OCR-LLM consolidation requires OCR, which is disabled; disabling OCR-LLM."
+        )
+        ocr_llm = False
+    ocr_llm_config = OcrLlmConfig(
+        enabled=ocr_llm, command=ocr_llm_command, model=ocr_llm_model,
+        timeout_seconds=ocr_llm_timeout, page_scope=ocr_llm_page_scope,
+    )
+    if ocr_llm:
+        logger.info(
+            "OCR-LLM consolidation enabled (command=%s, model=%s, page_scope=%s)",
+            ocr_llm_command, ocr_llm_model or "CLI default", ocr_llm_page_scope,
+        )
 
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     library_root = library_root.resolve()
@@ -1755,6 +2110,7 @@ def main(
                 enable_rendering,
                 enable_image_metrics,
                 ocr_config,
+                ocr_llm_config,
             )
         except Exception as exc:
             pdf_errors += 1

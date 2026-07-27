@@ -1,0 +1,27 @@
+You are a music librarian assistant. Below is noisy multi-pass OCR text from the pages of a
+SINGLE instrumental PART PDF from a concert-band library. Several OCR passes are shown; each is
+unreliable on its own, so read them together and reconcile them.
+
+Decide which instrument(s) this ONE part is written for. A single physical part frequently covers
+several instruments -- e.g. a part labelled "Percussion" may actually be Drums, Castanets, and
+Tambourine, and a "Drums" line may mean snare drum + bass drum.
+
+Part context:
+- File name: {pdf_filename}
+- Source folder: {piece_folder}
+
+Allowed canonical instrument tokens -- choose ONLY from this list, using the closest match:
+{allowed_instruments}
+
+Multi-pass OCR text:
+{ocr_text}
+
+Return the canonical tokens for every instrument this part covers. Use ONLY tokens from the
+allowed list. If the OCR is too illegible to tell, return an empty instruments list with
+confidence 0. Never invent instruments the text does not support; treat the OCR as the only
+evidence and do not search the web.
+
+Respond with exactly one JSON object between the sentinel lines and nothing else:
+<<<PART_JSON>>>
+{"instruments": ["snare_drum"], "confidence": 0.0, "notes": ""}
+<<<END_PART_JSON>>>

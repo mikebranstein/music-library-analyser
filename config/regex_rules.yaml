@@ -43,6 +43,8 @@ families:
   snare_drum: percussion
   bass_drum: percussion
   cymbals: percussion
+  castanets: percussion
+  tambourine: percussion
   percussion: percussion
   drum_set: percussion
 
@@ -81,6 +83,8 @@ instruments:
   snare_drum: ["snare drum", "snare"]
   bass_drum: ["bass drum"]
   cymbals: ["cymbals", "crash cymbals", "suspended cymbal"]
+  castanets: ["castanets", "castanet", "castenets", "castenet"]
+  tambourine: ["tambourine", "tambourines", "tambo", "tamb"]
   percussion: ["percussion", "perc", "battery", "aux percussion", "auxiliary percussion"]
   drum_set: ["drum set", "drum kit", "drums", "trap set", "trap kit", "drumset", "drumkit", "trapset", "trapkit", "kit"]
 
@@ -128,7 +132,7 @@ sections:
   low_brass: ["trombone", "bass_trombone", "baritone_horn", "euphonium"]
   tubas: ["tuba"]
   strings: ["string_bass"]
-  percussion: ["timpani", "mallet_percussion", "snare_drum", "bass_drum", "cymbals", "percussion", "drum_set"]
+  percussion: ["timpani", "mallet_percussion", "snare_drum", "bass_drum", "cymbals", "castanets", "tambourine", "percussion", "drum_set"]
 
 # legacy keys retained for backward compatibility with earlier drafts
 part_patterns: {}

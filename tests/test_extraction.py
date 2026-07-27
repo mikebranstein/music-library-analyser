@@ -59,6 +59,76 @@ def test_compute_features_extremes():
     assert white_bw == 1.0
 
 
+def _ocr_item(extract):
+    return extract.InventoryItem(
+        pdf_path="P/001 Mexican Hat Dance - Percussion.pdf",
+        piece_id="3de936642a400b82",
+        piece_folder="001 Mexican Hat Dance",
+        pdf_filename="001 Mexican Hat Dance - Percussion.pdf",
+        page_count=3,
+        file_fingerprint="fp1",
+    )
+
+
+def test_consolidate_part_instruments_maps_to_canonicals(tmp_path: Path):
+    extract = load_module("02_extract_text_and_images.py", "extract_consolidate")
+    item = _ocr_item(extract)
+    text_records = [
+        {"page_num": 1, "ocr_candidates": [
+            {"dpi": 300, "psm": 6, "confidence": 80, "text": "Drums, Castanets, Tambourine"},
+        ]},
+    ]
+    cfg = extract.OcrLlmConfig(enabled=True, page_scope="all")
+
+    def fake_llm(prompt: str, _cfg):
+        assert "Castanets" in prompt
+        return {"instruments": ["snare drum", "castanets", "tambourine"],
+                "confidence": 0.9, "notes": "ok"}
+
+    result = extract.consolidate_part_instruments(
+        item, text_records, tmp_path / "cache", cfg, llm_fn=fake_llm
+    )
+    assert result is not None
+    assert result["ocr_llm_status"] == "success"
+    assert result["ocr_llm_instruments"] == ["snare_drum", "castanets", "tambourine"]
+    assert result["ocr_llm_confidence"] == 0.9
+
+
+def test_consolidate_part_instruments_no_ocr_returns_none(tmp_path: Path):
+    extract = load_module("02_extract_text_and_images.py", "extract_consolidate_none")
+    item = _ocr_item(extract)
+    cfg = extract.OcrLlmConfig(enabled=True, page_scope="all")
+
+    def fake_llm(_prompt, _cfg):  # pragma: no cover - must not be called
+        raise AssertionError("LLM must not be called without OCR text")
+
+    result = extract.consolidate_part_instruments(
+        item, [{"page_num": 1, "ocr_candidates": []}], tmp_path / "cache", cfg, llm_fn=fake_llm
+    )
+    assert result is None
+
+
+def test_consolidate_part_instruments_llm_error_is_captured(tmp_path: Path):
+    extract = load_module("02_extract_text_and_images.py", "extract_consolidate_err")
+    item = _ocr_item(extract)
+    text_records = [
+        {"page_num": 1, "ocr_candidates": [
+            {"dpi": 300, "psm": 6, "confidence": 80, "text": "Drums, Castanets"},
+        ]},
+    ]
+    cfg = extract.OcrLlmConfig(enabled=True, page_scope="all")
+
+    def fake_llm(_prompt, _cfg):
+        raise RuntimeError("boom")
+
+    result = extract.consolidate_part_instruments(
+        item, text_records, tmp_path / "cache", cfg, llm_fn=fake_llm
+    )
+    assert result is not None
+    assert result["ocr_llm_status"].startswith("error:")
+    assert result["ocr_llm_instruments"] == []
+
+
 def test_extraction_full_and_incremental(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     extract = load_module("02_extract_text_and_images.py", "extract_run")
@@ -551,7 +621,7 @@ def test_zone_blank_and_staff_full_run(tmp_path: Path, monkeypatch):
     # Identity candidate parsed from the copyright line.
     identity = doc_rec["identity_candidates"]
     assert identity["copyright_year"] == 2019
-    assert doc_rec["record_version"] == "2.2"
+    assert doc_rec["record_version"] == "2.3"
 
 
 def _tesseract_or_skip(extract):
@@ -642,6 +712,7 @@ def test_ocr_full_run_recovers_scanned_text(tmp_path: Path, monkeypatch):
             "--mode",
             "full",
             "--ocr",
+            "--no-ocr-llm",
         ],
     )
     assert result.exit_code == 0, result.stdout
