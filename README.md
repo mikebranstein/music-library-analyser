@@ -49,6 +49,9 @@ Primary outputs:
 - Emit a per-document rollup (`data/documents.jsonl`) alongside `extracted_text.jsonl` and `pages.jsonl`
 - Write a human-readable Markdown summary (`data/extraction_report.md`) with coverage, quality, and per-folder/per-document breakdowns
 - OCR scanned/no-text pages with Tesseract (OSD auto-rotate first); runs by default and degrades gracefully when the toolchain is unavailable
+- Multi-pass OCR (`--ocr-multipass`, default on): run several passes at varied PSM + DPI, keep every non-empty pass in `ocr_candidates`, and select the highest-scoring text (`--single-pass-ocr` for one pass)
+- Consolidate each PDF's OCR candidates into a normalized instrument list via one Copilot CLI call per file (`--ocr-llm`, default on), recording `ocr_llm_status`/`ocr_llm_instruments` on the document record for Script 03
+- Parallel pipeline: OCR passes run across a thread pool (page rendering stays on the main thread since PyMuPDF is not thread-safe), and each file's LLM classification is spun off asynchronously so the next PDF starts OCR while prior Copilot calls finish; `--ocr-workers` sets the worker count (`0` = auto `min(8, CPU)`, `1` = serial) and also bounds concurrent OCR-LLM calls
 
 3. `03_part_classifier.py`
 - Classify each PDF's instrument/part and whether it is a score (filename-first, deterministic)

@@ -392,6 +392,13 @@ checkpoint is written atomically after a successful output write.
 | `--ocr / --no-ocr` | flag | enabled | Toggle OCR/OSD on eligible pages (wave-3) |
 | `--ocr-dpi` | int | `300` | Dedicated OCR render DPI (validated 72..1200) |
 | `--ocr-lang` | str | `eng` | Tesseract language(s) passed to OCR/OSD |
+| `--ocr-multipass / --single-pass-ocr` | flag | enabled | Run multiple OCR passes (varied PSM + DPI) and keep all as `ocr_candidates` |
+| `--ocr-workers` | int | `0` | Concurrent OCR worker threads (`0` = auto `min(8, CPU)`, `1` = serial); also bounds concurrent OCR-LLM calls (validated `>= 0`) |
+| `--ocr-llm / --no-ocr-llm` | flag | enabled | Consolidate a PDF's OCR candidates into an instrument list via one Copilot CLI call/file |
+| `--ocr-llm-command` | str | `copilot` | Copilot CLI command for OCR-LLM |
+| `--ocr-llm-model` | str | `""` | Model for OCR-LLM consolidation (else CLI default) |
+| `--ocr-llm-page-scope` | str | `all` | OCR-LLM page scope: `all` pages or `first` page only |
+| `--ocr-llm-timeout` | float | `300.0` | OCR-LLM Copilot CLI timeout (seconds) |
 | `--tesseract-cmd` | str | `""` | Explicit path to the Tesseract binary (else auto-detect) |
 | `--log-level` | str | `INFO` | Logging level |
 
@@ -399,6 +406,20 @@ If `--enable-image-metrics` is set but `numpy` is unavailable, the flag is auto-
 warning. Likewise, if `--ocr` is set but `pytesseract`/`Pillow` or the Tesseract binary cannot be
 resolved (or the binary is not runnable), OCR is auto-disabled with a warning and the run
 continues with null `ocr_*`/`osd_*` fields.
+
+### 8.1 Concurrency model
+
+OCR is pipelined for throughput while keeping PyMuPDF single-threaded:
+
+- Page rendering (`fitz`) always runs on the main thread; only the Tesseract passes
+  (`ocr_from_images`) are submitted to an OCR thread pool sized by `--ocr-workers`. Each file's
+  pending OCR futures are resolved after its page loop, before the document record is built.
+- The per-file OCR-LLM classification is submitted to a separate pool and awaited after the main
+  loop, so the next PDF starts OCR while prior Copilot calls are still running. Both pools are
+  bounded by `--ocr-workers`; incremental-reused files keep their prior `ocr_llm_*` fields and are
+  not re-submitted.
+- With `--ocr-workers 1` OCR runs serially (no pool); the OCR-LLM pool is still used when
+  `--ocr-llm` is enabled so classification overlaps subsequent OCR.
 
 ## 9. Failure Policy
 

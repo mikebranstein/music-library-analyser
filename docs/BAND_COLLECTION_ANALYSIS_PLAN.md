@@ -154,11 +154,24 @@ Purpose:
 - Render low-res thumbnails for visual QA and LLM prompts
 - Compute page geometry, born-digital vs scanned signals, and image-quality metrics
 - OCR scanned/no-text pages with Tesseract (OSD auto-rotate first) and record recovered text
+- Consolidate each PDF's OCR text into a normalized instrument list via one Copilot CLI call per file
 - Roll up per-page results into a per-document summary
 
 OCR is implemented via `pytesseract` + the Tesseract system binary and runs by default on pages
 flagged `needs_ocr` or `is_image_based`. It degrades gracefully (auto-disabled with a warning)
 when the toolchain is unavailable; those pages keep `needs_ocr = true` and null OCR fields.
+
+Multi-pass OCR (`--ocr-multipass`, default on) runs several passes at varied PSM + DPI, keeps
+every non-empty pass in `ocr_candidates`, and selects the highest-scoring text as `ocr_text`
+(`--single-pass-ocr` runs a single pass). A per-file OCR-LLM step (`--ocr-llm`, default on)
+sends the consolidated OCR candidates to the Copilot CLI once per PDF and records a normalized
+instrument list on the document record (`ocr_llm_status`, `ocr_llm_instruments`) for Script 03.
+
+Processing is pipelined for throughput. OCR Tesseract passes run across a thread pool while page
+rendering stays on the main thread (PyMuPDF is not thread-safe); once a file is OCR'd its Copilot
+classification is spun off asynchronously so the next PDF begins OCR while prior LLM calls finish,
+and the async results are collected at the end of the run. `--ocr-workers` sets the worker count
+(`0` = auto `min(8, CPU count)`, `1` = serial) and also bounds concurrent OCR-LLM calls.
 
 Libraries (as built):
 
@@ -178,6 +191,7 @@ Key `extracted_text.jsonl` fields for downstream use:
 - embedded_text, embedded_text_length, extraction_method
 - text_is_searchable, needs_ocr, ocr_text, ocr_confidence, ocr_word_count
 - ocr_applied, ocr_status, ocr_engine
+- ocr_candidates (per-pass `{dpi, psm, text, confidence, word_count}` from multi-pass OCR)
 - text_source (`embedded`/`ocr`/`none`) — downstream should use embedded_text when
   `text_source == embedded`, else fall back to ocr_text
 - word_count, alnum_ratio, page_text_hash (normalized-text dedupe key)
@@ -197,6 +211,7 @@ Key `documents.jsonl` fields for downstream use:
 - piece_id, piece_folder, pdf_filename, page_count
 - pages_with_text, pages_needing_ocr, ocr_fraction
 - pages_ocr_applied, pages_ocr_recovered, ocr_char_count, pages_rotated
+- ocr_llm_status, ocr_llm_instruments (per-file OCR-LLM instrument consolidation for Script 03)
 - total_text_length, total_word_count
 - pages_image_based, image_based_fraction
 - first_page_text, first_page_header_candidates
