@@ -175,6 +175,7 @@ venv.bak/
 /cache/render/*
 /cache/llm/*
 /cache/ocr_llm/*
+/cache/vision/*
 /outputs/*
 /test_fixtures/
 
