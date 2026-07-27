@@ -730,6 +730,46 @@ def test_infer_piece_stage_a_thin_text_falls_through_to_lookup():
     assert rec["ocr_source"] is None
 
 
+def test_score_type_usable_excludes_abridged_editions():
+    config = dict(expected.DEFAULT_LOOKUP_CONFIG)
+    assert expected._score_type_usable("full", config) is True
+    assert expected._score_type_usable("conductor", config) is False
+    assert expected._score_type_usable("condensed", config) is False
+    assert expected._score_type_usable("short", config) is False
+    # A missing/blank type defaults to "full" (usable).
+    assert expected._score_type_usable(None, config) is True
+
+
+def test_score_type_usable_empty_exclusion_allows_all():
+    config = {"local_score_types_excluded": []}
+    assert expected._score_type_usable("condensed", config) is True
+    assert expected._score_type_usable("conductor", config) is True
+
+
+def test_mean_score_ocr_confidence_only_counts_ocr_pages():
+    text_by_pdf = {
+        "band/p1/score.pdf": [
+            {"page_num": 1, "text_source": "ocr", "ocr_confidence": 40.0},
+            {"page_num": 2, "text_source": "ocr", "ocr_confidence": 60.0},
+            {"page_num": 3, "text_source": "embedded", "ocr_confidence": None},
+        ]
+    }
+    # Only the two OCR pages within the first 2 pages count: mean(40, 60) == 50.
+    assert expected.mean_score_ocr_confidence("band/p1/score.pdf", text_by_pdf, 2) == 50.0
+
+
+def test_mean_score_ocr_confidence_none_for_embedded_only():
+    text_by_pdf = {
+        "band/p1/score.pdf": [
+            {"page_num": 1, "text_source": "embedded", "ocr_confidence": None},
+            {"page_num": 2, "text_source": "embedded"},
+        ]
+    }
+    # Born-digital/embedded scores have no OCR confidence, so the gate does not apply.
+    assert expected.mean_score_ocr_confidence("band/p1/score.pdf", text_by_pdf, 2) is None
+
+
+
 def test_infer_piece_stage_a_no_score_defers_to_lookup():
     piece = _piece(observed=[_observed("cornet", 1)])
     parts = [

@@ -150,6 +150,13 @@ DEFAULT_LOOKUP_CONFIG: dict[str, Any] = {
     "max_score_pages": 2,
     "min_score_text_chars": 200,
     "reocr_dpi": 300,
+    # Stage A quality gates. Abridged editions (condensed/short/conductor scores) collapse parts
+    # onto shared staves and do not reliably enumerate the full instrumentation, so they are not
+    # trusted as a local authority source; and a score whose mean OCR confidence over the read
+    # pages is below the floor is treated as unreadable. Excluded or low-confidence pieces fall
+    # through to the online lookup instead of producing an unreliable local contract.
+    "local_score_types_excluded": ["condensed", "short", "conductor"],
+    "min_score_ocr_confidence": 60,
     # Remote image OCR (Stage C).
     "image_ocr_enabled": True,
     # WindRep stage (runs between local score OCR and the general online lookup). Always tried;
@@ -717,6 +724,20 @@ def find_best_score_doc(
     )
 
 
+def _score_type_usable(score_type: Any, config: dict[str, Any]) -> bool:
+    """True when a local score's type is allowed as a Stage A authority source.
+
+    Abridged editions (by default condensed/short/conductor scores) collapse multiple parts onto
+    shared staves and do not reliably enumerate the full instrumentation, so they are excluded and
+    the piece falls through to the online lookup. The excluded set is configurable via
+    ``local_score_types_excluded``; an empty/absent list allows every type.
+    """
+    excluded = {
+        str(t).strip().lower() for t in (config.get("local_score_types_excluded") or ())
+    }
+    return str(score_type or "full").strip().lower() not in excluded
+
+
 def get_extracted_score_text(
     pdf_path: str, text_by_pdf: dict[str, list[dict[str, Any]]], max_pages: int
 ) -> str:
@@ -738,6 +759,28 @@ def get_extracted_score_text(
         if text.strip():
             chunks.append(text.strip())
     return "\n".join(chunks).strip()
+
+
+def mean_score_ocr_confidence(
+    pdf_path: str, text_by_pdf: dict[str, list[dict[str, Any]]], max_pages: int
+) -> float | None:
+    """Mean OCR confidence over the leading OCR-sourced pages of a score, or None.
+
+    Only pages whose text came from OCR (``text_source == "ocr"``) with a numeric ``ocr_confidence``
+    count; born-digital/embedded pages have reliable text and no OCR confidence, so they return
+    None and the quality gate does not apply to them.
+    """
+    pages = text_by_pdf.get(pdf_path) or []
+    ordered = sorted(pages, key=lambda r: r.get("page_num", 0))[: max(1, max_pages)]
+    confidences = [
+        float(rec["ocr_confidence"])
+        for rec in ordered
+        if rec.get("text_source") == "ocr"
+        and isinstance(rec.get("ocr_confidence"), (int, float))
+    ]
+    if not confidences:
+        return None
+    return sum(confidences) / len(confidences)
 
 
 def reocr_score_pages(
@@ -1675,6 +1718,8 @@ def config_fingerprint(
         str(config.get("confidence_threshold")),
         str(config.get("max_score_pages")),
         str(config.get("min_score_text_chars")),
+        str(config.get("min_score_ocr_confidence")),
+        ",".join(str(t) for t in (config.get("local_score_types_excluded") or ())),
         str(config.get("reocr_dpi")),
         sha256_text(prompt_template),
         sha256_text(summarize_template),
@@ -2165,6 +2210,13 @@ def main(
     if local_score_enabled:
         for rec in read_jsonl(part_predictions.resolve()):
             if rec.get("is_score") and rec.get("piece_id") and rec.get("pdf_path"):
+                if not _score_type_usable(rec.get("score_type"), config):
+                    logger.info(
+                        "[%s] Skipping abridged local score %s (score_type=%s); not a reliable "
+                        "instrumentation source",
+                        rec.get("piece_id"), rec.get("pdf_path"), rec.get("score_type") or "?",
+                    )
+                    continue
                 score_docs_by_piece[rec["piece_id"]].append(rec)
 
     score_pdf_paths = {
@@ -2180,6 +2232,7 @@ def main(
     lib_root = library_root.resolve() if library_root else None
     max_score_pages = int(config.get("max_score_pages", 2) or 2)
     min_score_text = int(config.get("min_score_text_chars", 200) or 0)
+    min_score_ocr_conf = float(config.get("min_score_ocr_confidence", 0) or 0)
     reocr_dpi = int(config.get("reocr_dpi", 300) or 300)
 
     def _score_fingerprint(piece: dict[str, Any]) -> str:
@@ -2200,6 +2253,14 @@ def main(
         pdf_path = str(best.get("pdf_path") or "")
         logger.info("[%s] Selected local score %s (score_type=%s)",
                     pid, pdf_path, best.get("score_type") or "?")
+        mean_conf = mean_score_ocr_confidence(pdf_path, text_by_pdf, max_score_pages)
+        if mean_conf is not None and mean_conf < min_score_ocr_conf:
+            logger.info(
+                "[%s] Local score OCR quality too low (mean confidence %.1f < %.1f); skipping "
+                "local score and using online sources",
+                pid, mean_conf, min_score_ocr_conf,
+            )
+            return None, best
         text = get_extracted_score_text(pdf_path, text_by_pdf, max_score_pages)
         if len(text.strip()) < max(1, min_score_text):
             abs_path = (lib_root / pdf_path) if lib_root else Path(pdf_path)
