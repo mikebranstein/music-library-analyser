@@ -119,14 +119,19 @@ DEFAULT_THRESHOLDS: dict[str, Any] = {
         "max_skew_angle_deg": 3.0,
         "min_contrast_std": 22.0,
         "min_blur_variance": 90.0,
-        "min_ocr_confidence": 60.0,
+        # OCR mean word confidence is a 0..1 fraction (Script 02 divides Tesseract's 0..100 by 100).
+        # Music scans are notation-dominant, so OCR confidence runs low even when a human can read
+        # the part; only genuinely garbage OCR (bottom few percent) is treated as illegible.
+        "min_ocr_confidence": 0.30,
         "min_alnum_ratio_proxy": 0.55,
         "blank_text_density_max": 0.004,
         "noise_text_density_min": 0.55,
         "noise_max_word_count": 3,
         "penalties": {
             ISSUE_LOW_RESOLUTION: 25,
-            ISSUE_EXCESSIVE_SKEW: 15,
+            # Skew is noted for visibility but only lightly penalized: a tilted page is still
+            # readable unless content is cropped (a signal Script 02 does not yet expose).
+            ISSUE_EXCESSIVE_SKEW: 5,
             ISSUE_LOW_CONTRAST: 20,
             ISSUE_HEAVY_BLUR: 30,
             ISSUE_OCR_ILLEGIBLE: 20,
@@ -140,9 +145,9 @@ DEFAULT_THRESHOLDS: dict[str, Any] = {
     },
     "notation_source": {
         "searchable_fraction_printed": 0.5,
-        "printed_min_ocr_confidence": 80.0,
+        "printed_min_ocr_confidence": 0.80,
         "printed_min_alnum_ratio": 0.70,
-        "handwritten_max_ocr_confidence": 55.0,
+        "handwritten_max_ocr_confidence": 0.35,
         "handwritten_max_alnum_ratio": 0.45,
         "min_confidence": 0.30,
     },
@@ -220,6 +225,18 @@ def _round(value: float | None, digits: int = 2) -> float | None:
     return round(value, digits) if value is not None else None
 
 
+def _fold_skew(value: float | None) -> float | None:
+    """Reduce a skew reading to genuine skew in [-45, 45], folding out 90-degree page rotation.
+
+    A page scanned in the wrong orientation reports a skew near a multiple of 90 degrees; that is
+    rotation, not skew, and should not count as a defect. Folding modulo 90 leaves only the true
+    deviation from the nearest right angle.
+    """
+    if value is None:
+        return None
+    return ((value + 45.0) % 90.0) - 45.0
+
+
 # --- Per-page evaluation ---------------------------------------------------------------------
 
 
@@ -248,7 +265,8 @@ def evaluate_page(
         issues.append(ISSUE_LOW_RESOLUTION)
 
     skew = _num(page.get("skew_angle_deg"))
-    if skew is not None and abs(skew) > qc["max_skew_angle_deg"]:
+    genuine_skew = _fold_skew(skew)
+    if genuine_skew is not None and abs(genuine_skew) > qc["max_skew_angle_deg"]:
         issues.append(ISSUE_EXCESSIVE_SKEW)
 
     contrast = _num(page.get("contrast_std"))
@@ -389,22 +407,30 @@ def classify_notation_source(
     # OCR-based discrimination when the page carried OCR-recognized words.
     if mean_conf is not None:
         alnum_ok_printed = mean_alnum is None or mean_alnum >= ns["printed_min_alnum_ratio"]
-        alnum_ok_hand = mean_alnum is None or mean_alnum <= ns["handwritten_max_alnum_ratio"]
+        # Handwriting cannot be asserted from low OCR confidence alone: a photocopied *printed*
+        # part scores just as low as manuscript because Tesseract is reading music notation, not
+        # text. Require a corroborating low alphanumeric ratio from a real embedded text layer;
+        # when no such signal exists (a plain image scan), stay uncertain rather than guess.
+        hand_alnum_ok = mean_alnum is not None and mean_alnum <= ns["handwritten_max_alnum_ratio"]
         if mean_conf >= ns["printed_min_ocr_confidence"] and alnum_ok_printed:
-            margin = (mean_conf - ns["printed_min_ocr_confidence"]) / 20.0
+            margin = (mean_conf - ns["printed_min_ocr_confidence"]) / 0.20
             return (
                 NotationSource.PRINTED,
                 round(_clamp(0.55 + margin, min_conf, 0.9), 2),
                 evidence,
             )
-        if mean_conf <= ns["handwritten_max_ocr_confidence"] and alnum_ok_hand:
-            margin = (ns["handwritten_max_ocr_confidence"] - mean_conf) / 30.0
+        if mean_conf <= ns["handwritten_max_ocr_confidence"] and hand_alnum_ok:
+            margin = (ns["handwritten_max_ocr_confidence"] - mean_conf) / 0.30
             return (
                 NotationSource.HANDWRITTEN,
                 round(_clamp(0.5 + margin, min_conf, 0.85), 2),
                 evidence,
             )
-        return NotationSource.MIXED, round(min_conf, 2), evidence
+        return (
+            NotationSource.MIXED,
+            round(min_conf, 2),
+            [*evidence, "printed vs handwritten not determinable without vision"],
+        )
 
     # Weak fallback: only an alnum ratio is available.
     if mean_alnum is not None:
@@ -507,7 +533,7 @@ def build_quality_record(
         "mean_blur_variance": _round(_mean([_num(p.get("blur_variance")) for p in analyzed_pages])),
         "max_abs_skew_deg": _round(
             max(
-                (abs(v) for v in (_num(p.get("skew_angle_deg")) for p in analyzed_pages) if v is not None),
+                (abs(v) for v in (_fold_skew(_num(p.get("skew_angle_deg"))) for p in analyzed_pages) if v is not None),
                 default=None,
             )
             if any(_num(p.get("skew_angle_deg")) is not None for p in analyzed_pages)

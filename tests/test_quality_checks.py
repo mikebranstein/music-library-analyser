@@ -60,7 +60,7 @@ def _text(page_num: int = 1, pdf_path: str = "band/p1/cornet.pdf", **overrides: 
         "text_is_searchable": True,
         "word_count": 50,
         "alnum_ratio": 0.9,
-        "ocr_confidence": 95.0,
+        "ocr_confidence": 0.95,
         "ocr_word_count": 50,
         "page_text_hash": f"sha256:text{page_num}",
     }
@@ -128,6 +128,12 @@ def test_evaluate_page_excessive_skew():
     assert qc.ISSUE_EXCESSIVE_SKEW in qc.evaluate_page(_page(skew_angle_deg=-7.5), _text(), _thr())
 
 
+def test_evaluate_page_rotation_not_flagged_as_skew():
+    # Readings near a multiple of 90 are page rotation, not skew, and must not be flagged.
+    assert qc.ISSUE_EXCESSIVE_SKEW not in qc.evaluate_page(_page(skew_angle_deg=-90.0), _text(), _thr())
+    assert qc.ISSUE_EXCESSIVE_SKEW not in qc.evaluate_page(_page(skew_angle_deg=-88.4), _text(), _thr())
+
+
 def test_evaluate_page_low_contrast():
     assert qc.ISSUE_LOW_CONTRAST in qc.evaluate_page(_page(contrast_std=10.0), _text(), _thr())
 
@@ -138,7 +144,7 @@ def test_evaluate_page_heavy_blur():
 
 def test_evaluate_page_blank_by_flag_suppresses_ocr_issue():
     page = _page(is_blank=True)
-    text = _text(ocr_confidence=10.0, ocr_word_count=5, word_count=0)
+    text = _text(ocr_confidence=0.10, ocr_word_count=5, word_count=0)
     issues = qc.evaluate_page(page, text, _thr())
     assert qc.ISSUE_BLANK_PAGE in issues
     assert qc.ISSUE_OCR_ILLEGIBLE not in issues
@@ -157,7 +163,7 @@ def test_evaluate_page_noise_page():
 
 
 def test_evaluate_page_ocr_illegible_by_confidence():
-    text = _text(ocr_confidence=40.0, ocr_word_count=30)
+    text = _text(ocr_confidence=0.20, ocr_word_count=30)
     assert qc.ISSUE_OCR_ILLEGIBLE in qc.evaluate_page(_page(), text, _thr())
 
 
@@ -237,7 +243,7 @@ def test_classify_printed_by_searchable_fraction():
 
 def test_classify_handwritten_by_low_ocr():
     texts = [
-        _text(text_is_searchable=False, ocr_confidence=40.0, ocr_word_count=20, alnum_ratio=0.3)
+        _text(text_is_searchable=False, ocr_confidence=0.30, ocr_word_count=20, alnum_ratio=0.3)
         for _ in range(3)
     ]
     pages = [_page(page_num=i, is_image_based=True) for i in range(3)]
@@ -246,9 +252,22 @@ def test_classify_handwritten_by_low_ocr():
     assert conf >= _thr()["notation_source"]["min_confidence"]
 
 
+def test_classify_image_scan_without_text_layer_is_uncertain():
+    # A plain image scan (no embedded words -> no alnum signal) with low OCR confidence must NOT
+    # be called handwritten: a photocopied printed part looks identical here.
+    texts = [
+        _text(text_is_searchable=False, ocr_confidence=0.38, ocr_word_count=200,
+              alnum_ratio=0.0, word_count=0)
+        for _ in range(3)
+    ]
+    pages = [_page(page_num=i, is_image_based=True) for i in range(3)]
+    src, _conf, _evidence = qc.classify_notation_source(texts, pages, _thr())
+    assert src == qc.NotationSource.MIXED
+
+
 def test_classify_printed_by_high_ocr():
     texts = [
-        _text(text_is_searchable=False, ocr_confidence=90.0, ocr_word_count=40, alnum_ratio=0.85)
+        _text(text_is_searchable=False, ocr_confidence=0.90, ocr_word_count=40, alnum_ratio=0.85)
         for _ in range(3)
     ]
     pages = [_page(page_num=i, is_image_based=True) for i in range(3)]
