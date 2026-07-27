@@ -78,6 +78,10 @@ project-root/
       summary.md
       summary.json
       pieces.csv
+    review_pack/
+      review_pack.md
+      manual_review_queue.json
+      manual_review_queue.csv
   cache/
     ocr/
     llm/
@@ -684,25 +688,38 @@ Outputs:
 
 ## 4.8 Script 08: Manual Review Pack (`08_manual_review_pack.py`)
 
+Status: **implemented** (schema `1.0`). Design of record:
+`docs/SCRIPT08_MANUAL_REVIEW_PACK_IMPLEMENTATION_PLAN.md`.
+
 Purpose:
 
-Generate a prioritized queue so your manual effort targets the highest-value fixes.
+Generate a prioritized queue so your manual effort targets the highest-value fixes. This is the
+pipeline's terminal, *actionable* stage: Scripts 06/07 describe the library, Script 08 orders the
+work. It computes something new (a priority ranking) but still never re-derives
+completeness/quality/severity/reason codes — it only weights and orders the earlier facts.
 
-Queue priority formula (example):
+Queue priority formula (as implemented):
 
-`priority = missing_critical_weight + quality_penalty + low_confidence_penalty`
+`priority_score = severity_base + Σ (magnitude × named weight)`, an integer. The components and
+their default weights: missing score `40`; each missing required part `10`; each low-quality
+document `6`; each handwritten/uncertain document `4`; each low-confidence part `5`; each unmatched
+part `5`; each duplicate part `2`; each unexpected part `1`; severity base high `20` / review `8` /
+ok `0`. Every piece carries a `priority_breakdown` so each point is explainable and unit-testable,
+and the applied `weights` are echoed into `manual_review_queue.json` for reproducibility.
 
-The `low_confidence_penalty` is driven directly by Script 03's `needs_review` flag and
-`confidence_tier` (and the per-piece `needs_review_count` / `low_confidence_count` /
-`duplicate_count` rollup counts), so no re-thresholding of the raw confidence float is required.
+> `review_counts.needs_review_count` is deliberately **not** added to the score: it is a superset
+> flag count that overlaps the low-confidence / unmatched / duplicate components, so counting it
+> would double-count. Magnitudes (not booleans) drive the score, so a piece missing five required
+> parts outranks one missing a single part.
 
-Include:
+Include (per queue entry):
 
-- piece folder
-- likely missing parts
-- sample page thumbnails
+- piece folder / catalog / title
+- likely missing parts (`{label, canonical_instrument, section}` from `expected_parts` where
+  required and not present)
+- sample page thumbnail (`documents[0].thumbnail_path`)
 - reason codes
-- recommended next action
+- recommended next action(s) + `action_items[]` (reason code → named target documents/parts)
 
 > Script 06 already derives `reason_codes` and `recommended_actions` per piece (with a canonical
 > `REASON_CODE_ORDER`) and a `severity` hint. Script 08 SHOULD reuse Script 06's `reason_codes` /
@@ -728,9 +745,25 @@ Shared infrastructure (reuse from `scripts._common`; see §4.9):
 - Order the queue with `piece_sort_key` as a stable tie-breaker; escape any Markdown/HTML table
   cells with `md_cell`.
 
-Output:
+Input choice (as implemented): Script 08 reads `data/piece_reports/*.json` directly (Script 07's
+`pieces[]` index is a lightweight projection that omits `action_items`, `recommended_actions`,
+`expected_parts`, and per-document `thumbnail_path`, all of which the queue line items need). This
+keeps a single authoritative input and avoids coupling the pack to Script 07's run freshness.
 
-- CSV and optional lightweight HTML dashboard
+Output (as implemented):
+
+- `data/review_pack/manual_review_queue.json` (schema 1.0 machine-readable prioritized queue with
+  the applied `weights`; the stable contract)
+- `data/review_pack/manual_review_queue.csv` (flat per-piece prioritized export; a projection of
+  `queue[]`)
+- `data/review_pack/review_pack.md` (prioritized pack: applied weights, ranked table, per-piece
+  detail)
+
+> **Deviation from the original output list (documented):** the original plan listed "CSV and
+> optional lightweight HTML dashboard." To stay consistent with Scripts 06/07 (Markdown that renders
+> in GitHub/VS Code with no browser or extra tooling), Script 08 emits a Markdown pack instead of
+> HTML, alongside the JSON contract and the flat CSV. A `--limit` keeps only the top-N ranked pieces
+> in all outputs; `--detail-limit` bounds the per-piece detail blocks in the Markdown pack.
 
 ## 4.9 Shared Pipeline Infrastructure (`scripts/_common.py`) and Gap Analysis
 

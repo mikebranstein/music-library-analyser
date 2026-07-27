@@ -94,7 +94,10 @@ Primary outputs:
 - Emit `data/collection_reports/summary.md` (dashboard), `summary.json` (schema 1.2 aggregate, the stable contract), and `pieces.csv` (flat projection of `pieces[]`); prioritization is deferred to Script 08
 
 8. `08_manual_review_pack.py`
-- Generate prioritized review queue
+- Turn every per-piece report (`data/piece_reports/*.json`, schema 1.1) into a *prioritized* manual-review queue so limited time targets the highest-value fixes first; deterministic and fully offline. Unlike Scripts 06/07 (pure reporting) this stage computes something new — a transparent priority ordering — but still never re-derives completeness/quality/severity/reason codes and copies Script 06's `reason_codes` / `recommended_actions` / `action_items` through verbatim. Errors with a "run Script 06 first" message if there are no piece reports
+- Score each piece as a weighted sum of named magnitude weights (missing score, missing required parts, low-quality / handwritten documents, low-confidence / unmatched / duplicate parts, unexpected parts) plus a severity base; each piece carries a `priority_breakdown` so every point is explainable, and `needs_review_count` is deliberately not added (it overlaps the other components). Queue ordered by `priority_score` desc, tie-broken by `piece_sort_key`
+- Each queue entry projects the likely-missing parts (`{label, canonical_instrument, section}` from `expected_parts` where required and absent), the verbatim recommended actions + `action_items` (reason code → named target documents/parts), and a sample page thumbnail (`documents[0].thumbnail_path`); a `--limit` keeps only the top-N ranked pieces and `--detail-limit` bounds the per-piece detail blocks in the Markdown pack
+- Emit `data/review_pack/manual_review_queue.json` (schema 1.0 machine-readable queue with the applied `weights`; the stable contract), `manual_review_queue.csv` (flat prioritized projection of `queue[]`), and `review_pack.md` (prioritized pack: applied weights, ranked table, and per-piece detail). A data-health callout warns on skipped files or mixed/stale input schema versions
 
 ## Recommended Repository Structure
 
@@ -140,6 +143,10 @@ project-root/
       summary.md
       summary.json
       pieces.csv
+    review_pack/
+      review_pack.md
+      manual_review_queue.json
+      manual_review_queue.csv
   cache/
     ocr/
     llm/
