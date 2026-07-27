@@ -260,16 +260,65 @@ def test_top_missing_instruments_counts_pieces_once(tmp_path: Path) -> None:
 # --- Attention pieces -----------------------------------------------------------------------
 
 
-def test_attention_pieces_select_high_severity_ordered_by_catalog(tmp_path: Path) -> None:
+def test_attention_pieces_high_then_review_with_counts(tmp_path: Path) -> None:
     records = [
         _piece("p2", catalog_number="020", severity="high", reason_codes=["missing_score"]),
-        _piece("p1", catalog_number="010", severity="high", reason_codes=["missing_required_parts"]),
+        _piece(
+            "p1",
+            catalog_number="010",
+            severity="high",
+            reason_codes=["missing_required_parts"],
+            missing_required_count=3,
+            quality_summary={
+                "band_counts": {"good": 1, "review": 0, "poor": 1, "unknown": 0},
+                "low_quality_doc_count": 1,
+                "handwritten_doc_count": 0,
+            },
+        ),
         _piece("p3", catalog_number="005", severity="review"),
+        _piece("p4", catalog_number="004", severity="ok"),
     ]
     summary = cr.build_summary(records, "run1", "src")
     attention = summary["attention_pieces"]
-    assert [a["catalog_number"] for a in attention] == ["010", "020"]
+    # High severity first (ordered by catalog), then review; "ok" excluded.
+    assert [a["catalog_number"] for a in attention] == ["010", "020", "005"]
+    assert [a["severity"] for a in attention] == ["high", "high", "review"]
+    # Enriched magnitude counts are carried for downstream sorting.
+    assert attention[0]["missing_required_count"] == 3
+    assert attention[0]["low_quality_doc_count"] == 1
     assert attention[0]["reason_codes"] == ["missing_required_parts"]
+
+
+def test_top_missing_sections_aggregates_and_orders(tmp_path: Path) -> None:
+    def parts(*specs):
+        return [
+            {"canonical_instrument": inst, "section": section, "required": req, "present": pres}
+            for inst, section, req, pres in specs
+        ]
+
+    records = [
+        _piece(
+            "p1",
+            expected_parts=parts(
+                ("oboe", "double_reeds", True, False),
+                ("bassoon", "double_reeds", True, False),
+                ("timpani", "percussion", True, False),
+            ),
+        ),
+        _piece(
+            "p2",
+            expected_parts=parts(
+                ("snare", "percussion", True, False),
+                ("flute", "flutes", True, True),
+            ),
+        ),
+    ]
+    summary = cr.build_summary(records, "run1", "src")
+    sections = summary["top_missing_sections"]
+    # percussion missing in 2 pieces -> first; double_reeds counts the piece once despite 2 parts.
+    assert sections[0] == {"section": "percussion", "missing_piece_count": 2}
+    assert {"section": "double_reeds", "missing_piece_count": 1} in sections
+    assert all(r["section"] != "flutes" for r in sections)
 
 
 # --- Review totals --------------------------------------------------------------------------
@@ -333,7 +382,7 @@ def test_summary_record_version_and_pieces_index(tmp_path: Path) -> None:
         _piece("p1", catalog_number="010", missing_required_count=2),
     ]
     summary = cr.build_summary(records, "run1", "src")
-    assert summary["record_version"] == "1.1"
+    assert summary["record_version"] == "1.2"
     pieces = summary["pieces"]
     # Ordered by catalog number, full structured payload for Script 08.
     assert [p["catalog_number"] for p in pieces] == ["010", "020"]
@@ -418,7 +467,7 @@ def test_cli_end_to_end_writes_all_outputs(tmp_path: Path) -> None:
     )
     assert result.exit_code == 0, result.output
     summary_json = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
-    assert summary_json["record_version"] == "1.1"
+    assert summary_json["record_version"] == "1.2"
     assert summary_json["piece_count"] == 2
     assert len(summary_json["pieces"]) == 2
     assert (out_dir / "summary.md").exists()

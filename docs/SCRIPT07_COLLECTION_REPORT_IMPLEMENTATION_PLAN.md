@@ -59,7 +59,7 @@ carries a `piece_id` are aggregated.
 > queues, Script 07 emits only the flat `pieces.csv` collection export; Script 08 consumes the
 > per-piece records (and this CSV if useful) to build the prioritized `manual_review_queue`.
 
-## 5. Aggregate record (`summary.json`, schema 1.1)
+## 5. Aggregate record (`summary.json`, schema 1.2)
 
 On top of `new_record_envelope`:
 
@@ -81,8 +81,13 @@ On top of `new_record_envelope`:
 - `top_missing_instruments`: list of `{canonical_instrument, section, missing_piece_count}` for
   **required** parts that are absent, sorted by count desc then name — "what am I most often missing
   across the whole library."
-- `attention_pieces`: the high-severity pieces (catalog, title, `piece_id`, reason codes) for the
-  dashboard's call-out list, ordered by `piece_sort_key`.
+- `top_missing_sections`: coarser `{section, missing_piece_count}` companion (v1.2), counting distinct
+  pieces missing at least one required part in each section — how librarians often think ("short on
+  percussion").
+- `attention_pieces`: the pieces needing attention (v1.2: high **then** review severity), each
+  enriched with `severity`, `completeness_score`, and the magnitude counts
+  (`missing_required_count`, `low_quality_doc_count`, `handwritten_doc_count`) plus `reason_codes`,
+  ordered by severity rank (`SEVERITY_ORDER`) then `piece_sort_key`, for the dashboard call-out list.
 - `pieces`: the v1.1 **structured per-piece index** (see §11) — the stable Script 08 contract and the
   source that `pieces.csv` projects.
 
@@ -100,8 +105,10 @@ On top of `new_record_envelope`:
 6. **Severity distribution** — table over `SEVERITY_ORDER`.
 7. **Scan quality** — document-level band distribution + total low-quality / handwritten documents.
 8. **Reason-code frequency** — how many pieces hit each reason code (with the shared action string).
-9. **Top missing instruments** — the most-often-missing required instruments across the library.
-10. **Pieces needing attention** — high-severity pieces, each linking to its per-piece report
+9. **Top missing sections** — the most-often-missing required *sections* across the library (v1.2).
+10. **Top missing instruments** — the most-often-missing required instruments across the library.
+11. **Pieces needing attention** — high then review severity pieces with severity + magnitude columns
+    (missing-required / low-quality), each linking to its per-piece report
     (`../piece_reports/<piece_id>.md`).
 
 All tables escape cells with `md_cell` and use `pct` for percentages; no verdict/QA language.
@@ -148,7 +155,7 @@ all three outputs.
   thumbnails, and MAY read the collection distributions to rank a piece against library-wide
   frequencies. Script 08 owns the authoritative priority formula; Script 07's aggregates are
   descriptive, not prescriptive.
-- The `summary.json` schema (`record_version 1.1`) is the stable contract; the Markdown/CSV are
+- The `summary.json` schema (`record_version 1.2`) is the stable contract; the Markdown/CSV are
   presentation layers (`pieces.csv` is a flat projection of `pieces[]`).
 
 ## 11. v1.1 enhancements (gap analysis)
@@ -166,3 +173,14 @@ All three additions stay descriptive (no priority logic) and keep Script 07 a pu
 Tests extended in `tests/test_collection_report.py` (load skip accounting, `pieces[]` index,
 `record_version_distribution`, `completeness_score_summary`, `pieces_skipped`, and the Data-health
 Markdown note).
+## 12. v1.2 enhancements (gap analysis)
+
+Two further gaps, both descriptive (no priority logic), keeping Script 07 a pure offline aggregate.
+
+| # | Gap in v1.1 | v1.2 addition | Why it matters |
+|---|-------------|---------------|----------------|
+| 1 | Missing-parts rollup was only per-instrument; a librarian's coarser "which sections am I short on" question needed manual grouping | `top_missing_sections` (`{section, missing_piece_count}`, distinct pieces per section) + a "Top missing sections" table in `summary.md` | Matches how sets are managed/shelved; a one-glance coarse view above the instrument detail |
+| 2 | `attention_pieces` was high-severity only and carried no magnitudes, so a consumer could not sort within the list or see review-tier pieces without re-opening records | `attention_pieces` now spans high **then** review severity and carries `severity` + magnitude counts (`missing_required_count`, `low_quality_doc_count`, `handwritten_doc_count`, `completeness_score`); `summary.md` gains Severity / Missing-req. / Low-qual columns | Script 08 (and the dashboard) can rank the call-out list directly; review-tier pieces are no longer invisible |
+
+`RECORD_VERSION` bumped `1.1` → `1.2`. Tests updated: `attention_pieces` high-then-review ordering
+with enriched counts, and `top_missing_sections` aggregation/ordering.

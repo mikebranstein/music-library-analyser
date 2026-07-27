@@ -40,7 +40,7 @@ from scripts._common import (
     setup_logging,
 )
 
-RECORD_VERSION = "1.1"
+RECORD_VERSION = "1.2"
 
 # The Script 06 per-piece schema this aggregator is written against. Records at any other version
 # are still counted, but their newer/older fields may be missing, so aggregates from them can be
@@ -167,19 +167,59 @@ def _top_missing_instruments(records: list[dict[str, Any]]) -> list[dict[str, An
     return rows
 
 
+def _top_missing_sections(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Aggregate missing *required* parts across the collection by section only.
+
+    Coarser companion to ``_top_missing_instruments`` matching how librarians often think ("I'm short
+    on percussion"). Counts distinct pieces missing at least one required part in each section.
+    """
+    tally: dict[str, int] = {}
+    for rec in records:
+        seen: set[str] = set()
+        for part in rec.get("expected_parts") or []:
+            if part.get("required") and not part.get("present"):
+                seen.add(part.get("section") or "")
+        for section in seen:
+            tally[section] = tally.get(section, 0) + 1
+    rows = [{"section": section, "missing_piece_count": count} for section, count in tally.items()]
+    rows.sort(key=lambda r: (-r["missing_piece_count"], r["section"]))
+    return rows
+
+
 def _attention_pieces(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """High-severity pieces for the dashboard call-out list, ordered by catalog."""
-    high = [rec for rec in records if rec.get("severity") == Severity.HIGH]
-    high.sort(key=piece_sort_key)
-    return [
-        {
-            "piece_id": rec.get("piece_id"),
-            "catalog_number": rec.get("catalog_number"),
-            "piece_title_guess": rec.get("piece_title_guess") or rec.get("piece_folder"),
-            "reason_codes": rec.get("reason_codes") or [],
-        }
-        for rec in high
-    ]
+    """Pieces needing attention (high then review severity) for the dashboard call-out list.
+
+    Enriched with the magnitude counts so a consumer (or Script 08) can sort within a severity tier
+    without re-opening the per-piece report. Ordered by severity rank (`SEVERITY_ORDER`) then
+    `piece_sort_key`.
+    """
+    ranked = [rec for rec in records if rec.get("severity") in (Severity.HIGH, Severity.REVIEW)]
+
+    def _sort_key(rec: dict[str, Any]) -> tuple[Any, ...]:
+        severity = rec.get("severity")
+        severity_rank = (
+            SEVERITY_ORDER.index(severity) if severity in SEVERITY_ORDER else len(SEVERITY_ORDER)
+        )
+        return (severity_rank, *piece_sort_key(rec))
+
+    ranked.sort(key=_sort_key)
+    result: list[dict[str, Any]] = []
+    for rec in ranked:
+        quality = rec.get("quality_summary") or {}
+        result.append(
+            {
+                "piece_id": rec.get("piece_id"),
+                "catalog_number": rec.get("catalog_number"),
+                "piece_title_guess": rec.get("piece_title_guess") or rec.get("piece_folder"),
+                "severity": rec.get("severity"),
+                "completeness_score": rec.get("completeness_score"),
+                "missing_required_count": int(rec.get("missing_required_count") or 0),
+                "low_quality_doc_count": int(quality.get("low_quality_doc_count") or 0),
+                "handwritten_doc_count": int(quality.get("handwritten_doc_count") or 0),
+                "reason_codes": rec.get("reason_codes") or [],
+            }
+        )
+    return result
 
 
 def _record_version_distribution(records: list[dict[str, Any]]) -> dict[str, int]:
@@ -297,6 +337,7 @@ def build_summary(
     record["quality_band_distribution"] = _sum_band_counts(records)
     record["reason_code_frequency"] = _reason_code_frequency(records)
     record["review_totals"] = _review_totals(records)
+    record["top_missing_sections"] = _top_missing_sections(records)
     record["top_missing_instruments"] = _top_missing_instruments(records)
     record["attention_pieces"] = _attention_pieces(records)
     record["pieces"] = _pieces_index(records)
@@ -414,6 +455,19 @@ def render_summary(rec: dict[str, Any], piece_reports_dirname: str) -> str:
         out.append(f"| {code} | {count} | {md_cell(REASON_ACTIONS.get(code, ''))} |")
     out.append("")
 
+    # Top missing sections (coarse) then instruments (fine).
+    out.append("## Top missing required sections")
+    out.append("")
+    sections = rec.get("top_missing_sections") or []
+    if sections:
+        out.append("| Section | Pieces missing |")
+        out.append("| --- | ---: |")
+        for row in sections:
+            out.append(f"| {md_cell(row.get('section'))} | {row.get('missing_piece_count')} |")
+    else:
+        out.append("_No missing required parts across the collection._")
+    out.append("")
+
     # Top missing instruments.
     out.append("## Top missing required instruments")
     out.append("")
@@ -435,16 +489,21 @@ def render_summary(rec: dict[str, Any], piece_reports_dirname: str) -> str:
     out.append("")
     attention = rec.get("attention_pieces") or []
     if attention:
-        out.append("| Catalog | Piece | Reason codes | Report |")
-        out.append("| --- | --- | --- | --- |")
+        out.append("| Catalog | Piece | Severity | Missing req. | Low-qual | Reason codes | Report |")
+        out.append("| --- | --- | --- | ---: | ---: | --- | --- |")
         for piece in attention:
             catalog = piece.get("catalog_number") or ""
             name = md_cell(piece.get("piece_title_guess"))
+            severity = piece.get("severity") or ""
+            missing_req = int(piece.get("missing_required_count") or 0)
+            low_qual = int(piece.get("low_quality_doc_count") or 0)
             codes = md_cell(", ".join(piece.get("reason_codes") or []))
             link = f"[report]({piece_reports_dirname}/{piece.get('piece_id')}.md)"
-            out.append(f"| {catalog} | {name} | {codes} | {link} |")
+            out.append(
+                f"| {catalog} | {name} | {severity} | {missing_req} | {low_qual} | {codes} | {link} |"
+            )
     else:
-        out.append("_No high-severity pieces._")
+        out.append("_No pieces need attention._")
     out.append("")
 
     return "\n".join(out) + "\n"

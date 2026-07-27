@@ -89,9 +89,9 @@ Primary outputs:
 7. `07_collection_report.py`
 - Aggregate every per-piece report (`data/piece_reports/*.json`, schema 1.1) into one collection-wide view; deterministic and fully offline (recomputes nothing — only counts / groups / orders Script 06's facts). Errors with a "run Script 06 first" message if there are no piece reports
 - Headline totals (complete sets, missing required parts, missing score, needs-review, high-severity, processing errors, total / low-quality / handwritten documents) plus distributions over completeness, lookup status, and severity, and a document quality-band distribution summed from each piece's `quality_summary.band_counts`
-- Reason-code frequency (pieces exhibiting each code, with its action string), top missing *required* instruments across the library (by `canonical_instrument` + `section`), summed review counts, and a high-severity `attention_pieces` list linking each piece's report
+- Reason-code frequency (pieces exhibiting each code, with its action string), top missing *required* sections and instruments across the library, summed review counts, and a `attention_pieces` list (high then review severity, with severity + magnitude columns) linking each piece's report
 - Emit a structured `pieces[]` index in `summary.json` (per-piece magnitude counts + `reason_codes[]`) so Script 08 can prioritize from one stable file; a `completeness_score_summary` KPI (mean / median / range); and a `record_version_distribution` + `pieces_skipped` data-health guard that warns on mixed/stale schema versions or skipped files
-- Emit `data/collection_reports/summary.md` (dashboard), `summary.json` (schema 1.1 aggregate, the stable contract), and `pieces.csv` (flat projection of `pieces[]`); prioritization is deferred to Script 08
+- Emit `data/collection_reports/summary.md` (dashboard), `summary.json` (schema 1.2 aggregate, the stable contract), and `pieces.csv` (flat projection of `pieces[]`); prioritization is deferred to Script 08
 
 8. `08_manual_review_pack.py`
 - Generate prioritized review queue

@@ -611,7 +611,7 @@ Outputs:
 
 ## 4.7 Script 07: Collection Report (`07_collection_report.py`)
 
-**Status: implemented (schema 1.1).** See
+**Status: implemented (schema 1.2).** See
 [`docs/SCRIPT07_COLLECTION_REPORT_IMPLEMENTATION_PLAN.md`](SCRIPT07_COLLECTION_REPORT_IMPLEMENTATION_PLAN.md)
 for the full design.
 
@@ -642,6 +642,14 @@ Metrics (all present in `summary.json`):
   each piece's `expected_parts[]` where `required` and not `present`; counts distinct pieces)
 - summed review counts and the high-severity `attention_pieces` list (ordered by `piece_sort_key`)
 
+Schema 1.2 additions (see the plan doc §12 gap analysis) — still descriptive, no priority logic:
+
+- `top_missing_sections`: coarser `{section, missing_piece_count}` companion to the instrument
+  rollup, matching how librarians manage sets ("short on percussion")
+- `attention_pieces` now spans high **then** review severity and carries `severity` +
+  magnitude counts (`missing_required_count`, `low_quality_doc_count`, `handwritten_doc_count`,
+  `completeness_score`) so the call-out list can be sorted without re-opening records
+
 Schema 1.1 additions (see the plan doc §11 gap analysis) — all still descriptive, no priority logic:
 
 - `pieces[]`: a structured per-piece index in `summary.json` (severity, tiers, `completeness_score`,
@@ -667,7 +675,7 @@ uniformity; the aggregate is always fully recomputed), `--log-level`.
 Outputs:
 
 - `data/collection_reports/summary.md` (collection dashboard, linking each attention piece's report)
-- `data/collection_reports/summary.json` (schema 1.1 machine-readable aggregate; the stable contract)
+- `data/collection_reports/summary.json` (schema 1.2 machine-readable aggregate; the stable contract)
 - `data/collection_reports/pieces.csv` (flat per-piece export; a projection of `summary.json` `pieces[]`)
 
 > Deviation from the original plan: the third output is a flat `pieces.csv` rather than a
