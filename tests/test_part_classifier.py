@@ -103,6 +103,42 @@ def test_reversed_word_order_eb_clarinets():
     assert plain == "clarinet"
 
 
+def test_guitar_part_is_classified():
+    # Regression: "Guitar (Opt)" must classify as guitar, not fall through unmatched
+    # (which previously produced a false "missing guitar" report downstream).
+    lexicon, compiled = _lexicon_and_compiled()
+    canonical, alias, _ = classifier.match_instrument(
+        classifier.normalize("Guitar (Opt)"), compiled
+    )
+    assert canonical == "guitar"
+    assert alias == "guitar"
+    assert lexicon["families"]["guitar"] == "strings"
+
+
+def test_expanded_lexicon_disambiguation():
+    # New rhythm-section / auxiliary-percussion entries must not shadow existing instruments,
+    # and multi-word names must win over their shorter substrings (longest-alias-wins).
+    _, compiled = _lexicon_and_compiled()
+    cases = {
+        "Bass Guitar": "bass_guitar",
+        "Electric Bass": "bass_guitar",
+        "Eb Bass": "tuba",
+        "Bass Flute": "bass_flute",
+        "Contra Bassoon": "contrabassoon",
+        "Bassoon": "bassoon",
+        "Violoncello": "cello",
+        "Wind Chimes": "wind_chimes",
+        "Finger Cymbals": "finger_cymbals",
+        "Tenor Drum": "tenor_drum",
+        "Gong": "tam_tam",
+        "Piano": "piano",
+        "Harp": "harp",
+    }
+    for label, expected in cases.items():
+        canonical, _, _ = classifier.match_instrument(classifier.normalize(label), compiled)
+        assert canonical == expected, f"{label!r} classified as {canonical!r}, expected {expected!r}"
+
+
 def test_clef_and_transposition_and_index():
     lexicon, _ = _lexicon_and_compiled()
     assert classifier.extract_clef(classifier.normalize("Baritone (BC)"), lexicon) == "bass"

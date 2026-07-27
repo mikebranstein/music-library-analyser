@@ -47,6 +47,52 @@ families:
   tambourine: percussion
   percussion: percussion
   drum_set: percussion
+  # --- Strings (bowed, fretted, plucked) ---
+  violin: strings
+  viola: strings
+  cello: strings
+  guitar: strings
+  bass_guitar: strings
+  harp: strings
+  # --- Keyboards ---
+  piano: keyboard
+  keyboard: keyboard
+  celesta: keyboard
+  organ: keyboard
+  # --- Voice ---
+  voice: voice
+  # --- Additional woodwinds ---
+  alto_flute: woodwind
+  bass_flute: woodwind
+  contrabassoon: woodwind
+  sopranino_sax: woodwind
+  # --- Additional brass ---
+  mellophone: brass
+  # --- Auxiliary / world percussion ---
+  triangle: percussion
+  woodblock: percussion
+  temple_blocks: percussion
+  claves: percussion
+  maracas: percussion
+  cowbell: percussion
+  guiro: percussion
+  vibraslap: percussion
+  tom_toms: percussion
+  bongos: percussion
+  congas: percussion
+  timbales: percussion
+  tenor_drum: percussion
+  field_drum: percussion
+  sleigh_bells: percussion
+  wind_chimes: percussion
+  mark_tree: percussion
+  tam_tam: percussion
+  ratchet: percussion
+  slapstick: percussion
+  crotales: percussion
+  finger_cymbals: percussion
+  anvil: percussion
+  brake_drum: percussion
 
 # canonical instrument key -> aliases (order does not matter; the classifier
 # sorts all aliases by length descending so specific names win).
@@ -87,6 +133,46 @@ instruments:
   tambourine: ["tambourine", "tambourines", "tambo", "tamb"]
   percussion: ["percussion", "perc", "battery", "aux percussion", "auxiliary percussion"]
   drum_set: ["drum set", "drum kit", "drums", "trap set", "trap kit", "drumset", "drumkit", "trapset", "trapkit", "kit"]
+  violin: ["violin", "violins", "vln", "vn"]
+  viola: ["viola", "violas", "vla"]
+  cello: ["cello", "cellos", "violoncello", "vc", "vcl"]
+  guitar: ["guitar", "gtr", "electric guitar", "acoustic guitar", "rhythm guitar", "classical guitar", "nylon string guitar"]
+  bass_guitar: ["bass guitar", "electric bass", "elec bass", "bass gtr"]
+  harp: ["harp", "harps"]
+  piano: ["piano", "pianoforte", "pno"]
+  keyboard: ["keyboard", "electronic keyboard", "synthesizer", "synth"]
+  celesta: ["celesta", "celeste"]
+  organ: ["organ", "pipe organ", "electric organ", "hammond organ"]
+  voice: ["voice", "vocals", "vocal", "choir", "chorus", "solo voice"]
+  alto_flute: ["alto flute", "alt flute"]
+  bass_flute: ["bass flute"]
+  contrabassoon: ["contrabassoon", "contra bassoon", "double bassoon"]
+  sopranino_sax: ["sopranino saxophone", "sopranino sax"]
+  mellophone: ["mellophone", "mello"]
+  triangle: ["triangle", "triangles"]
+  woodblock: ["woodblock", "woodblocks", "wood block", "wood blocks"]
+  temple_blocks: ["temple blocks", "temple block"]
+  claves: ["claves", "clave"]
+  maracas: ["maracas", "maraca"]
+  cowbell: ["cowbell", "cowbells", "cow bell"]
+  guiro: ["guiro", "guiros"]
+  vibraslap: ["vibraslap", "vibra slap"]
+  tom_toms: ["tom toms", "tom-toms", "tomtoms", "toms", "concert toms", "roto toms", "roto-toms"]
+  bongos: ["bongos", "bongo"]
+  congas: ["congas", "conga"]
+  timbales: ["timbales"]
+  tenor_drum: ["tenor drum", "tenor drums"]
+  field_drum: ["field drum", "field drums"]
+  sleigh_bells: ["sleigh bells", "sleigh bell", "sleighbells"]
+  wind_chimes: ["wind chimes", "wind chime"]
+  mark_tree: ["mark tree", "mark-tree", "marktree", "bell tree"]
+  tam_tam: ["tam tam", "tam-tam", "tamtam", "gong", "gongs"]
+  ratchet: ["ratchet", "ratchets"]
+  slapstick: ["slapstick", "slap stick", "whip"]
+  crotales: ["crotales", "antique cymbals"]
+  finger_cymbals: ["finger cymbals", "finger cymbal"]
+  anvil: ["anvil", "anvils"]
+  brake_drum: ["brake drum", "brake drums"]
 
 # token (normalized, lowercase) -> clef
 clef_markers:
@@ -123,16 +209,18 @@ separators: ["-", "_"]
 # coarser grouping than family (section -> canonical instruments); used for part_sort_key
 # context and downstream section rollups. Falls back to family for unmapped instruments.
 sections:
-  flutes: ["piccolo", "flute"]
-  double_reeds: ["oboe", "english_horn", "bassoon"]
+  flutes: ["piccolo", "flute", "alto_flute", "bass_flute"]
+  double_reeds: ["oboe", "english_horn", "bassoon", "contrabassoon"]
   clarinets: ["eb_clarinet", "clarinet", "alto_clarinet", "bass_clarinet", "contrabass_clarinet"]
-  saxophones: ["soprano_sax", "alto_sax", "tenor_sax", "baritone_sax", "bass_sax"]
+  saxophones: ["sopranino_sax", "soprano_sax", "alto_sax", "tenor_sax", "baritone_sax", "bass_sax"]
   cornets_trumpets: ["soprano_cornet", "cornet", "trumpet", "flugelhorn"]
-  horns: ["horn", "tenor_horn"]
+  horns: ["horn", "tenor_horn", "mellophone"]
   low_brass: ["trombone", "bass_trombone", "baritone_horn", "euphonium"]
   tubas: ["tuba"]
-  strings: ["string_bass"]
-  percussion: ["timpani", "mallet_percussion", "snare_drum", "bass_drum", "cymbals", "castanets", "tambourine", "percussion", "drum_set"]
+  strings: ["string_bass", "violin", "viola", "cello", "guitar", "bass_guitar", "harp"]
+  keyboards: ["piano", "keyboard", "celesta", "organ"]
+  voices: ["voice"]
+  percussion: ["timpani", "mallet_percussion", "snare_drum", "bass_drum", "cymbals", "castanets", "tambourine", "percussion", "drum_set", "triangle", "woodblock", "temple_blocks", "claves", "maracas", "cowbell", "guiro", "vibraslap", "tom_toms", "bongos", "congas", "timbales", "tenor_drum", "field_drum", "sleigh_bells", "wind_chimes", "mark_tree", "tam_tam", "ratchet", "slapstick", "crotales", "finger_cymbals", "anvil", "brake_drum"]
 
 # legacy keys retained for backward compatibility with earlier drafts
 part_patterns: {}
