@@ -72,7 +72,7 @@ from scripts._common import (
     utc_now_iso,
 )
 
-RECORD_VERSION = "2.3"
+RECORD_VERSION = "2.4"
 EXTRACTION_METHOD = "pymupdf_embedded"
 
 CHECKPOINT_FILENAME = ".extraction_checkpoint.json"
@@ -983,6 +983,228 @@ def consolidate_part_instruments(
     return result
 
 
+# --- Notation-source vision review (LLM image classification) ---------------------------------
+# Deterministic OCR/geometry signals cannot separate a genuinely handwritten part from a readable
+# but noisy printed photocopy (OCR confidence over music notation tracks notation density, not
+# human legibility). This optional pass shows the rendered page image(s) to the Copilot CLI, which
+# reports the notation source (printed/handwritten/mixed) and a legibility judgment. It reuses the
+# OCR-LLM subprocess pattern but is cached separately (keyed by thumbnail hash, not OCR text) so a
+# vision-prompt change never forces re-OCR and re-rendering never re-invokes vision.
+
+_VISION_PROMPT_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "config" / "llm_prompts" / "classify_notation_source.txt"
+)
+VISION_RESULT_START = "<<<VISION_JSON>>>"
+VISION_RESULT_END = "<<<END_VISION_JSON>>>"
+VISION_PROMPT_VERSION = "1"  # bump to invalidate cached vision results when the prompt changes
+VISION_NOTATION_VALUES = {"printed_original", "handwritten", "mixed_or_uncertain"}
+VISION_LEGIBILITY_VALUES = {"good", "fair", "poor"}
+
+DEFAULT_VISION_PROMPT = (
+    "You are a music librarian assistant with expert score-reading skills. You are shown one or\n"
+    "more rendered page images from a SINGLE instrumental PART PDF in a concert-band library. Look\n"
+    "at the IMAGE(S) only -- do not run OCR, transcribe notes, or search the web.\n\n"
+    "Part context:\n"
+    "- File name: {pdf_filename}\n"
+    "- Source folder: {piece_folder}\n\n"
+    "Image file path(s) to open and inspect (absolute paths on this machine):\n"
+    "{image_paths}\n\n"
+    "Judge two things from the image(s):\n"
+    "1) notation_source: printed_original, handwritten, or mixed_or_uncertain (hand-copied\n"
+    "   manuscript counts as handwritten even when the staff lines are pre-printed).\n"
+    "2) legibility: good, fair, or poor -- can a human musician actually read and play this page?\n"
+    "Do not penalize legibility for mere page skew or rotation if the content is readable.\n\n"
+    "Respond with exactly one JSON object between the sentinel lines and nothing else:\n"
+    f"{VISION_RESULT_START}\n"
+    '{{"notation_source": "printed_original", "legibility": "good", "confidence": 0.0, "notes": ""}}\n'
+    f"{VISION_RESULT_END}\n"
+)
+
+_VISION_TEMPLATE: str | None = None
+
+
+@dataclass(frozen=True)
+class VisionConfig:
+    """Resolved settings for the notation-source vision review."""
+
+    enabled: bool = False
+    command: str = "copilot"
+    model: str = ""
+    timeout_seconds: float = 300.0
+    page_scope: str = "first"  # "first" | "all"
+
+
+def _vision_template() -> str:
+    """The vision prompt template (file override, else the built-in)."""
+    global _VISION_TEMPLATE
+    if _VISION_TEMPLATE is None:
+        template = DEFAULT_VISION_PROMPT
+        if _VISION_PROMPT_PATH.exists():
+            try:
+                template = _VISION_PROMPT_PATH.read_text(encoding="utf-8")
+            except OSError as exc:  # pragma: no cover - best effort
+                logger.warning("Failed to read %s (%s); using built-in prompt.",
+                               _VISION_PROMPT_PATH, exc)
+        _VISION_TEMPLATE = template
+    return _VISION_TEMPLATE
+
+
+def build_vision_prompt(template: str, item: InventoryItem, image_paths: list[str]) -> str:
+    """Fill the vision prompt placeholders."""
+    result = template
+    for key, value in {
+        "pdf_filename": item.pdf_filename,
+        "piece_folder": item.piece_folder,
+        "image_paths": "\n".join(image_paths),
+    }.items():
+        result = result.replace("{" + key + "}", str(value))
+    return result
+
+
+def parse_vision_response(stdout: str) -> dict[str, Any]:
+    """Extract the single JSON object from the CLI stdout; raises ValueError when absent."""
+    text = stdout or ""
+    if VISION_RESULT_START in text and VISION_RESULT_END in text:
+        start = text.index(VISION_RESULT_START) + len(VISION_RESULT_START)
+        end = text.index(VISION_RESULT_END, start)
+        candidate = text[start:end].strip().strip("`").strip()
+        return json.loads(candidate)
+    first = text.find("{")
+    last = text.rfind("}")
+    if first == -1 or last <= first:
+        raise ValueError("No JSON object found in vision response.")
+    return json.loads(text[first:last + 1])
+
+
+def run_vision_llm(prompt: str, cfg: VisionConfig) -> dict[str, Any]:
+    """Invoke the Copilot CLI headlessly for one vision review and return the parsed JSON.
+
+    The image path(s) are embedded in the prompt; the agent opens them via its file tools, so the
+    same flag set as the OCR-LLM consolidation applies.
+    """
+    resolved = shutil.which(cfg.command)
+    if not resolved:
+        raise FileNotFoundError(f"Copilot CLI '{cfg.command}' not found on PATH.")
+    args = [
+        resolved, "-p", prompt,
+        "--allow-all-tools", "--allow-all-urls", "--no-color", "--no-ask-user",
+        "-s", "--log-level", "none",
+    ]
+    if cfg.model:
+        args += ["--model", cfg.model]
+    proc = subprocess.run(
+        args, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=cfg.timeout_seconds, check=False,
+    )
+    if proc.returncode != 0:
+        tail = (proc.stdout or proc.stderr or "").strip()[-500:]
+        raise RuntimeError(f"Copilot CLI exited {proc.returncode}: {tail}")
+    return parse_vision_response(proc.stdout)
+
+
+def vision_cache_path(
+    cache_dir: Path, item: InventoryItem, cfg: VisionConfig, thumb_hash: str
+) -> Path:
+    """Content- and config-addressed cache path for a document's vision result."""
+    key = sha256_text(
+        f"{item.pdf_path}|{item.file_fingerprint}|{cfg.model}|{cfg.page_scope}|"
+        f"{VISION_PROMPT_VERSION}|{thumb_hash}"
+    )
+    prefix = hash_hex(key)[:12]
+    return cache_dir / "vision" / f"{item.piece_id}_{prefix}.json"
+
+
+def _empty_vision_result(status: str) -> dict[str, Any]:
+    return {
+        "vision_status": status,
+        "vision_notation_source": None,
+        "vision_legibility": None,
+        "vision_confidence": None,
+        "vision_notes": "",
+    }
+
+
+def _select_vision_thumbnails(
+    page_records: list[dict[str, Any]], page_scope: str
+) -> list[dict[str, Any]]:
+    """Return the page records whose thumbnails feed the vision call (page 1, or all)."""
+    with_thumbs = [p for p in page_records if p.get("thumbnail_path")]
+    ordered = sorted(with_thumbs, key=lambda p: p.get("page_num", 0))
+    if page_scope == "all":
+        return ordered
+    return ordered[:1]
+
+
+def classify_notation_vision(
+    item: InventoryItem,
+    page_records: list[dict[str, Any]],
+    cache_dir: Path,
+    workspace_root: Path,
+    cfg: VisionConfig,
+    llm_fn: Callable[[str, VisionConfig], dict[str, Any]] = run_vision_llm,
+) -> dict[str, Any] | None:
+    """Classify a document's notation source + legibility from its rendered page image(s).
+
+    Returns None when no page thumbnail is available (so no LLM call is made). Otherwise returns the
+    vision record (cached to disk on success). Never raises.
+    """
+    selected = _select_vision_thumbnails(page_records, cfg.page_scope)
+    if not selected:
+        return None
+
+    thumb_hash = sha256_text(
+        "|".join(str(p.get("thumbnail_hash") or p.get("thumbnail_path")) for p in selected)
+    )
+    cache_path = vision_cache_path(cache_dir, item, cfg, thumb_hash)
+    cached = read_json(cache_path)
+    if cached is not None:
+        return cached
+
+    image_paths = [
+        str((workspace_root / str(p.get("thumbnail_path"))).resolve()) for p in selected
+    ]
+    prompt = build_vision_prompt(_vision_template(), item, image_paths)
+    logger.info("Vision: classifying notation source for %s", item.pdf_path)
+    try:
+        parsed = llm_fn(prompt, cfg)
+    except Exception as exc:
+        logger.warning("Vision review failed for %s: %s", item.pdf_path, exc)
+        return _empty_vision_result(f"error: {exc}")
+
+    result = _empty_vision_result("success")
+    if isinstance(parsed, dict):
+        source = str(parsed.get("notation_source") or "").strip().lower()
+        legibility = str(parsed.get("legibility") or "").strip().lower()
+        result["vision_notation_source"] = source if source in VISION_NOTATION_VALUES else None
+        result["vision_legibility"] = (
+            legibility if legibility in VISION_LEGIBILITY_VALUES else None
+        )
+        result["vision_confidence"] = parsed.get("confidence")
+        result["vision_notes"] = str(parsed.get("notes") or "")
+    logger.info(
+        "Vision: %s -> %s / %s",
+        item.pdf_path,
+        result["vision_notation_source"] or "unknown",
+        result["vision_legibility"] or "unknown",
+    )
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(cache_path, result)
+    except Exception:  # pragma: no cover - cache is best-effort
+        logger.debug("Failed to write vision cache for %s", item.pdf_path)
+    return result
+
+
+def apply_vision_fields(doc_record: dict[str, Any], vision: dict[str, Any]) -> None:
+    """Patch the vision_* fields of a document record from a vision result."""
+    doc_record["vision_status"] = vision.get("vision_status", "not_applied")
+    doc_record["vision_notation_source"] = vision.get("vision_notation_source")
+    doc_record["vision_legibility"] = vision.get("vision_legibility")
+    doc_record["vision_confidence"] = vision.get("vision_confidence")
+    doc_record["vision_notes"] = vision.get("vision_notes", "")
+
+
 def analyze_page_geometry(page: Any) -> dict[str, Any]:
     """Page size in points, rotation, orientation, and aspect ratio."""
     rect = page.rect
@@ -1222,6 +1444,11 @@ def build_document_record(
         "ocr_llm_raw": (ocr_llm or {}).get("ocr_llm_raw", []),
         "ocr_llm_confidence": (ocr_llm or {}).get("ocr_llm_confidence"),
         "ocr_llm_notes": (ocr_llm or {}).get("ocr_llm_notes", ""),
+        "vision_status": "not_applied",
+        "vision_notation_source": None,
+        "vision_legibility": None,
+        "vision_confidence": None,
+        "vision_notes": "",
         "processing_status": status,
         "processing_timestamp": utc_now_iso(),
     }
@@ -1975,6 +2202,18 @@ def main(
         "all", help="OCR-LLM page scope: 'all' pages or 'first' page only"
     ),
     ocr_llm_timeout: float = typer.Option(300.0, help="OCR-LLM Copilot CLI timeout (seconds)"),
+    use_vision: bool = typer.Option(
+        True,
+        "--use-vision/--no-vision",
+        help="Classify notation source (printed/handwritten) from the page image via the Copilot "
+        "CLI (scanned documents only)",
+    ),
+    vision_command: str = typer.Option("copilot", help="Copilot CLI command for the vision review"),
+    vision_model: str = typer.Option("", help="Model for the vision review (else CLI default)"),
+    vision_page_scope: str = typer.Option(
+        "first", help="Vision page scope: 'first' page only or 'all' pages"
+    ),
+    vision_timeout: float = typer.Option(300.0, help="Vision Copilot CLI timeout (seconds)"),
     tesseract_cmd: str = typer.Option(
         "", help="Path to the tesseract binary (else PATH/common dirs are searched)"
     ),
@@ -1995,6 +2234,10 @@ def main(
     ocr_llm_page_scope = (ocr_llm_page_scope or "all").lower().strip()
     if ocr_llm_page_scope not in {"all", "first"}:
         raise typer.BadParameter("ocr-llm-page-scope must be 'all' or 'first'")
+
+    vision_page_scope = (vision_page_scope or "first").lower().strip()
+    if vision_page_scope not in {"all", "first"}:
+        raise typer.BadParameter("vision-page-scope must be 'all' or 'first'")
 
     setup_logging(log_level)
 
@@ -2067,6 +2310,27 @@ def main(
         logger.info(
             "OCR-LLM consolidation enabled (command=%s, model=%s, page_scope=%s)",
             ocr_llm_command, ocr_llm_model or "CLI default", ocr_llm_page_scope,
+        )
+
+    if use_vision and not enable_rendering:
+        logger.warning(
+            "Vision review requires page rendering, which is disabled; disabling vision review."
+        )
+        use_vision = False
+    if use_vision and not shutil.which(vision_command):
+        logger.warning(
+            "Copilot CLI '%s' not found on PATH; disabling vision review.",
+            vision_command,
+        )
+        use_vision = False
+    vision_config = VisionConfig(
+        enabled=use_vision, command=vision_command, model=vision_model,
+        timeout_seconds=vision_timeout, page_scope=vision_page_scope,
+    )
+    if use_vision:
+        logger.info(
+            "Vision review enabled (command=%s, model=%s, page_scope=%s)",
+            vision_command, vision_model or "CLI default", vision_page_scope,
         )
 
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -2171,14 +2435,29 @@ def main(
     llm_executor = (
         ThreadPoolExecutor(max_workers=ocr_workers) if ocr_llm_config.enabled else None
     )
+    vision_executor = (
+        ThreadPoolExecutor(max_workers=ocr_workers) if vision_config.enabled else None
+    )
     if ocr_executor is not None:
         logger.info("OCR parallelism enabled: %d worker threads", ocr_workers)
     if llm_executor is not None:
         # Warm the shared taxonomy/prompt caches once so worker threads don't race to build them.
         _ocr_llm_allowed_instruments()
         _ocr_llm_template()
+    if vision_executor is not None:
+        _vision_template()
     # (LLM future, its document record) pairs to resolve and patch after the OCR loop.
     llm_futures: list[tuple[Future, dict[str, Any]]] = []
+    # (Vision future, its document record) pairs to resolve and patch after the loop.
+    vision_futures: list[tuple[Future, dict[str, Any]]] = []
+
+    def _doc_is_scanned(doc_record: dict[str, Any]) -> bool:
+        # Born-digital text PDFs are already, correctly, printed originals; vision only adds value
+        # for scanned/image-based documents where handwriting is possible.
+        return bool(
+            (doc_record.get("pages_image_based") or 0) > 0
+            or (doc_record.get("pages_needing_ocr") or 0) > 0
+        )
 
     for idx, item in enumerate(items, start=1):
         if item.piece_folder != current_folder:
@@ -2205,7 +2484,22 @@ def main(
             text_records.extend(prior_text_by_path[item.pdf_path])
             page_records.extend(prior_pages_by_path.get(item.pdf_path, []))
             if item.pdf_path in prior_documents_by_path:
-                document_records.append(prior_documents_by_path[item.pdf_path])
+                reused_doc = prior_documents_by_path[item.pdf_path]
+                document_records.append(reused_doc)
+                # Enabling vision on an already-extracted library should add the vision signal to
+                # reused documents without re-OCR: fire only when it's a scanned doc still missing a
+                # successful vision result (the disk cache prevents rework across runs).
+                if (
+                    vision_executor is not None
+                    and _doc_is_scanned(reused_doc)
+                    and reused_doc.get("vision_status") != "success"
+                ):
+                    vfut = vision_executor.submit(
+                        classify_notation_vision, item,
+                        prior_pages_by_path.get(item.pdf_path, []),
+                        cache_dir, workspace_root, vision_config,
+                    )
+                    vision_futures.append((vfut, reused_doc))
             reused_pdfs += 1
             processed_fingerprints[item.pdf_path] = item.file_fingerprint
             logger.info("%s reused (unchanged)", label)
@@ -2246,6 +2540,12 @@ def main(
                 consolidate_part_instruments, item, pdf_text, cache_dir, ocr_llm_config
             )
             llm_futures.append((fut, pdf_document))
+        if vision_executor is not None and _doc_is_scanned(pdf_document):
+            vfut = vision_executor.submit(
+                classify_notation_vision, item, pdf_pages, cache_dir, workspace_root,
+                vision_config,
+            )
+            vision_futures.append((vfut, pdf_document))
         page_error_total += page_errs
         pages_done += page_total
         processed_pdfs += 1
@@ -2278,10 +2578,24 @@ def main(
                 result = _empty_ocr_llm_result(f"error: {exc}")
             if result is not None:
                 apply_llm_fields(doc_rec, result)
+    if vision_futures:
+        logger.info("Waiting on %d vision review(s)...", len(vision_futures))
+        for vfut, doc_rec in vision_futures:
+            try:
+                vresult = vfut.result()
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "Vision review failed for %s: %s", doc_rec.get("pdf_path"), exc
+                )
+                vresult = _empty_vision_result(f"error: {exc}")
+            if vresult is not None:
+                apply_vision_fields(doc_rec, vresult)
     if ocr_executor is not None:
         ocr_executor.shutdown(wait=True)
     if llm_executor is not None:
         llm_executor.shutdown(wait=True)
+    if vision_executor is not None:
+        vision_executor.shutdown(wait=True)
 
     text_records = sort_records(text_records)
     page_records = sort_records(page_records)

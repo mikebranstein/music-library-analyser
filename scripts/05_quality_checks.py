@@ -46,7 +46,7 @@ from scripts._common import (
     utc_now_iso,
 )
 
-RECORD_VERSION = "1.0"
+RECORD_VERSION = "1.1"
 
 CHECKPOINT_FILENAME = ".quality_checks_checkpoint.json"
 
@@ -65,6 +65,9 @@ ISSUE_HEAVY_BLUR = "heavy_blur"
 ISSUE_OCR_ILLEGIBLE = "ocr_illegible"
 ISSUE_BLANK_PAGE = "blank_page"
 ISSUE_NOISE_PAGE = "noise_page"
+# Document-level issues contributed by the optional vision review (not per-page metrics).
+ISSUE_HANDWRITTEN = "handwritten_notation"
+ISSUE_LOW_LEGIBILITY = "low_legibility"
 
 ISSUE_ORDER: tuple[str, ...] = (
     ISSUE_LOW_RESOLUTION,
@@ -74,6 +77,8 @@ ISSUE_ORDER: tuple[str, ...] = (
     ISSUE_OCR_ILLEGIBLE,
     ISSUE_BLANK_PAGE,
     ISSUE_NOISE_PAGE,
+    ISSUE_HANDWRITTEN,
+    ISSUE_LOW_LEGIBILITY,
 )
 
 
@@ -151,6 +156,18 @@ DEFAULT_THRESHOLDS: dict[str, Any] = {
         "handwritten_max_alnum_ratio": 0.45,
         "min_confidence": 0.30,
     },
+    # Adjudication of the optional Script 02 vision signal (vision_* fields on documents.jsonl).
+    # A confident vision verdict overrides the deterministic notation source and caps the quality
+    # band, because deterministic metrics cannot tell handwritten manuscript from a readable
+    # printed photocopy. Set enabled=false to ignore vision fields even when present.
+    "vision": {
+        "enabled": True,
+        "min_confidence": 0.50,
+        "override_notation_source": True,
+        "handwritten_caps_band_at": "review",
+        "fair_legibility_caps_band_at": "review",
+        "poor_legibility_caps_band_at": "poor",
+    },
 }
 
 
@@ -171,6 +188,7 @@ def load_thresholds(config_path: Path) -> tuple[dict[str, Any], str]:
     thresholds = {
         "quality_checks": _merge_section(DEFAULT_THRESHOLDS["quality_checks"], None),
         "notation_source": _merge_section(DEFAULT_THRESHOLDS["notation_source"], None),
+        "vision": _merge_section(DEFAULT_THRESHOLDS["vision"], None),
     }
     if yaml is None:
         logger.warning("PyYAML unavailable; using built-in quality thresholds.")
@@ -190,6 +208,9 @@ def load_thresholds(config_path: Path) -> tuple[dict[str, Any], str]:
     )
     thresholds["notation_source"] = _merge_section(
         DEFAULT_THRESHOLDS["notation_source"], data.get("notation_source")
+    )
+    thresholds["vision"] = _merge_section(
+        DEFAULT_THRESHOLDS["vision"], data.get("vision")
     )
     return thresholds, "yaml"
 
@@ -462,6 +483,94 @@ def _worst_page(page_findings: list[dict[str, Any]]) -> int | None:
     return worst if worst_count > 0 else None
 
 
+# --- Vision adjudication ---------------------------------------------------------------------
+
+_BAND_RANK = {QualityBand.GOOD: 3, QualityBand.REVIEW: 2, QualityBand.POOR: 1}
+
+
+def _cap_band(current: str, cap: str) -> str:
+    """Return the worse of ``current`` and ``cap`` (GOOD > REVIEW > POOR); UNKNOWN is untouched."""
+    if current not in _BAND_RANK or cap not in _BAND_RANK:
+        return current
+    return current if _BAND_RANK[current] <= _BAND_RANK[cap] else cap
+
+
+def adjudicate_with_vision(
+    record: dict[str, Any], doc_meta: dict[str, Any] | None, thresholds: dict[str, Any]
+) -> None:
+    """Override notation source and cap the quality band from the Script 02 vision signal.
+
+    Deterministic OCR/image metrics cannot separate handwritten manuscript from a readable printed
+    photocopy, so a confident vision verdict (vision_status == "success") takes precedence: it
+    replaces ``notation_source_type`` and prevents a handwritten / low-legibility document from
+    scoring as ``good``. Vision fields are echoed onto the record for transparency; when the
+    verdict is missing, disabled, or below ``min_confidence`` the deterministic result is kept.
+    """
+    vcfg = thresholds.get("vision", {}) or {}
+    meta = doc_meta or {}
+    source = meta.get("vision_notation_source")
+    legibility = meta.get("vision_legibility")
+    confidence = _num(meta.get("vision_confidence"))
+
+    # Always echo the raw vision signal for downstream transparency.
+    record["vision_notation_source"] = source
+    record["vision_legibility"] = legibility
+    record["vision_confidence"] = meta.get("vision_confidence")
+    record["vision_notes"] = meta.get("vision_notes") or ""
+    record["vision_applied"] = False
+
+    if not vcfg.get("enabled", True):
+        return
+    if meta.get("vision_status") != "success" or not source:
+        return
+    min_conf = float(vcfg.get("min_confidence", 0.5))
+    if confidence is None or confidence < min_conf:
+        return
+
+    record["vision_applied"] = True
+
+    if vcfg.get("override_notation_source", True):
+        record["notation_source_type"] = source
+        record["notation_source_confidence"] = round(confidence, 2)
+        evidence = list(record.get("notation_source_evidence") or [])
+        note = f"vision: {source} ({confidence:.2f})"
+        if legibility:
+            note += f", legibility={legibility}"
+        evidence.append(note)
+        record["notation_source_evidence"] = evidence
+
+    # Band caps only apply to documents that produced a scoreable band.
+    if record.get("quality_band") not in _BAND_RANK:
+        return
+
+    new_issues: list[str] = []
+    if source == NotationSource.HANDWRITTEN:
+        record["quality_band"] = _cap_band(
+            record["quality_band"], vcfg.get("handwritten_caps_band_at", QualityBand.REVIEW)
+        )
+        new_issues.append(ISSUE_HANDWRITTEN)
+    if legibility == "poor":
+        record["quality_band"] = _cap_band(
+            record["quality_band"], vcfg.get("poor_legibility_caps_band_at", QualityBand.POOR)
+        )
+        new_issues.append(ISSUE_LOW_LEGIBILITY)
+    elif legibility == "fair":
+        record["quality_band"] = _cap_band(
+            record["quality_band"], vcfg.get("fair_legibility_caps_band_at", QualityBand.REVIEW)
+        )
+
+    if new_issues:
+        summary = dict(record.get("issue_summary") or {})
+        top = list(record.get("top_issues") or [])
+        for code in new_issues:
+            summary[code] = summary.get(code, 0) + 1
+            if code not in top:
+                top.append(code)
+        record["issue_summary"] = summary
+        record["top_issues"] = top
+    record["needs_review"] = record["quality_band"] != QualityBand.GOOD
+
+
 def build_quality_record(
     pdf_path: str,
     pages: list[dict[str, Any]],
@@ -469,6 +578,7 @@ def build_quality_record(
     doc_meta: dict[str, Any] | None,
     thresholds: dict[str, Any],
     run_id: str,
+    apply_vision: bool = True,
 ) -> dict[str, Any]:
     """Evaluate one document's pages and roll them up into a single quality record."""
     ordered_pages = sorted(pages, key=lambda p: p.get("page_num", 0))
@@ -514,6 +624,8 @@ def build_quality_record(
         record["worst_page"] = None
         record["page_findings"] = []
         record["metrics"] = {}
+        if apply_vision:
+            adjudicate_with_vision(record, doc_meta, thresholds)
         return record
 
     score, band, summary, top_issues, page_issue_count = score_document(
@@ -548,6 +660,8 @@ def build_quality_record(
         ),
         "blank_page_count": sum(1 for issues in page_issue_lists if ISSUE_BLANK_PAGE in issues),
     }
+    if apply_vision:
+        adjudicate_with_vision(record, doc_meta, thresholds)
     return record
 
 
@@ -563,8 +677,13 @@ def document_fingerprint(
     pages: list[dict[str, Any]],
     texts_by_page: dict[int, dict[str, Any]],
     cfg_fp: str,
+    doc_meta: dict[str, Any] | None = None,
 ) -> str:
-    """Fingerprint a document from its per-page content/render hashes plus the config fingerprint."""
+    """Fingerprint a document from its per-page content/render hashes plus the config fingerprint.
+
+    The Script 02 vision signal is folded in so that enabling vision (which rewrites
+    ``documents.jsonl``) invalidates cached quality records without a config change.
+    """
     parts = [cfg_fp]
     for page in sorted(pages, key=lambda p: p.get("page_num", 0)):
         page_num = int(page.get("page_num") or 0)
@@ -573,6 +692,11 @@ def document_fingerprint(
             f"{page_num}:{text.get('page_text_hash') or ''}:"
             f"{page.get('thumbnail_hash') or ''}:{page.get('processing_status') or ''}"
         )
+    meta = doc_meta or {}
+    parts.append(
+        f"vision:{meta.get('vision_status') or ''}:{meta.get('vision_notation_source') or ''}:"
+        f"{meta.get('vision_legibility') or ''}:{meta.get('vision_confidence')}"
+    )
     return sha256_text("|".join(parts))
 
 
@@ -627,6 +751,12 @@ def build_report(records: list[dict[str, Any]], meta: dict[str, Any]) -> str:
         count = src_counts.get(src, 0)
         out.append(f"| {src} | {count} | {pct(count, total):.1f}% |")
     out.append("")
+    vision_applied = sum(1 for rec in records if rec.get("vision_applied"))
+    if vision_applied:
+        out.append(
+            f"_Vision adjudication applied to {vision_applied} of {total} document(s)._"
+        )
+        out.append("")
 
     # Top issues across the collection.
     issue_totals: dict[str, int] = {}
@@ -707,8 +837,9 @@ def main(
     ),
     mode: str = typer.Option("full", help="Processing mode: full or incremental"),
     use_vision: bool = typer.Option(
-        False, "--use-vision/--no-vision",
-        help="Enable the (unwired) model-assisted vision review hook",
+        True, "--use-vision/--no-vision",
+        help="Honor the Script 02 vision signal (vision_* fields on documents.jsonl): override "
+        "notation source and cap the band for handwritten/low-legibility scans",
     ),
     concurrency: int = typer.Option(
         1, "--concurrency", "-j", help="Documents to evaluate in parallel (CPU-light; 1 is fine)"
@@ -732,8 +863,9 @@ def main(
         raise typer.BadParameter(f"No page records found at {pages}")
 
     if use_vision:
-        logger.warning(
-            "Vision review requested but no provider is wired; using heuristic checks only."
+        logger.info(
+            "Vision adjudication enabled: confident vision_* verdicts on documents.jsonl will "
+            "override notation source and cap the quality band."
         )
 
     thresholds, thresholds_source = load_thresholds(config_path.resolve())
@@ -776,7 +908,9 @@ def main(
         seen += 1
         doc_pages = pages_by_pdf[pdf_path]
         texts_by_page = texts_by_pdf.get(pdf_path, {})
-        fingerprint = document_fingerprint(doc_pages, texts_by_page, cfg_fp)
+        fingerprint = document_fingerprint(
+            doc_pages, texts_by_page, cfg_fp, doc_meta_by_pdf.get(pdf_path)
+        )
         fingerprints[pdf_path] = fingerprint
 
         prior = previous_records.get(pdf_path)
@@ -801,6 +935,7 @@ def main(
             return build_quality_record(
                 pdf_path, doc_pages, texts_by_page,
                 doc_meta_by_pdf.get(pdf_path), thresholds, run_id,
+                apply_vision=use_vision,
             )
         except Exception as exc:
             logger.exception("Unexpected quality-check error on %s", pdf_path)

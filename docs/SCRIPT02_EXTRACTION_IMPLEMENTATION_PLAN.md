@@ -63,6 +63,29 @@ Third enhancement wave (OCR/OSD via Tesseract; RECORD_VERSION bumped to `2.2`):
   or the Tesseract binary are missing, OCR is disabled with a warning and pages stay flagged
   `needs_ocr` with null OCR fields.
 
+Fourth enhancement wave (document-level OCR -> instrumentation consolidation; RECORD_VERSION `2.3`):
+
+- One Copilot CLI call per PDF reconciles the noisy multi-pass OCR candidates into a canonical
+  instrument list, recording `ocr_llm_status`, `ocr_llm_instruments`, `ocr_llm_raw`,
+  `ocr_llm_confidence`, and `ocr_llm_notes` on the document record (`--ocr-llm`, default on).
+- Results are cached under `cache/ocr_llm/` (content- and config-addressed) and the call is spun
+  off asynchronously so the next PDF's OCR overlaps the prior Copilot call.
+
+Fifth enhancement wave (notation-source vision review; RECORD_VERSION bumped to `2.4`):
+
+- Optional per-PDF Copilot CLI call that inspects the rendered page image(s) and reports the
+  notation source and legibility, recording `vision_status`, `vision_notation_source`
+  (`printed_original`/`handwritten`/`mixed_or_uncertain`), `vision_legibility`
+  (`good`/`fair`/`poor`), `vision_confidence`, and `vision_notes` on the document record
+  (`--use-vision`, default on). Fires only for scanned/image-based documents; born-digital text
+  PDFs are already, correctly, printed originals.
+- The image path(s) are embedded in the prompt (`config/llm_prompts/classify_notation_source.txt`,
+  built-in fallback + `VISION_PROMPT_VERSION`); the CLI opens them via its file tools. Cached
+  under `cache/vision/` keyed by **thumbnail hash** (separate from OCR) so a vision-prompt change
+  never forces re-OCR and re-rendering never re-invokes vision. Runs on a dedicated executor
+  bounded by `--ocr-workers`, independent of OCR/OCR-LLM. Script 05 adjudicates these fields
+  (overrides notation source, caps the quality band).
+
 Deferred to a later phase:
 
 - Migration of outputs from JSONL to Parquet via `pandas` / `pyarrow`.
@@ -208,6 +231,10 @@ Fields:
 - `pages_ocr_recovered` (wave-3; pages where OCR produced non-empty text)
 - `ocr_char_count` (wave-3; total characters of recovered OCR text)
 - `pages_rotated` (wave-3; pages OSD auto-rotated before OCR)
+- `ocr_llm_status` / `ocr_llm_instruments` / `ocr_llm_raw` / `ocr_llm_confidence` /
+  `ocr_llm_notes` (wave-4; document-level OCR->instrument consolidation, `not_applied` when off)
+- `vision_status` / `vision_notation_source` / `vision_legibility` / `vision_confidence` /
+  `vision_notes` (wave-5; notation-source vision review, `not_applied`/`null` unless `--use-vision`)
 - `processing_status` (`success` or `partial_error`)
 - `processing_timestamp`
 
@@ -219,9 +246,10 @@ the document output by `pdf_path`.
 Fields: `record_version`, `last_run_id`, `last_run_timestamp`, `inventory_input`,
 `extracted_text_output`, `pages_output`, `documents_output`, `library_root`, `fingerprints`
 (map of `pdf_path` to `file_fingerprint`), `pdf_count_processed`, `page_count_processed`,
-`reused_pdf_count`, `ocr_enabled`, `ocr_engine_version`. The schema version is bumped to `2.2`
-for the OCR/OSD record shape; the bump invalidates prior 2.0/2.1 checkpoints so all PDFs are
-reprocessed once to populate the new fields (OCR results are still served from `cache/ocr/`).
+`reused_pdf_count`, `ocr_enabled`, `ocr_engine_version`. The schema version tracks `RECORD_VERSION`
+(currently `2.4`); a version bump invalidates prior checkpoints so all PDFs are reprocessed once to
+populate new fields, but the per-page `cache/ocr/`, `cache/ocr_llm/`, `cache/vision/`, and
+`cache/render/` caches are still served from disk, so no live OCR/LLM/vision calls are re-spent.
 
 ### 4.5 Report `data/extraction_report.md`
 
@@ -399,13 +427,19 @@ checkpoint is written atomically after a successful output write.
 | `--ocr-llm-model` | str | `""` | Model for OCR-LLM consolidation (else CLI default) |
 | `--ocr-llm-page-scope` | str | `all` | OCR-LLM page scope: `all` pages or `first` page only |
 | `--ocr-llm-timeout` | float | `300.0` | OCR-LLM Copilot CLI timeout (seconds) |
+| `--use-vision / --no-vision` | flag | enabled | Classify notation source from the page image via one Copilot CLI call/file (scanned docs only, wave-5) |
+| `--vision-command` | str | `copilot` | Copilot CLI command for the vision review |
+| `--vision-model` | str | `""` | Model for the vision review (else CLI default) |
+| `--vision-page-scope` | str | `first` | Vision page scope: `first` page only or `all` pages |
+| `--vision-timeout` | float | `300.0` | Vision Copilot CLI timeout (seconds) |
 | `--tesseract-cmd` | str | `""` | Explicit path to the Tesseract binary (else auto-detect) |
 | `--log-level` | str | `INFO` | Logging level |
 
 If `--enable-image-metrics` is set but `numpy` is unavailable, the flag is auto-disabled with a
 warning. Likewise, if `--ocr` is set but `pytesseract`/`Pillow` or the Tesseract binary cannot be
 resolved (or the binary is not runnable), OCR is auto-disabled with a warning and the run
-continues with null `ocr_*`/`osd_*` fields.
+continues with null `ocr_*`/`osd_*` fields. `--use-vision` is auto-disabled with a warning when
+rendering is off (vision needs thumbnails) or the Copilot CLI is not on PATH.
 
 ### 8.1 Concurrency model
 

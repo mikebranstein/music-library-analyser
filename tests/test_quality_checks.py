@@ -329,6 +329,95 @@ def test_build_quality_record_no_analyzable_pages_is_unknown():
     assert rec["analyzed_page_count"] == 0
 
 
+# --- vision adjudication ---------------------------------------------------------------------
+
+
+def _vision_meta(**overrides: Any) -> dict:
+    meta = {
+        "piece_id": "p1",
+        "vision_status": "success",
+        "vision_notation_source": "handwritten",
+        "vision_legibility": "fair",
+        "vision_confidence": 0.85,
+        "vision_notes": "manuscript",
+    }
+    meta.update(overrides)
+    return meta
+
+
+def test_vision_handwritten_caps_good_document_at_review():
+    # A clean scan that would score GOOD is capped to REVIEW once vision says handwritten.
+    pages = [_page(page_num=1)]
+    texts = {1: _text(1)}
+    rec = qc.build_quality_record(
+        "band/p1/eb_horn.pdf", pages, texts, _vision_meta(), _thr(), "run1"
+    )
+    assert rec["vision_applied"] is True
+    assert rec["notation_source_type"] == qc.NotationSource.HANDWRITTEN
+    assert rec["quality_band"] == qc.QualityBand.REVIEW
+    assert rec["needs_review"] is True
+    assert qc.ISSUE_HANDWRITTEN in rec["top_issues"]
+
+
+def test_vision_poor_legibility_caps_band_at_poor():
+    pages = [_page(page_num=1)]
+    texts = {1: _text(1)}
+    rec = qc.build_quality_record(
+        "band/p1/eb_horn.pdf", pages, texts,
+        _vision_meta(vision_legibility="poor"), _thr(), "run1",
+    )
+    assert rec["quality_band"] == qc.QualityBand.POOR
+    assert qc.ISSUE_LOW_LEGIBILITY in rec["top_issues"]
+
+
+def test_vision_low_confidence_is_ignored():
+    pages = [_page(page_num=1)]
+    texts = {1: _text(1)}
+    rec = qc.build_quality_record(
+        "band/p1/eb_horn.pdf", pages, texts,
+        _vision_meta(vision_confidence=0.2), _thr(), "run1",
+    )
+    assert rec["vision_applied"] is False
+    assert rec["quality_band"] == qc.QualityBand.GOOD
+    assert rec["notation_source_type"] == qc.NotationSource.PRINTED
+
+
+def test_vision_disabled_flag_skips_adjudication():
+    pages = [_page(page_num=1)]
+    texts = {1: _text(1)}
+    rec = qc.build_quality_record(
+        "band/p1/eb_horn.pdf", pages, texts, _vision_meta(), _thr(), "run1",
+        apply_vision=False,
+    )
+    assert rec.get("vision_applied") is None
+    assert rec["quality_band"] == qc.QualityBand.GOOD
+
+
+def test_vision_disabled_in_config_skips_adjudication():
+    thr = _thr()
+    thr["vision"]["enabled"] = False
+    pages = [_page(page_num=1)]
+    texts = {1: _text(1)}
+    rec = qc.build_quality_record(
+        "band/p1/eb_horn.pdf", pages, texts, _vision_meta(), thr, "run1"
+    )
+    assert rec["vision_applied"] is False
+    assert rec["quality_band"] == qc.QualityBand.GOOD
+
+
+def test_vision_printed_verdict_does_not_cap_band():
+    pages = [_page(page_num=1)]
+    texts = {1: _text(1)}
+    rec = qc.build_quality_record(
+        "band/p1/cornet.pdf", pages, texts,
+        _vision_meta(vision_notation_source="printed_original", vision_legibility="good"),
+        _thr(), "run1",
+    )
+    assert rec["vision_applied"] is True
+    assert rec["notation_source_type"] == qc.NotationSource.PRINTED
+    assert rec["quality_band"] == qc.QualityBand.GOOD
+
+
 # --- fingerprints ----------------------------------------------------------------------------
 
 
@@ -338,6 +427,15 @@ def test_document_fingerprint_changes_with_content():
     fp1 = qc.document_fingerprint(pages, texts, "cfg")
     fp2 = qc.document_fingerprint(pages, {1: _text(1, page_text_hash="sha256:different")}, "cfg")
     assert fp1 != fp2
+
+
+def test_document_fingerprint_changes_with_vision_signal():
+    pages = [_page(page_num=1)]
+    texts = {1: _text(1)}
+    fp_none = qc.document_fingerprint(pages, texts, "cfg", None)
+    fp_vision = qc.document_fingerprint(pages, texts, "cfg", _vision_meta())
+    assert fp_none != fp_vision
+
 
 
 def test_config_fingerprint_changes_with_thresholds():

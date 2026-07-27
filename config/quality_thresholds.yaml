@@ -63,3 +63,22 @@ notation_source:
   handwritten_max_alnum_ratio: 0.45
   # Minimum confidence reported when a classification is made from weak/partial evidence.
   min_confidence: 0.30
+
+# --- Script 05 vision adjudication ---------------------------------------------------------
+# Adjudicates the optional vision signal Script 02 writes to documents.jsonl (run Script 02 with
+# --use-vision). Deterministic OCR/image metrics cannot tell handwritten manuscript from a
+# readable printed photocopy, so a confident vision verdict takes precedence: it overrides the
+# notation source and prevents a handwritten / low-legibility scan from scoring as "good".
+vision:
+  # Honor vision_* fields when present. Set false to ignore them even after Script 02 wrote them.
+  enabled: true
+  # Vision verdicts below this confidence are ignored; the deterministic result is kept.
+  min_confidence: 0.50
+  # Replace notation_source_type/confidence with the vision verdict when confident.
+  override_notation_source: true
+  # Band caps (a handwritten or hard-to-read scan warrants human review regardless of metrics).
+  # "review" => never "good"; "poor" => forced to the lowest band.
+  handwritten_caps_band_at: review
+  fair_legibility_caps_band_at: review
+  poor_legibility_caps_band_at: poor
+

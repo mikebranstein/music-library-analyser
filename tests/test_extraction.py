@@ -129,6 +129,98 @@ def test_consolidate_part_instruments_llm_error_is_captured(tmp_path: Path):
     assert result["ocr_llm_instruments"] == []
 
 
+def test_classify_notation_vision_parses_and_validates(tmp_path: Path):
+    extract = load_module("02_extract_text_and_images.py", "extract_vision_ok")
+    item = _ocr_item(extract)
+    pages = [{"page_num": 1, "thumbnail_path": "cache/render/x_p0001_a.png", "thumbnail_hash": "h1"}]
+    cfg = extract.VisionConfig(enabled=True, page_scope="first")
+
+    def fake_llm(prompt: str, _cfg):
+        assert "x_p0001_a.png" in prompt  # absolute image path was embedded
+        return {"notation_source": "handwritten", "legibility": "fair",
+                "confidence": 0.85, "notes": "manuscript"}
+
+    result = extract.classify_notation_vision(
+        item, pages, tmp_path / "cache", tmp_path, cfg, llm_fn=fake_llm
+    )
+    assert result is not None
+    assert result["vision_status"] == "success"
+    assert result["vision_notation_source"] == "handwritten"
+    assert result["vision_legibility"] == "fair"
+    assert result["vision_confidence"] == 0.85
+
+
+def test_classify_notation_vision_rejects_unknown_enum(tmp_path: Path):
+    extract = load_module("02_extract_text_and_images.py", "extract_vision_enum")
+    item = _ocr_item(extract)
+    pages = [{"page_num": 1, "thumbnail_path": "cache/render/x_p0001_a.png", "thumbnail_hash": "h1"}]
+    cfg = extract.VisionConfig(enabled=True, page_scope="first")
+
+    def fake_llm(_prompt, _cfg):
+        return {"notation_source": "scribbles", "legibility": "excellent", "confidence": 0.9}
+
+    result = extract.classify_notation_vision(
+        item, pages, tmp_path / "cache", tmp_path, cfg, llm_fn=fake_llm
+    )
+    assert result is not None
+    assert result["vision_notation_source"] is None
+    assert result["vision_legibility"] is None
+
+
+def test_classify_notation_vision_no_thumbnail_returns_none(tmp_path: Path):
+    extract = load_module("02_extract_text_and_images.py", "extract_vision_none")
+    item = _ocr_item(extract)
+    cfg = extract.VisionConfig(enabled=True, page_scope="first")
+
+    def fake_llm(_prompt, _cfg):  # pragma: no cover - must not be called
+        raise AssertionError("vision must not be called without a thumbnail")
+
+    result = extract.classify_notation_vision(
+        item, [{"page_num": 1, "thumbnail_path": None}], tmp_path / "cache", tmp_path, cfg,
+        llm_fn=fake_llm,
+    )
+    assert result is None
+
+
+def test_classify_notation_vision_error_is_captured(tmp_path: Path):
+    extract = load_module("02_extract_text_and_images.py", "extract_vision_err")
+    item = _ocr_item(extract)
+    pages = [{"page_num": 1, "thumbnail_path": "cache/render/x_p0001_a.png", "thumbnail_hash": "h1"}]
+    cfg = extract.VisionConfig(enabled=True, page_scope="first")
+
+    def fake_llm(_prompt, _cfg):
+        raise RuntimeError("boom")
+
+    result = extract.classify_notation_vision(
+        item, pages, tmp_path / "cache", tmp_path, cfg, llm_fn=fake_llm
+    )
+    assert result is not None
+    assert result["vision_status"].startswith("error:")
+    assert result["vision_notation_source"] is None
+
+
+def test_classify_notation_vision_uses_cache(tmp_path: Path):
+    extract = load_module("02_extract_text_and_images.py", "extract_vision_cache")
+    item = _ocr_item(extract)
+    pages = [{"page_num": 1, "thumbnail_path": "cache/render/x_p0001_a.png", "thumbnail_hash": "h1"}]
+    cfg = extract.VisionConfig(enabled=True, page_scope="first")
+    calls = {"n": 0}
+
+    def fake_llm(_prompt, _cfg):
+        calls["n"] += 1
+        return {"notation_source": "printed_original", "legibility": "good", "confidence": 0.95}
+
+    first = extract.classify_notation_vision(
+        item, pages, tmp_path / "cache", tmp_path, cfg, llm_fn=fake_llm
+    )
+    second = extract.classify_notation_vision(
+        item, pages, tmp_path / "cache", tmp_path, cfg, llm_fn=fake_llm
+    )
+    assert first == second
+    assert calls["n"] == 1  # second call served from disk cache
+
+
+
 def test_extraction_full_and_incremental(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     extract = load_module("02_extract_text_and_images.py", "extract_run")
@@ -582,6 +674,7 @@ def test_zone_blank_and_staff_full_run(tmp_path: Path, monkeypatch):
             "--mode",
             "full",
             "--no-ocr",
+            "--no-vision",
         ],
     )
     assert result.exit_code == 0, result.stdout
@@ -621,7 +714,7 @@ def test_zone_blank_and_staff_full_run(tmp_path: Path, monkeypatch):
     # Identity candidate parsed from the copyright line.
     identity = doc_rec["identity_candidates"]
     assert identity["copyright_year"] == 2019
-    assert doc_rec["record_version"] == "2.3"
+    assert doc_rec["record_version"] == "2.4"
 
 
 def _tesseract_or_skip(extract):
@@ -713,6 +806,7 @@ def test_ocr_full_run_recovers_scanned_text(tmp_path: Path, monkeypatch):
             "full",
             "--ocr",
             "--no-ocr-llm",
+            "--no-vision",
         ],
     )
     assert result.exit_code == 0, result.stdout

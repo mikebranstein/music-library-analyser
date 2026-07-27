@@ -51,6 +51,7 @@ Primary outputs:
 - OCR scanned/no-text pages with Tesseract (OSD auto-rotate first); runs by default and degrades gracefully when the toolchain is unavailable
 - Multi-pass OCR (`--ocr-multipass`, default on): run several passes at varied PSM + DPI, keep every non-empty pass in `ocr_candidates`, and select the highest-scoring text (`--single-pass-ocr` for one pass)
 - Consolidate each PDF's OCR candidates into a normalized instrument list via one Copilot CLI call per file (`--ocr-llm`, default on), recording `ocr_llm_status`/`ocr_llm_instruments` on the document record for Script 03
+- Optionally classify notation source from the rendered page image via one Copilot CLI call per file (`--use-vision`, default on; scanned documents only) — records `vision_notation_source` (`printed_original`/`handwritten`/`mixed_or_uncertain`), `vision_legibility` (`good`/`fair`/`poor`), `vision_confidence`, and `vision_notes` on the document record for Script 05 to adjudicate. Cached separately from OCR (keyed by thumbnail hash) so a vision-prompt change never re-runs OCR and re-rendering never re-runs vision; prompt in `config/llm_prompts/classify_notation_source.txt`
 - Parallel pipeline: OCR passes run across a thread pool (page rendering stays on the main thread since PyMuPDF is not thread-safe), and each file's LLM classification is spun off asynchronously so the next PDF starts OCR while prior Copilot calls finish; `--ocr-workers` sets the worker count (`0` = auto `min(8, CPU)`, `1` = serial) and also bounds concurrent OCR-LLM calls
 
 3. `03_part_classifier.py`
@@ -73,8 +74,9 @@ Primary outputs:
 - Score per-document scan quality (0-100) into a `quality_band` (`good` / `review` / `poor`, plus `unknown` when a document has no scoreable pages) by thresholding the objective per-page metrics Script 02 already computed (resolution, skew, contrast, blur, OCR confidence, blankness/noise) — pages are never re-rendered, and a missing (null) metric never raises an issue
 - Detect per-page issues (`low_resolution`, `excessive_skew`, `low_contrast`, `heavy_blur`, `ocr_illegible`, `blank_page`, `noise_page`), roll them into a document score weighted by affected-page fraction, and record `top_issues`, `worst_page`, and `needs_review`
 - Classify notation source (`printed_original`, `handwritten`, `mixed_or_uncertain`) with a 0-1 confidence and evidence from searchable-text fraction, OCR confidence, and alphanumeric ratio
-- Thresholds live in `config/quality_thresholds.yaml` (built-in defaults when absent); `--mode incremental` caches per-document results by fingerprint. A `--use-vision` hook is reserved for a future model-assisted pass but is not wired to a provider yet, and the *cropping margin loss* check is deferred (Script 02 exposes no margin metric)
-- Emit `data/quality_metrics.jsonl` (schema 1.0) plus a Markdown summary `data/quality_report.md`
+- Adjudicate the optional Script 02 vision signal (`--use-vision`, default on when the fields are present): a confident vision verdict overrides `notation_source_type` and caps `quality_band` (handwritten is never `good`; poor legibility is forced to `poor`), because deterministic metrics cannot separate handwritten manuscript from a readable printed photocopy. Adds `handwritten_notation` / `low_legibility` issue codes and echoes `vision_*` fields onto the record
+- Thresholds live in `config/quality_thresholds.yaml` (built-in defaults when absent), including a `vision:` section (enable/disable, `min_confidence`, band caps); `--mode incremental` caches per-document results by fingerprint (which now folds in the vision signal). The *cropping margin loss* check remains deferred (Script 02 exposes no margin metric)
+- Emit `data/quality_metrics.jsonl` (schema 1.1) plus a Markdown summary `data/quality_report.md`
 
 6. `06_piece_report.py`
 - Generate per-piece JSON + Markdown reports
@@ -105,6 +107,7 @@ project-root/
     quality_thresholds.yaml
     llm_prompts/
       classify_part.txt
+      classify_notation_source.txt
       lookup_instrumentation.txt
       summarize_score_instrumentation.txt
       verify_low_confidence.txt
@@ -128,6 +131,7 @@ project-root/
     ocr/
     llm/
     render/
+    vision/
   logs/
   outputs/
     analysis.db
@@ -171,7 +175,7 @@ All inferred expected parts should preserve:
 
 ## Quality and Notation Source Classification
 
-Each document record (`data/quality_metrics.jsonl`, schema 1.0) includes:
+Each document record (`data/quality_metrics.jsonl`, schema 1.1) includes:
 
 - `quality_score` (0-100 float, or `null` when no pages were scoreable)
 - `quality_band` (`good`, `review`, `poor`, or `unknown`)
@@ -180,8 +184,16 @@ Each document record (`data/quality_metrics.jsonl`, schema 1.0) includes:
 - `notation_source_type` (`printed_original`, `handwritten`, `mixed_or_uncertain`)
 - `notation_source_confidence` (0-1)
 - `notation_source_evidence` (feature signals such as `searchable_fraction=0.80`)
+- `vision_applied` plus echoed `vision_notation_source` / `vision_legibility` /
+  `vision_confidence` / `vision_notes` when the Script 02 vision signal was adjudicated
 - a `metrics` block (median DPI, mean contrast/blur, max skew, mean alnum/OCR confidence,
   image-based fraction, blank-page count)
+
+When Script 02 runs with vision enabled (the default; pass `--no-vision` to skip it), the
+per-document rollup (`data/documents.jsonl`, schema 2.4) also carries the raw `vision_status`,
+`vision_notation_source`, `vision_legibility`, `vision_confidence`, and `vision_notes` fields
+(defaulting to `not_applied`/`null` otherwise); downstream consumers should treat them as
+optional/nullable.
 
 > The thresholds in `config/quality_thresholds.yaml` are initial heuristics and are not yet
 > calibrated against real scan data.
