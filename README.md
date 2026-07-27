@@ -79,7 +79,11 @@ Primary outputs:
 - Emit `data/quality_metrics.jsonl` (schema 1.1) plus a Markdown summary `data/quality_report.md`
 
 6. `06_piece_report.py`
-- Generate per-piece JSON + Markdown reports
+- Join every upstream per-piece and per-document signal on `piece_id` (expected parts, observed parts, part predictions, quality metrics, documents, page thumbnails) into one report per piece; the stage is deterministic and fully offline (computes nothing new about the music)
+- Piece universe is the union of `piece_id`s across the expected / observed / predictions / quality sources, so a piece missing an upstream stage still gets a report; detected parts are ordered by Script 03's `part_sort_key` and joined to quality by `pdf_path`
+- Derive `reason_codes` (`missing_score`, `missing_required_parts`, `low_quality_scans`, `handwritten_or_illegible`, `unexpected_parts`, `low_confidence_parts`, `duplicate_parts`, `instrumentation_unresolved`), matching `recommended_actions`, a `severity` hint (`ok` / `review` / `high`), and a piece-level `needs_review` roll-up
+- Stream per-piece `.md` + `.json` as each completes; `--mode incremental` reuses cached reports by joined-input fingerprint, and orphan cleanup prunes only managed reports (never the checkpoint)
+- Emit `data/piece_reports/<piece_id>.{md,json}` (schema 1.0) plus a top-level index `data/piece_reports.md`
 
 7. `07_collection_report.py`
 - Aggregate metrics across all pieces
@@ -126,6 +130,7 @@ project-root/
     quality_metrics.jsonl
     quality_report.md
     piece_reports/
+    piece_reports.md
     collection_reports/
   cache/
     ocr/

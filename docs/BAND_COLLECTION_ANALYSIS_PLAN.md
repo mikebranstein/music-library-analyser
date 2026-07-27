@@ -537,46 +537,77 @@ Per-document record (schema 1.0) fields: envelope (`record_version`, `run_id`, `
 
 ## 4.6 Script 06: Piece Report Generator (`06_piece_report.py`)
 
+> **Status: implemented** (record schema `1.0`). This stage joins upstream signals and derives
+> reason codes / severity — it computes nothing new about the music. See the detailed design of
+> record in [`SCRIPT06_PIECE_REPORT_IMPLEMENTATION_PLAN.md`](SCRIPT06_PIECE_REPORT_IMPLEMENTATION_PLAN.md).
+
 Purpose:
 
-Create one report per piece folder in Markdown or JSON.
+Create one report per piece folder as both Markdown (human-readable) and JSON (machine-readable),
+plus a top-level index, by joining every upstream per-piece and per-document signal on `piece_id`.
+The stage is deterministic and fully offline (no AI, network, or rendering).
 
 Inputs (join on `piece_id`):
 
-- `data/documents.jsonl`, `data/part_predictions.jsonl`, `data/observed_parts_by_piece.jsonl`,
-  `data/expected_parts.jsonl`, `data/quality_metrics.jsonl`, and `data/pages.jsonl` (for thumbnail
-  references). List detected parts in conventional score order using Script 03's `part_sort_key`,
-  and surface `needs_review` / `confidence_tier` in the confidence summary rather than re-deriving
-  them from the raw `confidence` float.
+- `data/expected_parts.jsonl` (Script 04), `data/observed_parts_by_piece.jsonl` (Script 03),
+  `data/part_predictions.jsonl` (Script 03), `data/quality_metrics.jsonl` (Script 05),
+  `data/documents.jsonl` (Script 02), and `data/pages.jsonl` (Script 02, for page-1 thumbnail
+  references). The piece universe is the union of `piece_id`s across the expected / observed /
+  predictions / quality sources, so a piece missing an upstream stage still gets a report. Detected
+  parts are listed in conventional score order using Script 03's `part_sort_key`, joining
+  predictions to quality by `pdf_path`; `needs_review` / `confidence_tier` are surfaced in the
+  confidence summary rather than re-derived from the raw `confidence` float.
 
-Report sections:
+Report sections (Markdown):
 
-- Piece identity
-- Detected documents and predicted parts
-- Expected parts and missing parts
+- Piece identity (catalog, title, folder, ensemble, lookup status, edition)
+- Detected documents and predicted parts (with quality band, notation source, review flag)
+- Expected parts and missing parts (with completeness tier)
 - Score presence/absence
-- Quality findings
-- Confidence summary
-- Manual actions recommended
+- Quality findings (worst band + flagged documents)
+- Confidence summary (needs-review / low-confidence / unmatched / duplicate counts)
+- Recommended manual actions (one line per reason code)
+
+Derived fields (added by this stage on top of echoed upstream values):
+
+- `reason_codes`: ordered subset of `missing_score`, `missing_required_parts`, `low_quality_scans`,
+  `handwritten_or_illegible`, `unexpected_parts`, `low_confidence_parts`, `duplicate_parts`,
+  `instrumentation_unresolved` (canonical order defined by `REASON_CODE_ORDER`).
+- `recommended_actions`: the human-readable action string per reason code (`REASON_ACTIONS`).
+- `severity`: `ok` / `review` / `high` (`high` when a required part or the score is missing, or any
+  scan is poor-band).
+- `needs_review`: piece-level roll-up (true when any reason code fires, Script 04 flagged review, or
+  the observed rollup reports review-worthy parts).
 
 Shared infrastructure (reuse from `scripts._common`; see §4.9):
 
-- Iterate/sort pieces with `piece_sort_key`; escape Markdown table cells with `md_cell` and compute
-  rates with `pct`.
+- Iterate/sort pieces with `piece_sort_key`; escape Markdown table cells with `md_cell`.
 - When reading `expected_parts.jsonl`, branch on `LookupStatus.*` and `CompletenessTier.*` constants
-  (never bare strings), and present completeness using `COMPLETENESS_TIER_ORDER`.
-- Render many piece reports concurrently via `run_with_progress`.
+  (never bare strings).
+- Render pieces concurrently via `run_with_progress` and stream each `.md`/`.json` + checkpoint as it
+  completes (`on_result`). Mirrors Script 04's per-piece split + index + orphan-cleanup + incremental
+  conventions. Orphan cleanup prunes only managed `*.md`/`*.json` (never the checkpoint dotfile).
+- Incremental mode (`--mode incremental`) reuses a cached report when the prior record is present,
+  its `record_version` matches, and the joined-input fingerprint matches.
 
 Outputs:
 
 - `data/piece_reports/<piece_id>.md`
 - `data/piece_reports/<piece_id>.json`
+- `data/piece_reports.md` (top-level index linking every per-piece report)
+- `data/piece_reports/.piece_report_checkpoint.json` (incremental checkpoint)
 
 ## 4.7 Script 07: Collection Report (`07_collection_report.py`)
 
 Purpose:
 
 Aggregate all piece reports.
+
+> Script 06 now emits a per-piece JSON record (`data/piece_reports/<piece_id>.json`) carrying the
+> derived `reason_codes` / `severity` / `needs_review` fields plus a `worst_quality_band` roll-up.
+> Script 07 MAY aggregate these directly (e.g. severity distribution, reason-code frequency) instead
+> of recomputing them, while still treating `expected_parts.jsonl` and `quality_metrics.jsonl` as the
+> source of truth for completeness and quality metrics.
 
 Metrics:
 
@@ -623,6 +654,12 @@ Include:
 - sample page thumbnails
 - reason codes
 - recommended next action
+
+> Script 06 already derives `reason_codes` and `recommended_actions` per piece (with a canonical
+> `REASON_CODE_ORDER`) and a `severity` hint. Script 08 SHOULD reuse Script 06's `reason_codes` /
+> `recommended_actions` verbatim and MAY seed the queue priority from Script 06's `severity`, keeping
+> Script 04's completeness/lookup fields and Script 03's rollup counts as the authoritative priority
+> inputs. Page-1 thumbnails are available from Script 06's per-document `thumbnail_path`.
 
 Shared infrastructure (reuse from `scripts._common`; see §4.9):
 
