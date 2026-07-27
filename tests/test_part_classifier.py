@@ -371,6 +371,80 @@ def test_combined_doubling_preserved_with_page_text():
     assert rec["evidence_source"] == "combined"
 
 
+def test_strip_cues_removes_cue_annotations():
+    # "<instrument> cue" / "<instrument> cues" reference OTHER instruments and must be removed.
+    assert classifier.strip_cues("1st bb clarinets oboe cue dusk") == "1st bb clarinets dusk"
+    assert classifier.strip_cues("bsn. cue then flute cues") == "then"
+    # Unrelated words that merely contain "cue" (e.g. "rescue") are left untouched.
+    assert classifier.strip_cues("no annotations rescue here") == "no annotations rescue here"
+
+
+def test_match_instrument_first_prefers_earliest_position():
+    # The printed part label sits leftmost; earliest position wins even when a LONGER alias for a
+    # different instrument appears later in the text.
+    _, compiled = _lexicon_and_compiled()
+    text = classifier.normalize("Oboe then Bass Clarinet")
+    first, _, _ = classifier.match_instrument_first(text, compiled, min_alias_len=4)
+    assert first == "oboe"
+    longest, _, _ = classifier.match_instrument(text, compiled, min_alias_len=4)
+    assert longest == "bass_clarinet"
+
+
+def test_upper_left_label_overrides_cue_clarinet():
+    # Regression (A Night On A Lonely Moor): a Bb Clarinet part prints an "Oboe cue" in its body.
+    # The upper-left label ("1st Bb CLARINETS") is authoritative and the cue must be ignored, so the
+    # part classifies as clarinet (confirming the filename) -- never oboe.
+    inv = {
+        "pdf_path": "681 A Night On A Lonely Moor/681 A Night On A Lonely Moor_Clarinet 1 (Lower).pdf",
+        "pdf_filename": "681 A Night On A Lonely Moor_Clarinet 1 (Lower).pdf",
+        "piece_folder": "681 A Night On A Lonely Moor",
+        "piece_id": "abc",
+        "file_fingerprint": "fp1",
+    }
+    page1 = {
+        "zone_top_left": (
+            "1st Bb CLARINETS (Lower part) Dusk (slow, calmly) \ue0b1 Oboe cue "
+            "\ue043 \ue043\ue043\ue043"
+        ),
+    }
+    rec = _classify(inv, doc=None, page1=page1)
+    assert [f["canonical"] for f in rec["instruments"]] == ["clarinet"]
+    assert rec["instruments"][0]["part_index"] == 1
+    assert rec["needs_review"] is False
+
+
+def test_upper_left_label_overrides_filename_cross_section_flagged():
+    # The upper-left printed label is authoritative and may override the filename even across
+    # sections -- but a cross-section override is surfaced for human review.
+    inv = {
+        "pdf_path": "P/Song - Trumpet 1.pdf",
+        "pdf_filename": "Song - Trumpet 1.pdf",
+        "piece_folder": "Song",
+        "piece_id": "abc",
+        "file_fingerprint": "fp1",
+    }
+    doc = {"first_page_header_candidates": ["Flute"], "first_page_text": "Flute solo line"}
+    rec = _classify(inv, doc)
+    assert [f["canonical"] for f in rec["instruments"]] == ["flute"]
+    assert rec["needs_review"] is True
+
+
+def test_full_text_cross_section_reference_does_not_override_filename():
+    # Without an upper-left label, a cross-section instrument mentioned only in the body/full text
+    # must NOT override the filename baseline (that is where stray references and cues live).
+    inv = {
+        "pdf_path": "P/Song - Clarinet 1.pdf",
+        "pdf_filename": "Song - Clarinet 1.pdf",
+        "piece_folder": "Song",
+        "piece_id": "abc",
+        "file_fingerprint": "fp1",
+    }
+    doc = {"first_page_text": "Oboe"}
+    rec = _classify(inv, doc)
+    assert [f["canonical"] for f in rec["instruments"]] == ["clarinet"]
+    assert rec["evidence_source"] == "filename"
+
+
 def test_apply_ensemble_flags_duplicates():
     def _facet(canonical, idx):
         return {"canonical": canonical, "part_index": idx, "family": "other", "section": "x"}

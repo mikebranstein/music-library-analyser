@@ -3,10 +3,13 @@
 Consumes the Script 01 inventory and the Script 02 extraction datasets and writes one
 prediction record per readable PDF to ``data/part_predictions.jsonl`` plus a Markdown report.
 
-The classifier is rule-first and deterministic: the filename is the primary signal (its part
-segment is isolated by stripping the known ``piece_folder`` prefix), and Script 02 page text is
-used to confirm or recover a label. An instrument lexicon lives in ``config/regex_rules.yaml``
-(with a built-in fallback so the script runs even without the file or PyYAML).
+The classifier is rule-first and deterministic. The filename supplies a baseline part identity and
+structure (its part segment is isolated by stripping the known ``piece_folder`` prefix), which
+trustworthy in-file reads may override: the OCR->LLM consolidation, then the printed label in the
+page's upper-left corner, then a same-section footer/credit instrument. ``<instrument> cue``
+annotations are stripped so a cue naming another instrument never wins. An instrument lexicon lives
+in ``config/regex_rules.yaml`` (with a built-in fallback so the script runs even without the file
+or PyYAML).
 """
 
 from __future__ import annotations
@@ -85,11 +88,13 @@ DEFAULT_LEXICON: dict[str, Any] = {
         "oboe": ["oboe", "ob"],
         "english_horn": ["english horn", "cor anglais"],
         "bassoon": ["bassoon", "bsn", "fagotto"],
-        "eb_clarinet": ["eb clarinet", "e flat clarinet", "clarinet in eb", "clarinet in e flat",
-                        "clarinet eb"],
-        "clarinet": ["bb clarinet", "b flat clarinet", "clarinet in bb", "clarinet", "clar", "cl"],
-        "alto_clarinet": ["alto clarinet", "eb alto clarinet", "clarinet eb alto", "clarinet alto"],
-        "bass_clarinet": ["bass clarinet", "b cl", "bass cl"],
+        "eb_clarinet": ["eb clarinet", "eb clarinets", "e flat clarinet", "clarinet in eb",
+                        "clarinet in e flat", "clarinet eb"],
+        "clarinet": ["bb clarinet", "bb clarinets", "b flat clarinet", "clarinet in bb",
+                     "clarinets", "clarinet", "clar", "cl"],
+        "alto_clarinet": ["alto clarinet", "alto clarinets", "eb alto clarinet", "clarinet eb alto",
+                          "clarinet alto"],
+        "bass_clarinet": ["bass clarinet", "bass clarinets", "b cl", "bass cl"],
         "contrabass_clarinet": [
             "contrabass clarinet", "contra bass clarinet",
             "contra alto clarinet", "contralto clarinet",
@@ -402,6 +407,17 @@ def _word_search(needle: str, haystack: str) -> bool:
     return re.search(pattern, haystack) is not None
 
 
+# Cue annotations (e.g. "Oboe cue" printed in a clarinet part) quote ANOTHER instrument for the
+# player's reference. They are removed before scanning so they never masquerade as the part's own
+# instrument. Matches "<word> cue" / "<word> cues" in already-normalized (lowercased) text.
+_CUE_RE = re.compile(r"(?<![a-z0-9])[a-z][a-z.'&]*\s+cues?(?![a-z0-9])")
+
+
+def strip_cues(text_norm: str) -> str:
+    """Remove ``<instrument> cue``/``cues`` annotations from already-normalized text."""
+    return re.sub(r"\s+", " ", _CUE_RE.sub(" ", text_norm)).strip()
+
+
 def isolate_part_segment(pdf_filename: str, piece_folder: str) -> str:
     """Strip the piece_folder (and any leading catalog number) to isolate the part text."""
     stem = Path(pdf_filename).stem
@@ -440,6 +456,45 @@ def match_instrument(
     alternates: list[dict[str, Any]] = []
     seen = {best_canonical}
     for canonical, alias in matches:
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        alternates.append(
+            {
+                "canonical_instrument": canonical,
+                "score": round(len(alias) / max(len(best_alias), 1), 3),
+            }
+        )
+        if len(alternates) >= 2:
+            break
+    return best_canonical, best_alias, alternates
+
+
+def match_instrument_first(
+    text_norm: str,
+    compiled: list[tuple[str, str]],
+    min_alias_len: int = 1,
+) -> tuple[str | None, str | None, list[dict[str, Any]]]:
+    """Return the EARLIEST-positioned instrument match; ties broken by longest alias.
+
+    The printed part label sits topmost/leftmost in the upper-left corner, above any body cue that
+    names another instrument, so earliest-position wins there (unlike :func:`match_instrument`,
+    which is longest-alias-wins and used where position is not meaningful).
+    """
+    found: list[tuple[int, int, str, str]] = []  # (start, -len(alias), canonical, alias)
+    for canonical, alias in compiled:
+        if len(alias) < min_alias_len:
+            continue
+        match = re.search(r"(?<![a-z0-9])" + re.escape(alias) + r"(?![a-z0-9])", text_norm)
+        if match is not None:
+            found.append((match.start(), -len(alias), canonical, alias))
+    if not found:
+        return None, None, []
+    found.sort()
+    best_canonical, best_alias = found[0][2], found[0][3]
+    alternates: list[dict[str, Any]] = []
+    seen = {best_canonical}
+    for _start, _neg_len, canonical, alias in found:
         if canonical in seen:
             continue
         seen.add(canonical)
@@ -626,34 +681,38 @@ def gather_text_signals(
     doc_record: dict[str, Any] | None,
     page1_zones: dict[str, Any] | None,
 ) -> tuple[str, str]:
-    """Return (title_norm, full_norm): de-glyphed, normalized in-file text signals.
+    """Return (upper_left_norm, full_norm): de-glyphed, cue-stripped, normalized in-file text.
 
     Both are stripped of Private Use Area music-font glyphs (which pollute born-digital embedded
-    text) before normalization.
+    text) and of ``<instrument> cue`` annotations (which name OTHER instruments quoted for the
+    player's reference and must never masquerade as the part's own instrument) before use.
 
-    - ``title_norm`` covers the regions where a part's printed instrument label reliably sits:
-      the page-1 header candidates, the top-band zones, and the bottom band (footer/credit block
-      where library publishers often print the instrument name). Preferred for instrument reads
-      because it avoids body cues that name other instruments.
-    - ``full_norm`` covers ``title_norm`` plus the entire first-page text, used as a fallback read
-      and for confirming a filename match.
+    - ``upper_left_norm`` covers the page-1 header candidates and the top-left zone -- the corner
+      where a part reliably prints its own instrument name. It is the authoritative region for the
+      printed label (read earliest-match-first, since the label sits above any body cue).
+    - ``full_norm`` covers the header, the top/bottom zones and the entire first-page text. It is
+      used to confirm a filename match and to recover a same-section footer/credit instrument.
     """
-    title_fragments: list[str] = []
-    full_fragments: list[str] = []
+    upper_left_fragments: list[str] = []
+    other_fragments: list[str] = []
     if doc_record:
         header = doc_record.get("first_page_header_candidates") or []
         if isinstance(header, list):
-            title_fragments.extend(str(h) for h in header)
-        first_text = str(doc_record.get("first_page_text") or "")
-        full_fragments.append(first_text)
+            upper_left_fragments.extend(str(h) for h in header)
+        other_fragments.append(str(doc_record.get("first_page_text") or ""))
     if page1_zones:
-        for key in ("zone_top_left", "zone_top_center", "zone_top_right", "zone_bottom"):
+        top_left = page1_zones.get("zone_top_left")
+        if top_left:
+            upper_left_fragments.append(str(top_left))
+        for key in ("zone_top_center", "zone_top_right", "zone_bottom"):
             value = page1_zones.get(key)
             if value:
-                title_fragments.append(str(value))
-    title_norm = normalize(strip_music_glyphs(" ".join(title_fragments)))
-    full_norm = normalize(strip_music_glyphs(" ".join(title_fragments + full_fragments)))
-    return title_norm, full_norm
+                other_fragments.append(str(value))
+    upper_left_norm = strip_cues(normalize(strip_music_glyphs(" ".join(upper_left_fragments))))
+    full_norm = strip_cues(
+        normalize(strip_music_glyphs(" ".join(upper_left_fragments + other_fragments)))
+    )
+    return upper_left_norm, full_norm
 
 
 
@@ -676,7 +735,7 @@ def classify_document(
     seg_norm = normalize(part_segment)
 
     score_type = detect_score(seg_norm, lexicon)
-    title_norm, full_norm = gather_text_signals(doc_record, page1_zones)
+    upper_left_norm, full_norm = gather_text_signals(doc_record, page1_zones)
 
     clef = extract_clef(seg_norm, lexicon)
     transposition = extract_transposition(seg_norm, lexicon)
@@ -696,11 +755,13 @@ def classify_document(
         clef = None
         transposition = None
     else:
-        # Content-first classification. Evidence read from INSIDE the file (the OCR->LLM
-        # consolidation, then the de-glyphed page text) is authoritative for instrument identity;
-        # the filename is only a last resort and supplies structural hints (part index) it never
-        # overrides in-file content with. Precedence: (1) LLM instruments, (2) page-text read,
-        # (3) filename.
+        # Filename-baseline classification with in-file modifiers. The filename supplies the
+        # baseline part identity and structure (part index); trustworthy in-file reads may then
+        # OVERRIDE it. Precedence: (1) the OCR->LLM consolidation, (2) the printed label in the
+        # upper-left corner (may override across sections; flagged for review), (3) a footer/credit
+        # instrument recovered from the full page text (relabels only WITHIN the same section, e.g.
+        # Baritone -> Euphonium). "<instrument> cue" annotations are stripped upstream so they never
+        # masquerade as the part's own instrument.
         filename_facets, filename_alternates = build_instrument_facets(
             seg_norm, compiled, section_map, lexicon
         )
@@ -710,15 +771,34 @@ def classify_document(
         filename_section = filename_facets[0]["section"] if filename_facets else None
 
         llm_canon = llm_instruments(doc_record, lexicon)
-        # Prefer the title/credit regions (header/top/footer) over body cues; fall back to the
-        # whole page text so a footer-only instrument credit is still recovered.
-        content_canon, _content_alias, content_alts = match_instrument(
-            title_norm, compiled, min_alias_len=4
+        # The printed part name sits in the upper-left corner and is read earliest-match-first so the
+        # label wins over any surviving reference. The full page text is a weaker signal, used only
+        # to confirm the filename or recover a same-section footer/credit instrument.
+        ul_canon, _ul_alias, ul_alts = match_instrument_first(
+            upper_left_norm, compiled, min_alias_len=4
         )
-        if content_canon is None:
-            content_canon, _content_alias, content_alts = match_instrument(
-                full_norm, compiled, min_alias_len=4
+        full_canon, _full_alias, full_alts = match_instrument(
+            full_norm, compiled, min_alias_len=4
+        )
+        if ul_canon is not None:
+            content_canon, content_alts, content_cross = ul_canon, ul_alts, True
+        else:
+            content_canon, content_alts, content_cross = full_canon, full_alts, False
+
+        # A full-text (footer/credit) instrument may only RELABEL within the same section; a
+        # cross-section full-text hit is treated as noise (incidental references) and dropped so the
+        # filename baseline stands. The upper-left label is allowed to cross sections.
+        if (
+            content_canon is not None
+            and not content_cross
+            and filename_primary is not None
+            and filename_primary != content_canon
+            and section_for(
+                content_canon, lexicon["families"].get(content_canon, "other"), section_map
             )
+            != filename_section
+        ):
+            content_canon = None
 
         if llm_canon:
             # (1) The document-level OCR->LLM consolidation is the strongest in-file signal. It is
@@ -741,8 +821,9 @@ def classify_document(
                 evidence = "combined"
                 conflict = not same_section
         elif content_canon is not None and len(filename_facets) <= 1:
-            # (2) Instrument read directly from the (de-glyphed) page text. Overrides a single or
-            # empty filename instrument -- never the other way around.
+            # (2)/(3) A trustworthy in-file instrument read. The upper-left label may override a
+            # single/empty filename across sections (flagged when it does); a footer/credit read
+            # only relabels within a section (enforced above). The filename part index is kept.
             family = lexicon["families"].get(content_canon, "other")
             content_section = section_for(content_canon, family, section_map)
             instruments = [{
@@ -764,7 +845,7 @@ def classify_document(
                 confidence = 0.50
                 evidence = "text"
             else:
-                # Page text names a different instrument than the filename -> content wins.
+                # In-file label names a different instrument than the filename -> content wins.
                 filename_match = True
                 same_section = filename_section == content_section
                 confidence = 0.80 if same_section else 0.70
