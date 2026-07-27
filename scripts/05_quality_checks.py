@@ -269,19 +269,31 @@ def evaluate_page(
     Only checks whose underlying Script 02 metric is present are evaluated; a null metric never
     produces an issue. OCR illegibility is only asserted when OCR actually found words (so pure
     notation pages with no text are not penalized).
+
+    Resolution and legibility are raster concerns: the render-pixel resolution fallback and the
+    alphanumeric-ratio legibility proxy are applied only to image-based / OCR'd pages. Born-digital
+    (embedded-text) pages have no intrinsic scan resolution and carry an authoritative text layer,
+    so neither fallback fires for them.
     """
     qc = thresholds["quality_checks"]
     text = text or {}
     issues: list[str] = []
 
+    page_is_raster = bool(page.get("is_image_based"))
+
     est_dpi = _num(page.get("estimated_dpi"))
     width = _num(page.get("render_width_px"))
     height = _num(page.get("render_height_px"))
     low_resolution = False
-    if est_dpi is not None:
-        low_resolution = est_dpi < qc["min_estimated_dpi"]
-    elif width is not None and height is not None:
-        low_resolution = width < qc["min_render_width_px"] or height < qc["min_render_height_px"]
+    if page_is_raster:
+        # Resolution is only meaningful for scanned pages. On born-digital pages the readable
+        # content is vector; a present estimated_dpi merely reflects some embedded decorative
+        # image (e.g. a logo) and says nothing about the legibility of the page.
+        if est_dpi is not None:
+            low_resolution = est_dpi < qc["min_estimated_dpi"]
+        elif width is not None and height is not None:
+            # Render pixels only proxy scan resolution when there is no measured DPI.
+            low_resolution = width < qc["min_render_width_px"] or height < qc["min_render_height_px"]
     if low_resolution:
         issues.append(ISSUE_LOW_RESOLUTION)
 
@@ -319,10 +331,19 @@ def evaluate_page(
         conf = _num(text.get("ocr_confidence"))
         ocr_word_count = _num(text.get("ocr_word_count")) or 0.0
         alnum = _num(text.get("alnum_ratio"))
+        text_from_ocr = text.get("text_source") == "ocr" or bool(text.get("ocr_applied"))
         if conf is not None and ocr_word_count > 0:
             if conf < qc["min_ocr_confidence"]:
                 issues.append(ISSUE_OCR_ILLEGIBLE)
-        elif alnum is not None and word_count > 0 and alnum < qc["min_alnum_ratio_proxy"]:
+        elif (
+            text_from_ocr
+            and alnum is not None
+            and word_count > 0
+            and alnum < qc["min_alnum_ratio_proxy"]
+        ):
+            # alnum-ratio is a legibility proxy for OCR'd raster text only. Embedded (born-digital)
+            # text is authoritative regardless of its alphanumeric density, which runs naturally low
+            # on scores (dynamics, rehearsal marks, tempo, numbers) without impairing legibility.
             issues.append(ISSUE_OCR_ILLEGIBLE)
 
     return issues

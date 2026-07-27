@@ -113,15 +113,34 @@ def test_evaluate_page_clean_has_no_issues():
 
 
 def test_evaluate_page_low_resolution_by_dpi():
-    issues = qc.evaluate_page(_page(estimated_dpi=120), _text(), _thr())
+    issues = qc.evaluate_page(_page(estimated_dpi=120, is_image_based=True), _text(), _thr())
     assert qc.ISSUE_LOW_RESOLUTION in issues
+
+
+def test_evaluate_page_born_digital_low_dpi_image_not_low_resolution():
+    # A born-digital page may embed a low-res decorative image (e.g. a logo); its DPI must not
+    # penalize the vector page, whose text has no intrinsic resolution limit.
+    page = _page(estimated_dpi=97.9, image_count=1, is_image_based=False)
+    issues = qc.evaluate_page(page, _text(), _thr())
+    assert qc.ISSUE_LOW_RESOLUTION not in issues
 
 
 def test_evaluate_page_low_resolution_by_dimensions():
-    # No estimated_dpi, but rendered small.
-    page = _page(estimated_dpi=None, render_width_px=600, render_height_px=800)
+    # No estimated_dpi, but a raster page rendered small.
+    page = _page(
+        estimated_dpi=None, render_width_px=600, render_height_px=800, is_image_based=True
+    )
     issues = qc.evaluate_page(page, _text(), _thr())
     assert qc.ISSUE_LOW_RESOLUTION in issues
+
+
+def test_evaluate_page_born_digital_small_render_not_low_resolution():
+    # A vector page's render pixels reflect physical size, not quality; never flag low resolution.
+    page = _page(
+        estimated_dpi=None, render_width_px=600, render_height_px=800, is_image_based=False
+    )
+    issues = qc.evaluate_page(page, _text(), _thr())
+    assert qc.ISSUE_LOW_RESOLUTION not in issues
 
 
 def test_evaluate_page_excessive_skew():
@@ -168,9 +187,19 @@ def test_evaluate_page_ocr_illegible_by_confidence():
 
 
 def test_evaluate_page_ocr_illegible_by_alnum_proxy():
-    # No OCR confidence available; alnum ratio is the interim proxy.
-    text = _text(ocr_confidence=None, ocr_word_count=0, alnum_ratio=0.2, word_count=20)
-    assert qc.ISSUE_OCR_ILLEGIBLE in qc.evaluate_page(_page(), text, _thr())
+    # No OCR confidence available; alnum ratio is the interim proxy for OCR'd raster text.
+    text = _text(
+        text_source="ocr", ocr_confidence=None, ocr_word_count=0, alnum_ratio=0.2, word_count=20
+    )
+    assert qc.ISSUE_OCR_ILLEGIBLE in qc.evaluate_page(_page(is_image_based=True), text, _thr())
+
+
+def test_evaluate_page_born_digital_low_alnum_not_illegible():
+    # Embedded (born-digital) text is authoritative; low alnum density on a score is not illegible.
+    text = _text(
+        text_source="embedded", ocr_confidence=None, ocr_word_count=0, alnum_ratio=0.2, word_count=20
+    )
+    assert qc.ISSUE_OCR_ILLEGIBLE not in qc.evaluate_page(_page(is_image_based=False), text, _thr())
 
 
 def test_evaluate_page_missing_metrics_are_not_flagged():
