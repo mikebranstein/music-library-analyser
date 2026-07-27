@@ -236,6 +236,32 @@ def test_parse_lookup_response_fallback_last_json():
     assert result["match_found"] is False
 
 
+def test_parse_lookup_response_tolerates_trailing_commas():
+    stdout = (
+        f"{expected.RESULT_START}\n"
+        '{"match_found": true, "expected_parts": ["flute", "oboe",],}\n'
+        f"{expected.RESULT_END}\n"
+    )
+    result = expected.parse_lookup_response(stdout)
+    assert result["match_found"] is True
+    assert result["expected_parts"] == ["flute", "oboe"]
+
+
+def test_parse_lookup_response_invalid_reports_payload():
+    # Unescaped inner quote is not auto-repaired; the error must surface the payload snippet.
+    bad = (
+        f"{expected.RESULT_START}\n"
+        '{"match_found": true, "notes": "uses a "special" flute"}\n'
+        f"{expected.RESULT_END}\n"
+    )
+    try:
+        expected.parse_lookup_response(bad)
+    except ValueError as exc:
+        assert "payload was:" in str(exc)
+        return
+    raise AssertionError("expected ValueError")
+
+
 def test_parse_lookup_response_invalid_raises():
     try:
         expected.parse_lookup_response("no json at all")

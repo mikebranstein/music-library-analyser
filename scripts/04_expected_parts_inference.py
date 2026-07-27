@@ -372,6 +372,29 @@ def build_cli_args(config: dict[str, Any], prompt: str) -> list[str]:
     return args
 
 
+def _loads_json_lenient(candidate: str) -> dict[str, Any]:
+    """Parse a JSON object, tolerating trailing commas the model sometimes emits.
+
+    Tries strict parsing first; on failure retries once after stripping trailing commas before
+    ``}``/``]`` (a safe, common LLM glitch). Other malformations (e.g. unescaped quotes inside a
+    string value) are not repaired -- they re-raise so the caller can log and degrade. Raises
+    ``ValueError`` with a payload snippet so the failure is diagnosable from the logs.
+    """
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError as exc:
+        repaired = re.sub(r",(\s*[}\]])", r"\1", candidate)
+        if repaired != candidate:
+            try:
+                return json.loads(repaired)
+            except json.JSONDecodeError:
+                pass
+        snippet = candidate.replace("\n", "\\n")
+        if len(snippet) > 400:
+            snippet = snippet[:400] + "..."
+        raise ValueError(f"{exc}; payload was: {snippet}") from exc
+
+
 def parse_lookup_response(stdout: str) -> dict[str, Any]:
     """Extract and parse the single JSON result object from the CLI stdout.
 
@@ -384,13 +407,13 @@ def parse_lookup_response(stdout: str) -> dict[str, Any]:
         end = text.index(RESULT_END, start)
         candidate = text[start:end].strip()
         candidate = candidate.strip("`").strip()
-        return json.loads(candidate)
+        return _loads_json_lenient(candidate)
 
     first = text.find("{")
     last = text.rfind("}")
     if first == -1 or last <= first:
         raise ValueError("No JSON object found in lookup response.")
-    return json.loads(text[first:last + 1])
+    return _loads_json_lenient(text[first:last + 1])
 
 
 def run_copilot_lookup(prompt: str, config: dict[str, Any]) -> dict[str, Any]:
