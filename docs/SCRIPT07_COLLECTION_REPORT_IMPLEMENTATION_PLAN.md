@@ -59,15 +59,19 @@ carries a `piece_id` are aggregated.
 > queues, Script 07 emits only the flat `pieces.csv` collection export; Script 08 consumes the
 > per-piece records (and this CSV if useful) to build the prioritized `manual_review_queue`.
 
-## 5. Aggregate record (`summary.json`, schema 1.0)
+## 5. Aggregate record (`summary.json`, schema 1.1)
 
 On top of `new_record_envelope`:
 
-- `piece_count`, `source_dir`.
+- `piece_count`, `pieces_skipped`, `source_dir`.
+- `record_version_distribution`: count of each Script 06 schema version across the input records
+  (v1.1 data-health guard; mixed/stale versions => some aggregates may be incomplete).
 - `totals`: `pieces`, `pieces_complete`, `pieces_with_missing_required`, `pieces_missing_score`,
   `pieces_needs_review`, `pieces_high_severity`, `pieces_with_errors`, `documents`,
   `documents_low_quality`, `documents_handwritten`.
 - `completeness_distribution`: count per tier in `COMPLETENESS_TIER_ORDER`.
+- `completeness_score_summary`: `{count, mean, median, min, max}` over the per-piece
+  `completeness_score` floats (v1.1 numeric KPI; `None` values when no piece is scored).
 - `lookup_status_distribution`: count per status in `LOOKUP_STATUS_ORDER`.
 - `severity_distribution`: count per severity in `SEVERITY_ORDER` (`high` → `review` → `ok`).
 - `quality_band_distribution`: document-level `good`/`review`/`poor`/`unknown` summed across pieces.
@@ -79,20 +83,26 @@ On top of `new_record_envelope`:
   across the whole library."
 - `attention_pieces`: the high-severity pieces (catalog, title, `piece_id`, reason codes) for the
   dashboard's call-out list, ordered by `piece_sort_key`.
+- `pieces`: the v1.1 **structured per-piece index** (see §11) — the stable Script 08 contract and the
+  source that `pieces.csv` projects.
 
 ## 6. Markdown report (`summary.md`) sections
 
 1. **Header + run metadata** — generated timestamp, run id, piece count, source directory.
+   A **Data health** callout appears only when files were skipped or a schema version other than the
+   expected one is present.
 2. **Headline totals** — complete / missing-required / missing-score / needs-review / high-severity
    counts with percentages (`pct`).
-3. **Completeness distribution** — table over `COMPLETENESS_TIER_ORDER`.
-4. **Instrumentation lookup distribution** — table over `LOOKUP_STATUS_ORDER`.
-5. **Severity distribution** — table over `SEVERITY_ORDER`.
-6. **Scan quality** — document-level band distribution + total low-quality / handwritten documents.
-7. **Reason-code frequency** — how many pieces hit each reason code (with the shared action string).
-8. **Top missing instruments** — the most-often-missing required instruments across the library.
-9. **Pieces needing attention** — high-severity pieces, each linking to its per-piece report
-   (`../piece_reports/<piece_id>.md`).
+3. **Collection completeness** — one-line numeric KPI (mean / median / range) from
+   `completeness_score_summary`, shown when at least one piece is scored.
+4. **Completeness distribution** — table over `COMPLETENESS_TIER_ORDER`.
+5. **Instrumentation lookup distribution** — table over `LOOKUP_STATUS_ORDER`.
+6. **Severity distribution** — table over `SEVERITY_ORDER`.
+7. **Scan quality** — document-level band distribution + total low-quality / handwritten documents.
+8. **Reason-code frequency** — how many pieces hit each reason code (with the shared action string).
+9. **Top missing instruments** — the most-often-missing required instruments across the library.
+10. **Pieces needing attention** — high-severity pieces, each linking to its per-piece report
+    (`../piece_reports/<piece_id>.md`).
 
 All tables escape cells with `md_cell` and use `pct` for percentages; no verdict/QA language.
 
@@ -131,10 +141,28 @@ all three outputs.
 
 ## 10. Downstream implications (Script 08)
 
-- Script 08 (Manual Review Pack) builds the **prioritized** queue. It reads the per-piece records
-  (schema 1.1) for `reason_codes` / `action_items` / magnitude counts and MAY read Script 07's
-  `summary.json` for collection context (e.g. to rank against library-wide frequencies) and
-  `pieces.csv` as a starting grid. Script 08 owns the authoritative priority formula; Script 07's
-  aggregates are descriptive, not prescriptive.
-- The `summary.json` schema (`record_version 1.0`) is the stable contract; the Markdown/CSV are
-  presentation layers.
+- Script 08 (Manual Review Pack) builds the **prioritized** queue. As of schema 1.1 it can read a
+  **single file** \u2014 `summary.json` \u2014 whose `pieces[]` index carries every per-piece magnitude count
+  and `reason_codes` array it needs, instead of re-opening each per-piece report. It MAY still open
+  the individual records for the richer `action_items` (named target documents/parts) and page
+  thumbnails, and MAY read the collection distributions to rank a piece against library-wide
+  frequencies. Script 08 owns the authoritative priority formula; Script 07's aggregates are
+  descriptive, not prescriptive.
+- The `summary.json` schema (`record_version 1.1`) is the stable contract; the Markdown/CSV are
+  presentation layers (`pieces.csv` is a flat projection of `pieces[]`).
+
+## 11. v1.1 enhancements (gap analysis)
+
+Auditing the v1.0 output against what Script 08 and a maintainer actually need surfaced three gaps.
+All three additions stay descriptive (no priority logic) and keep Script 07 a pure offline aggregate.
+
+| # | Gap in v1.0 | v1.1 addition | Why it matters |
+|---|-------------|---------------|----------------|
+| 1 | The only per-piece data in the stable JSON contract was `attention_pieces` (high-severity only); the full grid lived only in `pieces.csv`, a presentation layer | `pieces[]` structured index in `summary.json` (severity, tiers, `completeness_score`, magnitude counts, `review_counts`, `reason_codes[]`), ordered by `piece_sort_key`; `pieces.csv` is now a projection of it | Script 08 reads one stable JSON file to prioritize instead of re-opening every per-piece report or parsing a CSV |
+| 2 | Records were aggregated blindly; an older Script 06 schema (e.g. a partial re-run) would silently read newer fields as 0 and under-count | `record_version_distribution` + `pieces_skipped`, a run-time warning when versions are mixed/stale or files are skipped, and a **Data health** callout in `summary.md` | Prevents silently-wrong collection numbers; makes stale/partial state visible |
+| 3 | Completeness was only bucketed into tiers; the underlying `completeness_score` float was never surfaced | `completeness_score_summary` (`count` / `mean` / `median` / `min` / `max`) + a one-line KPI in `summary.md` | Gives a single trackable \"how complete is the library\" number for maintainers and downstream ranking |
+
+`RECORD_VERSION` bumped `1.0` \u2192 `1.1`; `EXPECTED_PIECE_SCHEMA = "1.1"` gates the data-health guard.
+Tests extended in `tests/test_collection_report.py` (load skip accounting, `pieces[]` index,
+`record_version_distribution`, `completeness_score_summary`, `pieces_skipped`, and the Data-health
+Markdown note).

@@ -14,10 +14,11 @@ import csv
 import io
 import json
 import logging
+import statistics
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import typer
 
@@ -39,7 +40,12 @@ from scripts._common import (
     setup_logging,
 )
 
-RECORD_VERSION = "1.0"
+RECORD_VERSION = "1.1"
+
+# The Script 06 per-piece schema this aggregator is written against. Records at any other version
+# are still counted, but their newer/older fields may be missing, so aggregates from them can be
+# incomplete; main() warns when the input set is not uniformly this version.
+EXPECTED_PIECE_SCHEMA = "1.1"
 
 app = typer.Typer(add_completion=False)
 
@@ -48,18 +54,27 @@ logger = logging.getLogger("script07.collection_report")
 CHECKPOINT_FILENAME = ".piece_report_checkpoint.json"
 
 
+class LoadResult(NamedTuple):
+    """Outcome of scanning the piece-reports directory."""
+
+    records: list[dict[str, Any]]
+    skipped: int
+
+
 # --- Input loading ----------------------------------------------------------------------------
 
 
-def load_piece_records(piece_reports_dir: Path) -> list[dict[str, Any]]:
+def load_piece_records(piece_reports_dir: Path) -> LoadResult:
     """Read every per-piece JSON record from the Script 06 output directory.
 
     Only files whose payload is an object with a ``piece_id`` are kept (this skips the checkpoint
-    dotfile and any stray files). Malformed JSON is skipped with a warning.
+    dotfile and any stray files). Unreadable/malformed files and non-piece payloads are skipped and
+    counted so the caller can surface a data-health warning.
     """
     records: list[dict[str, Any]] = []
+    skipped = 0
     if not piece_reports_dir.exists():
-        return records
+        return LoadResult(records, skipped)
     for path in sorted(piece_reports_dir.glob("*.json")):
         if path.name == CHECKPOINT_FILENAME:
             continue
@@ -68,10 +83,14 @@ def load_piece_records(piece_reports_dir: Path) -> list[dict[str, Any]]:
                 payload = json.load(f)
         except (OSError, json.JSONDecodeError) as exc:
             logger.warning("Skipping unreadable piece report %s: %s", path, exc)
+            skipped += 1
             continue
         if isinstance(payload, dict) and payload.get("piece_id"):
             records.append(payload)
-    return records
+        else:
+            logger.warning("Skipping %s: not a piece report (no piece_id).", path)
+            skipped += 1
+    return LoadResult(records, skipped)
 
 
 # --- Aggregation ------------------------------------------------------------------------------
@@ -163,7 +182,75 @@ def _attention_pieces(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
-def build_summary(records: list[dict[str, Any]], run_id: str, source_dir: str) -> dict[str, Any]:
+def _record_version_distribution(records: list[dict[str, Any]]) -> dict[str, int]:
+    """Count the Script 06 schema version of each input record (mixed versions => stale reports)."""
+    dist: dict[str, int] = {}
+    for rec in records:
+        version = rec.get("record_version") or "unknown"
+        dist[version] = dist.get(version, 0) + 1
+    return dict(sorted(dist.items()))
+
+
+def _completeness_score_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Numeric summary of the per-piece ``completeness_score`` floats (a collection KPI)."""
+    scores = [
+        float(rec["completeness_score"])
+        for rec in records
+        if isinstance(rec.get("completeness_score"), (int, float))
+    ]
+    if not scores:
+        return {"count": 0, "mean": None, "median": None, "min": None, "max": None}
+    return {
+        "count": len(scores),
+        "mean": round(statistics.fmean(scores), 3),
+        "median": round(statistics.median(scores), 3),
+        "min": round(min(scores), 3),
+        "max": round(max(scores), 3),
+    }
+
+
+def _pieces_index(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Normalized per-piece grid embedded in summary.json (the stable Script 08 contract).
+
+    This is the structured superset of ``pieces.csv``: it carries the magnitude counts and
+    ``reason_codes`` (as a real array) that Script 08 needs to prioritize, so downstream scripts can
+    read one JSON file instead of re-opening every per-piece report. Ordered by ``piece_sort_key``.
+    """
+    rows: list[dict[str, Any]] = []
+    for rec in sorted(records, key=piece_sort_key):
+        quality = rec.get("quality_summary") or {}
+        review = rec.get("review_counts") or {}
+        rows.append(
+            {
+                "piece_id": rec.get("piece_id"),
+                "catalog_number": rec.get("catalog_number"),
+                "piece_title_guess": rec.get("piece_title_guess") or rec.get("piece_folder"),
+                "severity": rec.get("severity"),
+                "completeness_tier": rec.get("completeness_tier"),
+                "completeness_score": rec.get("completeness_score"),
+                "needs_review": bool(rec.get("needs_review")),
+                "score_missing": bool(rec.get("score_missing")),
+                "missing_required_count": int(rec.get("missing_required_count") or 0),
+                "unexpected_part_count": int(rec.get("unexpected_part_count") or 0),
+                "document_count": int(rec.get("document_count") or 0),
+                "worst_quality_band": rec.get("worst_quality_band"),
+                "low_quality_doc_count": int(quality.get("low_quality_doc_count") or 0),
+                "handwritten_doc_count": int(quality.get("handwritten_doc_count") or 0),
+                "review_counts": {
+                    "needs_review_count": int(review.get("needs_review_count") or 0),
+                    "low_confidence_count": int(review.get("low_confidence_count") or 0),
+                    "unmatched_count": int(review.get("unmatched_count") or 0),
+                    "duplicate_count": int(review.get("duplicate_count") or 0),
+                },
+                "reason_codes": list(rec.get("reason_codes") or []),
+            }
+        )
+    return rows
+
+
+def build_summary(
+    records: list[dict[str, Any]], run_id: str, source_dir: str, skipped: int = 0
+) -> dict[str, Any]:
     """Assemble the machine-readable collection aggregate record (schema RECORD_VERSION)."""
     total = len(records)
 
@@ -197,11 +284,14 @@ def build_summary(records: list[dict[str, Any]], run_id: str, source_dir: str) -
 
     record = new_record_envelope(run_id, RECORD_VERSION)
     record["piece_count"] = total
+    record["pieces_skipped"] = skipped
     record["source_dir"] = source_dir
+    record["record_version_distribution"] = _record_version_distribution(records)
     record["totals"] = totals
     record["completeness_distribution"] = _count_by(
         records, "completeness_tier", COMPLETENESS_TIER_ORDER
     )
+    record["completeness_score_summary"] = _completeness_score_summary(records)
     record["lookup_status_distribution"] = _count_by(records, "lookup_status", LOOKUP_STATUS_ORDER)
     record["severity_distribution"] = _count_by(records, "severity", SEVERITY_ORDER)
     record["quality_band_distribution"] = _sum_band_counts(records)
@@ -209,6 +299,7 @@ def build_summary(records: list[dict[str, Any]], run_id: str, source_dir: str) -
     record["review_totals"] = _review_totals(records)
     record["top_missing_instruments"] = _top_missing_instruments(records)
     record["attention_pieces"] = _attention_pieces(records)
+    record["pieces"] = _pieces_index(records)
     return record
 
 
@@ -239,6 +330,23 @@ def render_summary(rec: dict[str, Any], piece_reports_dirname: str) -> str:
     )
     out.append("")
 
+    # Data-health callout: only shown when something needs the maintainer's attention.
+    skipped = int(rec.get("pieces_skipped") or 0)
+    versions = rec.get("record_version_distribution") or {}
+    unexpected_versions = {v: c for v, c in versions.items() if v != EXPECTED_PIECE_SCHEMA}
+    if skipped or unexpected_versions:
+        notes: list[str] = []
+        if skipped:
+            notes.append(f"{skipped} file(s) skipped (unreadable or not a piece report)")
+        if unexpected_versions:
+            rendered = ", ".join(f"{v}: {c}" for v, c in unexpected_versions.items())
+            notes.append(
+                f"schema version(s) other than {EXPECTED_PIECE_SCHEMA} present ({rendered}); "
+                "some aggregates may be incomplete - re-run Script 06"
+            )
+        out.append(f"> **Data health:** {'; '.join(notes)}.")
+        out.append("")
+
     # Headline totals.
     out.append("## Headline")
     out.append("")
@@ -261,6 +369,19 @@ def render_summary(rec: dict[str, Any], piece_reports_dirname: str) -> str:
         f"| Documents handwritten/uncertain | {int(totals.get('documents_handwritten') or 0)} | |"
     )
     out.append("")
+
+    # Collection completeness index (numeric KPI over the per-piece completeness scores).
+    comp = rec.get("completeness_score_summary") or {}
+    if comp.get("count"):
+        out.append("## Collection completeness")
+        out.append("")
+        out.append(
+            f"Mean completeness across {comp['count']} scored piece(s): "
+            f"**{pct(comp['mean'], 1):.0f}%** "
+            f"(median {pct(comp['median'], 1):.0f}%, "
+            f"range {pct(comp['min'], 1):.0f}%-{pct(comp['max'], 1):.0f}%)."
+        )
+        out.append("")
 
     out.append("## Distributions")
     out.append("")
@@ -337,6 +458,7 @@ CSV_COLUMNS = (
     "piece_id",
     "severity",
     "completeness_tier",
+    "completeness_score",
     "needs_review",
     "missing_required_count",
     "unexpected_part_count",
@@ -349,29 +471,29 @@ CSV_COLUMNS = (
 )
 
 
-def render_pieces_csv(records: list[dict[str, Any]]) -> str:
-    """Render the flat, non-prioritized one-row-per-piece CSV export (ordered by catalog)."""
+def render_pieces_csv(pieces: list[dict[str, Any]]) -> str:
+    """Render the flat per-piece CSV as a projection of the summary.json ``pieces[]`` index."""
     buffer = io.StringIO()
     writer = csv.writer(buffer)
     writer.writerow(CSV_COLUMNS)
-    for rec in sorted(records, key=piece_sort_key):
-        quality = rec.get("quality_summary") or {}
+    for row in pieces:
         writer.writerow(
             [
-                rec.get("catalog_number") or "",
-                rec.get("piece_title_guess") or rec.get("piece_folder") or "",
-                rec.get("piece_id") or "",
-                rec.get("severity") or "",
-                rec.get("completeness_tier") or "",
-                bool(rec.get("needs_review")),
-                int(rec.get("missing_required_count") or 0),
-                int(rec.get("unexpected_part_count") or 0),
-                bool(rec.get("score_missing")),
-                rec.get("worst_quality_band") or "",
-                int(quality.get("low_quality_doc_count") or 0),
-                int(quality.get("handwritten_doc_count") or 0),
-                int(rec.get("document_count") or 0),
-                "; ".join(rec.get("reason_codes") or []),
+                row.get("catalog_number") or "",
+                row.get("piece_title_guess") or "",
+                row.get("piece_id") or "",
+                row.get("severity") or "",
+                row.get("completeness_tier") or "",
+                row.get("completeness_score") if row.get("completeness_score") is not None else "",
+                bool(row.get("needs_review")),
+                int(row.get("missing_required_count") or 0),
+                int(row.get("unexpected_part_count") or 0),
+                bool(row.get("score_missing")),
+                row.get("worst_quality_band") or "",
+                int(row.get("low_quality_doc_count") or 0),
+                int(row.get("handwritten_doc_count") or 0),
+                int(row.get("document_count") or 0),
+                "; ".join(row.get("reason_codes") or []),
             ]
         )
     return buffer.getvalue()
@@ -409,7 +531,8 @@ def main(
     piece_reports_dir = piece_reports_dir.resolve()
     output_dir = output_dir.resolve()
 
-    records = load_piece_records(piece_reports_dir)
+    loaded = load_piece_records(piece_reports_dir)
+    records = loaded.records
     if not records:
         raise typer.BadParameter(
             f"No piece reports found in {piece_reports_dir}. Run Script 06 first."
@@ -417,13 +540,31 @@ def main(
 
     logger.info("Aggregating %d piece report(s) from %s.", len(records), piece_reports_dir)
 
-    summary = build_summary(records, run_id, piece_reports_dir.as_posix())
+    summary = build_summary(records, run_id, piece_reports_dir.as_posix(), skipped=loaded.skipped)
+
+    # Data-health warnings (do not fail the run; the aggregate is still written).
+    if loaded.skipped:
+        logger.warning(
+            "Skipped %d unreadable/invalid file(s) in %s.", loaded.skipped, piece_reports_dir
+        )
+    unexpected_versions = {
+        v: c
+        for v, c in (summary.get("record_version_distribution") or {}).items()
+        if v != EXPECTED_PIECE_SCHEMA
+    }
+    if unexpected_versions:
+        logger.warning(
+            "Piece reports include schema version(s) other than %s (%s); some aggregates may be "
+            "incomplete. Re-run Script 06 to refresh them.",
+            EXPECTED_PIECE_SCHEMA,
+            unexpected_versions,
+        )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_json(output_dir / "summary.json", summary)
     atomic_write_text(output_dir / "summary.md", render_summary(summary, piece_reports_dir.name))
     if write_csv:
-        atomic_write_text(output_dir / "pieces.csv", render_pieces_csv(records))
+        atomic_write_text(output_dir / "pieces.csv", render_pieces_csv(summary["pieces"]))
 
     totals = summary["totals"]
     logger.info(

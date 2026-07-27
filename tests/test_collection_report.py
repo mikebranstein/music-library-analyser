@@ -85,8 +85,10 @@ def test_load_skips_checkpoint_and_non_piece_files(tmp_path: Path) -> None:
     (d / ".piece_report_checkpoint.json").write_text('{"run_id": "x"}', encoding="utf-8")
     (d / "notes.json").write_text('{"no_piece_id": true}', encoding="utf-8")
     (d / "broken.json").write_text("{not json", encoding="utf-8")
-    records = cr.load_piece_records(d)
-    assert [r["piece_id"] for r in records] == ["p1"]
+    loaded = cr.load_piece_records(d)
+    assert [r["piece_id"] for r in loaded.records] == ["p1"]
+    # notes.json (no piece_id) and broken.json (bad JSON) are counted as skipped; checkpoint is not.
+    assert loaded.skipped == 2
 
 
 # --- Totals ---------------------------------------------------------------------------------
@@ -311,14 +313,86 @@ def test_pieces_csv_shape_and_order(tmp_path: Path) -> None:
         _piece("p2", catalog_number="020"),
         _piece("p1", catalog_number="010", reason_codes=["missing_score", "missing_required_parts"]),
     ]
-    text = cr.render_pieces_csv(records)
+    text = cr.render_pieces_csv(cr._pieces_index(records))
     rows = list(csv.reader(io.StringIO(text)))
     assert rows[0] == list(cr.CSV_COLUMNS)
+    assert "completeness_score" in cr.CSV_COLUMNS
     # Sorted by catalog number.
     assert rows[1][0] == "010"
     assert rows[2][0] == "020"
     # reason_codes joined with "; ".
     assert rows[1][cr.CSV_COLUMNS.index("reason_codes")] == "missing_score; missing_required_parts"
+
+
+# --- Schema 1.1 additions -------------------------------------------------------------------
+
+
+def test_summary_record_version_and_pieces_index(tmp_path: Path) -> None:
+    records = [
+        _piece("p2", catalog_number="020", severity="high", reason_codes=["missing_score"]),
+        _piece("p1", catalog_number="010", missing_required_count=2),
+    ]
+    summary = cr.build_summary(records, "run1", "src")
+    assert summary["record_version"] == "1.1"
+    pieces = summary["pieces"]
+    # Ordered by catalog number, full structured payload for Script 08.
+    assert [p["catalog_number"] for p in pieces] == ["010", "020"]
+    p1 = pieces[0]
+    assert p1["missing_required_count"] == 2
+    assert isinstance(p1["reason_codes"], list)
+    assert p1["review_counts"]["needs_review_count"] == 0
+    assert pieces[1]["reason_codes"] == ["missing_score"]
+
+
+def test_record_version_distribution_counts_versions(tmp_path: Path) -> None:
+    records = [
+        _piece("p1", record_version="1.1"),
+        _piece("p2", record_version="1.1"),
+        _piece("p3", record_version="1.0"),
+    ]
+    summary = cr.build_summary(records, "run1", "src")
+    assert summary["record_version_distribution"] == {"1.0": 1, "1.1": 2}
+
+
+def test_completeness_score_summary(tmp_path: Path) -> None:
+    records = [
+        _piece("p1", completeness_score=0.6),
+        _piece("p2", completeness_score=0.8),
+        _piece("p3", completeness_score=1.0),
+    ]
+    summary = cr.build_summary(records, "run1", "src")
+    comp = summary["completeness_score_summary"]
+    assert comp["count"] == 3
+    assert comp["mean"] == 0.8
+    assert comp["median"] == 0.8
+    assert comp["min"] == 0.6
+    assert comp["max"] == 1.0
+
+
+def test_completeness_score_summary_handles_missing_scores(tmp_path: Path) -> None:
+    records = [_piece("p1")]
+    records[0].pop("completeness_score", None)
+    summary = cr.build_summary(records, "run1", "src")
+    assert summary["completeness_score_summary"] == {
+        "count": 0,
+        "mean": None,
+        "median": None,
+        "min": None,
+        "max": None,
+    }
+
+
+def test_pieces_skipped_recorded(tmp_path: Path) -> None:
+    summary = cr.build_summary([_piece("p1")], "run1", "src", skipped=3)
+    assert summary["pieces_skipped"] == 3
+
+
+def test_data_health_note_rendered_for_mixed_versions(tmp_path: Path) -> None:
+    records = [_piece("p1", record_version="1.0")]
+    summary = cr.build_summary(records, "run1", "src", skipped=1)
+    md = cr.render_summary(summary, "piece_reports")
+    assert "Data health" in md
+    assert "1 file(s) skipped" in md
 
 
 # --- CLI ------------------------------------------------------------------------------------
@@ -344,8 +418,9 @@ def test_cli_end_to_end_writes_all_outputs(tmp_path: Path) -> None:
     )
     assert result.exit_code == 0, result.output
     summary_json = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
-    assert summary_json["record_version"] == "1.0"
+    assert summary_json["record_version"] == "1.1"
     assert summary_json["piece_count"] == 2
+    assert len(summary_json["pieces"]) == 2
     assert (out_dir / "summary.md").exists()
     assert (out_dir / "pieces.csv").exists()
     md = (out_dir / "summary.md").read_text(encoding="utf-8")

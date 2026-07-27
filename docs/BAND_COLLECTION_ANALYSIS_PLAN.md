@@ -611,7 +611,7 @@ Outputs:
 
 ## 4.7 Script 07: Collection Report (`07_collection_report.py`)
 
-**Status: implemented (schema 1.0).** See
+**Status: implemented (schema 1.1).** See
 [`docs/SCRIPT07_COLLECTION_REPORT_IMPLEMENTATION_PLAN.md`](SCRIPT07_COLLECTION_REPORT_IMPLEMENTATION_PLAN.md)
 for the full design.
 
@@ -642,6 +642,17 @@ Metrics (all present in `summary.json`):
   each piece's `expected_parts[]` where `required` and not `present`; counts distinct pieces)
 - summed review counts and the high-severity `attention_pieces` list (ordered by `piece_sort_key`)
 
+Schema 1.1 additions (see the plan doc §11 gap analysis) — all still descriptive, no priority logic:
+
+- `pieces[]`: a structured per-piece index in `summary.json` (severity, tiers, `completeness_score`,
+  magnitude counts, `review_counts`, `reason_codes[]`) so Script 08 reads one stable JSON file to
+  prioritize; `pieces.csv` is now a flat projection of it
+- `record_version_distribution` + `pieces_skipped` with a run-time warning and a **Data health**
+  Markdown callout when input schema versions are mixed/stale or files are skipped (guards against
+  silently-wrong aggregates)
+- `completeness_score_summary` (`count` / `mean` / `median` / `min` / `max`) surfacing the numeric
+  `completeness_score` as a single collection KPI
+
 Shared infrastructure (reuse from `scripts._common`; see §4.9):
 
 - Iterate `LOOKUP_STATUS_ORDER` / `COMPLETENESS_TIER_ORDER` / `SEVERITY_ORDER` / `REASON_CODE_ORDER`
@@ -656,8 +667,8 @@ uniformity; the aggregate is always fully recomputed), `--log-level`.
 Outputs:
 
 - `data/collection_reports/summary.md` (collection dashboard, linking each attention piece's report)
-- `data/collection_reports/summary.json` (schema 1.0 machine-readable aggregate)
-- `data/collection_reports/pieces.csv` (flat, non-prioritized one-row-per-piece export)
+- `data/collection_reports/summary.json` (schema 1.1 machine-readable aggregate; the stable contract)
+- `data/collection_reports/pieces.csv` (flat per-piece export; a projection of `summary.json` `pieces[]`)
 
 > Deviation from the original plan: the third output is a flat `pieces.csv` rather than a
 > `manual_review_queue.csv`. Prioritization (weighting/ordering the queue) is Script 08's job — see
@@ -696,9 +707,11 @@ Include:
 > Page-1 thumbnails are available from Script 06's per-document `thumbnail_path`.
 >
 > Script 07 also emits collection-level context that Script 08 MAY read instead of re-scanning every
-> piece: `data/collection_reports/summary.json` (reason-code frequency, top missing instruments,
-> distributions) for library-wide framing, and `data/collection_reports/pieces.csv` as a ready flat
-> per-piece table to prioritize. Script 08 owns the queue ordering; Script 07 stays a pure aggregate.
+> piece: as of schema 1.1, `data/collection_reports/summary.json` carries a structured `pieces[]`
+> index (per-piece magnitude counts + `reason_codes[]`) so Script 08 can prioritize from a single
+> file, plus library-wide distributions / reason-code frequency / top missing instruments for
+> framing. `data/collection_reports/pieces.csv` is a flat projection of that index. Script 08 owns the
+> queue ordering; Script 07 stays a pure aggregate.
 
 Shared infrastructure (reuse from `scripts._common`; see §4.9):
 
