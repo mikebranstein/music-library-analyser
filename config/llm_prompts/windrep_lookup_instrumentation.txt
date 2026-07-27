@@ -15,6 +15,11 @@ Piece:
   stage handles those.
 * WindRep is a server-rendered MediaWiki reference; its work pages routinely list full
   instrumentation/parts, program notes, and duration. Fetch the matching work page directly.
+* If the live `windrep.org` page is unreachable, blocked, or times out, fall back to the most
+  recent **Wayback Machine** snapshot of that WindRep work page on `web.archive.org` (for example
+  `https://web.archive.org/web/*/https://www.windrep.org/<Page>`). Treat the archived WindRep page
+  as an acceptable equivalent of the live page -- it is still WindRep content. Do not use archived
+  copies of any non-WindRep site.
 * Try title variations (alternate punctuation/spacing, leading-article dropped, translated or
   non-English titles) and search by composer/arranger when the exact title is uncertain.
 
@@ -51,8 +56,9 @@ Use `identity_match_confidence`:
 
 ## Evidence source rules
 
-Populate `evidence_sources` only with WindRep URLs you actually consulted. Each item must include
-`url` (the exact windrep.org page), `title` (the page title), `snippet` (a short quoted passage that
+Populate `evidence_sources` only with WindRep URLs you actually consulted -- either a live
+`windrep.org` page or a `web.archive.org` snapshot of a `windrep.org` page. Each item must include
+`url` (the exact page you read), `title` (the page title), `snippet` (a short quoted passage that
 lists the instrumentation), and `retrieved` (an ISO date or `"unknown"`).
 
 ## Output contract REQUIRED

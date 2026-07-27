@@ -169,6 +169,11 @@ DEFAULT_LOOKUP_CONFIG: dict[str, Any] = {
     "windrep_api_url": "https://www.windrep.org/api.php",
     "windrep_prompt_template_path": "config/llm_prompts/windrep_lookup_instrumentation.txt",
     "windrep_cache_dir": "cache/windrep",
+    # When live windrep.org is unreachable (e.g. IP-blocked), let the W2 LLM lookup also consult
+    # the Wayback Machine snapshot of the work page. Adds the archive hosts to the W2 URL allowlist
+    # and instructs the prompt to fall back to the latest archived copy.
+    "windrep_wayback_enabled": True,
+    "windrep_wayback_domains": ["web.archive.org", "archive.org"],
 }
 
 DEFAULT_PROMPT_TEMPLATE = (
@@ -1529,7 +1534,12 @@ def infer_piece(
             and windrep_prompt_template
         ):
             logger.info("[%s] Stage W2: querying LLM WindRep lookup", piece_id)
-            windrep_config = {**config, "allowed_domains": ["windrep.org"], "piece_id": piece_id}
+            windrep_domains = ["windrep.org"]
+            if config.get("windrep_wayback_enabled", True):
+                windrep_domains += [
+                    str(d) for d in (config.get("windrep_wayback_domains") or [])
+                ]
+            windrep_config = {**config, "allowed_domains": windrep_domains, "piece_id": piece_id}
             windrep_prompt = render_prompt(windrep_prompt_template, windrep_query)
             try:
                 windrep_result = lookup_fn(windrep_prompt, windrep_config)
@@ -1721,6 +1731,8 @@ def config_fingerprint(
         str(config.get("min_score_ocr_confidence")),
         ",".join(str(t) for t in (config.get("local_score_types_excluded") or ())),
         str(config.get("reocr_dpi")),
+        str(config.get("windrep_wayback_enabled")),
+        ",".join(str(d) for d in (config.get("windrep_wayback_domains") or ())),
         sha256_text(prompt_template),
         sha256_text(summarize_template),
         sha256_text(windrep_prompt_template),

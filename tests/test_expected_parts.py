@@ -963,7 +963,36 @@ def test_infer_piece_windrep_llm_lookup_matches():
     assert rec["lookup_status"] == "matched"
     assert rec["detection_method"] == "windrep_lookup"
     assert rec["inference_method"] == "windrep_lookup"
-    # W2 constrains the lookup to windrep.org.
+    # W2 constrains the lookup to windrep.org, plus the Wayback hosts when the archive fallback
+    # is enabled (default), so a blocked live page can still be read from an archived snapshot.
+    assert seen_domains[0] == ["windrep.org", "web.archive.org", "archive.org"]
+
+
+def test_infer_piece_windrep_wayback_disabled_restricts_to_live_windrep():
+    piece = _piece(observed=[_observed("cornet", 1)])
+    parts = [
+        {"canonical_instrument": "cornet", "part_index": 1, "label": "Cornet 1", "required": True},
+    ]
+
+    seen_domains: list[Any] = []
+
+    def lookup(prompt: str, config: dict[str, Any]) -> dict[str, Any]:
+        seen_domains.append(config.get("allowed_domains"))
+        return _score_result(parts)
+
+    config = dict(expected.DEFAULT_LOOKUP_CONFIG)
+    config["windrep_wayback_enabled"] = False
+    rec = expected.infer_piece(
+        piece, None, "run1",
+        config=config,
+        prompt_template="{title_guess}",
+        lookup_enabled=True,
+        lookup_fn=lookup,
+        windrep_fetch_fn=lambda q, c: None,  # W1 misses, W2 wins
+        windrep_prompt_template="{title_guess}",
+    )
+    assert rec["lookup_status"] == "matched"
+    # With the archive fallback off, the lookup is restricted to the live WindRep host only.
     assert seen_domains[0] == ["windrep.org"]
 
 
