@@ -75,6 +75,9 @@ project-root/
     quality_report.md
     piece_reports/
     collection_reports/
+      summary.md
+      summary.json
+      pieces.csv
   cache/
     ocr/
     llm/
@@ -537,9 +540,10 @@ Per-document record (schema 1.0) fields: envelope (`record_version`, `run_id`, `
 
 ## 4.6 Script 06: Piece Report Generator (`06_piece_report.py`)
 
-> **Status: implemented** (record schema `1.0`). This stage joins upstream signals and derives
+> **Status: implemented** (record schema `1.1`). This stage joins upstream signals and derives
 > reason codes / severity — it computes nothing new about the music. See the detailed design of
-> record in [`SCRIPT06_PIECE_REPORT_IMPLEMENTATION_PLAN.md`](SCRIPT06_PIECE_REPORT_IMPLEMENTATION_PLAN.md).
+> record (including the v1.1 gap analysis) in
+> [`SCRIPT06_PIECE_REPORT_IMPLEMENTATION_PLAN.md`](SCRIPT06_PIECE_REPORT_IMPLEMENTATION_PLAN.md).
 
 Purpose:
 
@@ -574,10 +578,18 @@ Derived fields (added by this stage on top of echoed upstream values):
   `handwritten_or_illegible`, `unexpected_parts`, `low_confidence_parts`, `duplicate_parts`,
   `instrumentation_unresolved` (canonical order defined by `REASON_CODE_ORDER`).
 - `recommended_actions`: the human-readable action string per reason code (`REASON_ACTIONS`).
+- `action_items` (schema 1.1): one entry per reason code carrying its `action` string plus a
+  `targets` list naming the specific offending documents/parts (missing part labels, low-quality /
+  handwritten / low-confidence / duplicate document filenames, unexpected part labels).
 - `severity`: `ok` / `review` / `high` (`high` when a required part or the score is missing, or any
   scan is poor-band).
 - `needs_review`: piece-level roll-up (true when any reason code fires, Script 04 flagged review, or
   the observed rollup reports review-worthy parts).
+- `quality_summary` (schema 1.1): a roll-up of the joined documents — `band_counts`
+  (`good`/`review`/`poor`/`unknown`), `low_quality_doc_count`, and `handwritten_doc_count`.
+- Scalar counts echoed from Script 04 (schema 1.1): `expected_part_count`, `missing_required_count`,
+  `unexpected_part_count`, `observed_instrument_count` (with `len(list)` / observed fallbacks when
+  Script 04 is absent).
 
 Shared infrastructure (reuse from `scripts._common`; see §4.9):
 
@@ -593,45 +605,63 @@ Shared infrastructure (reuse from `scripts._common`; see §4.9):
 Outputs:
 
 - `data/piece_reports/<piece_id>.md`
-- `data/piece_reports/<piece_id>.json`
+- `data/piece_reports/<piece_id>.json` (schema 1.1)
 - `data/piece_reports.md` (top-level index linking every per-piece report)
 - `data/piece_reports/.piece_report_checkpoint.json` (incremental checkpoint)
 
 ## 4.7 Script 07: Collection Report (`07_collection_report.py`)
 
+**Status: implemented (schema 1.0).** See
+[`docs/SCRIPT07_COLLECTION_REPORT_IMPLEMENTATION_PLAN.md`](SCRIPT07_COLLECTION_REPORT_IMPLEMENTATION_PLAN.md)
+for the full design.
+
 Purpose:
 
-Aggregate all piece reports.
+Aggregate every per-piece report into one collection-wide view. Like Script 06 this is a *reporting*
+stage: it recomputes nothing about the music, it only counts / groups / orders the facts Script 06
+already emitted. It reads a single input (`data/piece_reports/*.json`, Script 06 schema 1.1), is
+deterministic and fully offline (no AI, no network), and errors out with a "run Script 06 first"
+message if that directory is empty.
 
-> Script 06 now emits a per-piece JSON record (`data/piece_reports/<piece_id>.json`) carrying the
-> derived `reason_codes` / `severity` / `needs_review` fields plus a `worst_quality_band` roll-up.
-> Script 07 MAY aggregate these directly (e.g. severity distribution, reason-code frequency) instead
-> of recomputing them, while still treating `expected_parts.jsonl` and `quality_metrics.jsonl` as the
-> source of truth for completeness and quality metrics.
+> Script 06 emits a per-piece JSON record (`data/piece_reports/<piece_id>.json`, schema 1.1)
+> carrying the derived `reason_codes` / `severity` / `needs_review` fields, a `quality_summary`
+> (`band_counts` / `low_quality_doc_count` / `handwritten_doc_count`), and the echoed Script 04
+> scalar counts. Script 07 aggregates these directly — severity distribution, reason-code frequency
+> (counting *pieces* not occurrences), and the quality-band distribution by summing
+> `quality_summary.band_counts` — instead of re-reading `expected_parts.jsonl` /
+> `quality_metrics.jsonl`.
 
-Metrics:
+Metrics (all present in `summary.json`):
 
-- total pieces processed
-- pieces with complete sets
-- pieces with missing critical parts
-- pieces with no score (from Script 03 `has_score` in the per-piece rollup)
-- distribution of quality bands
-- top missing instruments overall (aggregate by Script 03 `section` and `canonical_instrument`)
-- confidence distribution (aggregate Script 03 `confidence_tier` / `needs_review_count`)
+- headline totals: pieces, complete sets, missing required part(s), missing score, needs-review,
+  high-severity, processing errors, total/low-quality/handwritten documents
+- distributions over `COMPLETENESS_TIER_ORDER`, `LOOKUP_STATUS_ORDER`, and `SEVERITY_ORDER`
+- document quality-band distribution (`good` / `review` / `poor` / `unknown`)
+- reason-code frequency over `REASON_CODE_ORDER` (pieces exhibiting each code, with its action string)
+- top missing *required* instruments overall (aggregate by `canonical_instrument` + `section` from
+  each piece's `expected_parts[]` where `required` and not `present`; counts distinct pieces)
+- summed review counts and the high-severity `attention_pieces` list (ordered by `piece_sort_key`)
 
 Shared infrastructure (reuse from `scripts._common`; see §4.9):
 
-- Aggregate Script 04 results by iterating `LOOKUP_STATUS_ORDER` / `COMPLETENESS_TIER_ORDER` so
-  every table shares one canonical ordering; compare against `LookupStatus.*` / `CompletenessTier.*`
-  constants rather than literals.
+- Iterate `LOOKUP_STATUS_ORDER` / `COMPLETENESS_TIER_ORDER` / `SEVERITY_ORDER` / `REASON_CODE_ORDER`
+  so every table shares one canonical ordering; compare against the shared constant classes rather
+  than literals.
 - Use `pct` for coverage percentages and `md_cell` for all Markdown table cells; order any
   piece-level rows with `piece_sort_key`.
 
+CLI: `--piece-reports-dir`, `--output-dir`, `--csv/--no-csv`, `--mode` (accepted for pipeline
+uniformity; the aggregate is always fully recomputed), `--log-level`.
+
 Outputs:
 
-- `data/collection_reports/summary.md`
-- `data/collection_reports/summary.json`
-- `data/collection_reports/manual_review_queue.csv`
+- `data/collection_reports/summary.md` (collection dashboard, linking each attention piece's report)
+- `data/collection_reports/summary.json` (schema 1.0 machine-readable aggregate)
+- `data/collection_reports/pieces.csv` (flat, non-prioritized one-row-per-piece export)
+
+> Deviation from the original plan: the third output is a flat `pieces.csv` rather than a
+> `manual_review_queue.csv`. Prioritization (weighting/ordering the queue) is Script 08's job — see
+> §4.8 — so Script 07 stays a pure aggregate and does not pre-empt that logic.
 
 ## 4.8 Script 08: Manual Review Pack (`08_manual_review_pack.py`)
 
@@ -659,7 +689,16 @@ Include:
 > `REASON_CODE_ORDER`) and a `severity` hint. Script 08 SHOULD reuse Script 06's `reason_codes` /
 > `recommended_actions` verbatim and MAY seed the queue priority from Script 06's `severity`, keeping
 > Script 04's completeness/lookup fields and Script 03's rollup counts as the authoritative priority
-> inputs. Page-1 thumbnails are available from Script 06's per-document `thumbnail_path`.
+> inputs. The schema-1.1 `action_items[]` (reason code → named target documents/parts) map directly
+> onto per-piece queue line items, and the magnitude counts (`missing_required_count`,
+> `quality_summary.low_quality_doc_count` / `handwritten_doc_count`) let the priority formula scale
+> `missing_critical_weight` / `quality_penalty` by how many items are affected rather than a boolean.
+> Page-1 thumbnails are available from Script 06's per-document `thumbnail_path`.
+>
+> Script 07 also emits collection-level context that Script 08 MAY read instead of re-scanning every
+> piece: `data/collection_reports/summary.json` (reason-code frequency, top missing instruments,
+> distributions) for library-wide framing, and `data/collection_reports/pieces.csv` as a ready flat
+> per-piece table to prioritize. Script 08 owns the queue ordering; Script 07 stays a pure aggregate.
 
 Shared infrastructure (reuse from `scripts._common`; see §4.9):
 
@@ -703,6 +742,10 @@ tests still pass), and Scripts 05-08 are expected to build on them from day one.
 - Report helpers (this audit): `pct`, `md_cell`, `piece_sort_key`.
 - Vocabulary constants (this audit): `ProcessingStatus`, `LookupStatus`, `CompletenessTier`,
   `LOOKUP_STATUS_ORDER`, `COMPLETENESS_TIER_ORDER`.
+- Output vocabulary (promoted from Script 06 for Script 07): `ReasonCode`, `REASON_CODE_ORDER`,
+  `REASON_ACTIONS`, `Severity`, `SEVERITY_ORDER` — the recommended-action reason codes, their
+  canonical ordering / human-readable actions, and the piece-level severity hint. Promoted so
+  Scripts 06/07/08 group and filter by one definition rather than re-declaring the strings.
 
 ### Conventions every new script (05-08) should follow
 

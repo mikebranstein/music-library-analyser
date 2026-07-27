@@ -17,16 +17,20 @@ from __future__ import annotations
 import json
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import typer
 
 from scripts._common import (
+    REASON_ACTIONS,
+    REASON_CODE_ORDER,
     CompletenessTier,
     LookupStatus,
     ProcessingStatus,
+    ReasonCode,
+    Severity,
     atomic_write_json,
     atomic_write_text,
     build_checkpoint,
@@ -42,7 +46,7 @@ from scripts._common import (
     utc_now_iso,
 )
 
-RECORD_VERSION = "1.0"
+RECORD_VERSION = "1.1"
 
 CHECKPOINT_FILENAME = ".piece_report_checkpoint.json"
 
@@ -52,57 +56,8 @@ logger = logging.getLogger("script06.piece_report")
 
 
 # --- Output vocabulary ------------------------------------------------------------------------
-
-
-class ReasonCode:
-    """Recommended-action reason codes recorded on each piece record."""
-
-    MISSING_SCORE = "missing_score"
-    MISSING_REQUIRED_PARTS = "missing_required_parts"
-    UNEXPECTED_PARTS = "unexpected_parts"
-    LOW_QUALITY_SCANS = "low_quality_scans"
-    HANDWRITTEN_OR_ILLEGIBLE = "handwritten_or_illegible"
-    LOW_CONFIDENCE_PARTS = "low_confidence_parts"
-    DUPLICATE_PARTS = "duplicate_parts"
-    INSTRUMENTATION_UNRESOLVED = "instrumentation_unresolved"
-
-
-# Canonical order (also drives severity: the first codes are the most actionable).
-REASON_CODE_ORDER: tuple[str, ...] = (
-    ReasonCode.MISSING_SCORE,
-    ReasonCode.MISSING_REQUIRED_PARTS,
-    ReasonCode.LOW_QUALITY_SCANS,
-    ReasonCode.HANDWRITTEN_OR_ILLEGIBLE,
-    ReasonCode.UNEXPECTED_PARTS,
-    ReasonCode.LOW_CONFIDENCE_PARTS,
-    ReasonCode.DUPLICATE_PARTS,
-    ReasonCode.INSTRUMENTATION_UNRESOLVED,
-)
-
-# Human-readable recommended action for each reason code.
-REASON_ACTIONS: dict[str, str] = {
-    ReasonCode.MISSING_SCORE: "Locate and add a full/conductor score for this piece.",
-    ReasonCode.MISSING_REQUIRED_PARTS: "Source the missing required part(s) listed above.",
-    ReasonCode.UNEXPECTED_PARTS: "Confirm the extra observed part(s) belong to this edition.",
-    ReasonCode.LOW_QUALITY_SCANS: "Re-scan the low-quality document(s) at higher fidelity.",
-    ReasonCode.HANDWRITTEN_OR_ILLEGIBLE: (
-        "Verify the handwritten/low-legibility document(s) are usable; re-engrave if needed."
-    ),
-    ReasonCode.LOW_CONFIDENCE_PARTS: "Manually confirm the low-confidence / unmatched part label(s).",
-    ReasonCode.DUPLICATE_PARTS: "Reconcile duplicated part(s) (keep the best copy).",
-    ReasonCode.INSTRUMENTATION_UNRESOLVED: (
-        "Instrumentation could not be resolved from an authority; confirm expected parts manually."
-    ),
-}
-
-
-class Severity:
-    """Piece-level severity hint (Script 08 owns the authoritative work-queue priority)."""
-
-    OK = "ok"
-    REVIEW = "review"
-    HIGH = "high"
-
+# ReasonCode / REASON_CODE_ORDER / REASON_ACTIONS / Severity are shared vocabulary and now live in
+# scripts._common (imported above) so Scripts 06/07/08 group and filter by one definition.
 
 # Quality bands considered actionable, matching Script 05's vocabulary.
 _QUALITY_POOR = "poor"
@@ -305,6 +260,77 @@ def _worst_band(bands: list[str]) -> str | None:
     return max(bands, key=lambda b: _BAND_SEVERITY.get(b, 0))
 
 
+def _quality_summary(doc_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Roll the joined per-document quality signals into per-piece magnitude counts.
+
+    Pure aggregation of ``doc_rows`` (added in schema 1.1): gives Script 07 the quality-band
+    distribution and Script 08 a magnitude to weight its quality penalty, without recomputing
+    anything about the music.
+    """
+    band_counts = {"good": 0, "review": 0, "poor": 0, "unknown": 0}
+    for row in doc_rows:
+        band = row.get("quality_band")
+        band_counts[band if band in band_counts else "unknown"] += 1
+    handwritten = sum(
+        1
+        for row in doc_rows
+        if row.get("notation_source_type") in (_NOTATION_HANDWRITTEN, _NOTATION_MIXED)
+    )
+    return {
+        "band_counts": band_counts,
+        "low_quality_doc_count": band_counts["poor"] + band_counts["review"],
+        "handwritten_doc_count": handwritten,
+    }
+
+
+def _doc_names(rows: list[dict[str, Any]]) -> list[str]:
+    """Human filenames for a set of document rows (falling back to the pdf_path)."""
+    return [r.get("pdf_filename") or r.get("pdf_path") or "?" for r in rows]
+
+
+def _build_action_items(
+    reason_codes: list[str], inputs: PieceInputs, doc_rows: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Attach the specific offending documents/parts to each reason code (schema 1.1).
+
+    Turns the generic recommended-action strings into an actionable checklist; every target is a
+    value already present in the record, so nothing is recomputed.
+    """
+    expected = inputs.expected or {}
+    targets_by_code: dict[str, list[str]] = {
+        ReasonCode.MISSING_SCORE: [],
+        ReasonCode.MISSING_REQUIRED_PARTS: list(expected.get("missing_required_parts") or []),
+        ReasonCode.LOW_QUALITY_SCANS: _doc_names(
+            [r for r in doc_rows if r.get("quality_band") in (_QUALITY_POOR, _QUALITY_REVIEW)]
+        ),
+        ReasonCode.HANDWRITTEN_OR_ILLEGIBLE: _doc_names(
+            [
+                r
+                for r in doc_rows
+                if r.get("notation_source_type") in (_NOTATION_HANDWRITTEN, _NOTATION_MIXED)
+            ]
+        ),
+        ReasonCode.UNEXPECTED_PARTS: [
+            _unexpected_label(u) for u in (expected.get("unexpected_parts") or [])
+        ],
+        ReasonCode.LOW_CONFIDENCE_PARTS: _doc_names(
+            [r for r in doc_rows if r.get("needs_review")]
+        ),
+        ReasonCode.DUPLICATE_PARTS: _doc_names(
+            [r for r in doc_rows if r.get("duplicate_in_piece")]
+        ),
+        ReasonCode.INSTRUMENTATION_UNRESOLVED: [],
+    }
+    return [
+        {
+            "reason_code": code,
+            "action": REASON_ACTIONS[code],
+            "targets": targets_by_code.get(code, []),
+        }
+        for code in reason_codes
+    ]
+
+
 def build_piece_record(inputs: PieceInputs, run_id: str) -> dict[str, Any]:
     """Assemble the machine-readable per-piece JSON record (schema RECORD_VERSION)."""
     identity = _resolve_identity(inputs)
@@ -333,6 +359,25 @@ def build_piece_record(inputs: PieceInputs, run_id: str) -> dict[str, Any]:
     record["completeness_tier"] = expected.get("completeness_tier") or CompletenessTier.UNKNOWN
     record["has_expected_parts"] = inputs.expected is not None
 
+    # Scalar counts echoed from Script 04 (schema 1.1); fall back to list lengths / observed count
+    # when Script 04 is absent so downstream never has to special-case a missing lookup.
+    record["expected_part_count"] = expected.get("expected_part_count")
+    record["missing_required_count"] = (
+        expected.get("missing_required_count")
+        if expected.get("missing_required_count") is not None
+        else len(record["missing_required_parts"])
+    )
+    record["unexpected_part_count"] = (
+        expected.get("unexpected_part_count")
+        if expected.get("unexpected_part_count") is not None
+        else len(record["unexpected_parts"])
+    )
+    record["observed_instrument_count"] = (
+        expected.get("observed_instrument_count")
+        if expected.get("observed_instrument_count") is not None
+        else observed.get("distinct_instruments")
+    )
+
     record["observed_parts"] = observed.get("observed_parts") or []
     record["distinct_instruments"] = observed.get("distinct_instruments")
     record["families"] = observed.get("families") or []
@@ -348,9 +393,11 @@ def build_piece_record(inputs: PieceInputs, run_id: str) -> dict[str, Any]:
     # Quality roll-up (worst band across the piece's documents).
     bands = [r.get("quality_band") for r in doc_rows if r.get("quality_band")]
     record["worst_quality_band"] = _worst_band(bands)
+    record["quality_summary"] = _quality_summary(doc_rows)
 
     record.update(findings)
     record["recommended_actions"] = [REASON_ACTIONS[c] for c in findings["reason_codes"]]
+    record["action_items"] = _build_action_items(findings["reason_codes"], inputs, doc_rows)
     return record
 
 
@@ -456,6 +503,12 @@ def render_piece_report(rec: dict[str, Any]) -> str:
     out.append("")
     if rec.get("has_expected_parts"):
         out.append(f"- **Completeness:** {_fmt_completeness(rec)}")
+        out.append(
+            f"- **Parts:** {rec.get('observed_instrument_count') or 0} observed / "
+            f"{rec.get('expected_part_count') or 0} expected; "
+            f"{rec.get('missing_required_count') or 0} required missing, "
+            f"{rec.get('unexpected_part_count') or 0} unexpected"
+        )
         expected_parts = rec.get("expected_parts") or []
         if expected_parts:
             out.append("")
@@ -510,6 +563,15 @@ def render_piece_report(rec: dict[str, Any]) -> str:
     out.append("")
     worst = rec.get("worst_quality_band")
     out.append(f"- **Worst document band:** {worst or 'unknown'}")
+    qs = rec.get("quality_summary") or {}
+    bands_count = qs.get("band_counts") or {}
+    out.append(
+        f"- **Band distribution:** good {bands_count.get('good', 0)}, "
+        f"review {bands_count.get('review', 0)}, poor {bands_count.get('poor', 0)}, "
+        f"unknown {bands_count.get('unknown', 0)}"
+    )
+    if qs.get("handwritten_doc_count"):
+        out.append(f"- **Handwritten/uncertain documents:** {qs['handwritten_doc_count']}")
     flagged = [
         d
         for d in docs
@@ -538,10 +600,18 @@ def render_piece_report(rec: dict[str, Any]) -> str:
     # 7. Recommended manual actions.
     out.append("## Recommended Manual Actions")
     out.append("")
-    actions = rec.get("recommended_actions") or []
-    if actions:
-        for code, action in zip(rec.get("reason_codes") or [], actions):
-            out.append(f"- **{code}**: {action}")
+    items = rec.get("action_items") or []
+    if items:
+        for item in items:
+            targets = item.get("targets") or []
+            line = f"- **{item.get('reason_code')}**: {item.get('action')}"
+            if targets:
+                shown = ", ".join(md_cell(str(t)) for t in targets[:8])
+                remaining = len(targets) - 8
+                if remaining > 0:
+                    shown += f", +{remaining} more"
+                line += f" ({shown})"
+            out.append(line)
     else:
         out.append("_No manual actions flagged from the available signals._")
     out.append("")
@@ -664,7 +734,7 @@ def main(
         raise typer.BadParameter("mode must be 'full' or 'incremental'")
 
     setup_logging(log_level)
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     start_time = time.perf_counter()
 
     output_dir = output_dir.resolve()

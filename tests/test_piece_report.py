@@ -68,6 +68,10 @@ def _expected(piece_id: str = "p1", **overrides: Any) -> dict:
         "unexpected_parts": [],
         "completeness_score": 0.5,
         "completeness_tier": "incomplete",
+        "expected_part_count": 2,
+        "missing_required_count": 1,
+        "unexpected_part_count": 0,
+        "observed_instrument_count": 1,
         "score_expected": True,
         "score_missing": False,
         "needs_review": True,
@@ -291,6 +295,78 @@ def test_unresolved_lookup_flagged_only_when_expected_present():
     assert rec2["has_expected_parts"] is False
 
 
+# --- Schema 1.1: echoed counts, quality summary, action items --------------------------------
+
+
+def test_echoes_script04_scalar_counts():
+    rec = pr.build_piece_record(_inputs(), "run1")
+    assert rec["expected_part_count"] == 2
+    assert rec["missing_required_count"] == 1
+    assert rec["unexpected_part_count"] == 0
+    assert rec["observed_instrument_count"] == 1
+
+
+def test_scalar_counts_fall_back_when_scalars_absent():
+    # Expected record with lists but no scalar count fields (older Script 04 / partial data).
+    expected = _expected(missing_required_parts=["Oboe", "Bassoon"],
+                         unexpected_parts=[{"predicted_part": "Kazoo"}])
+    for key in ("expected_part_count", "missing_required_count",
+                "unexpected_part_count", "observed_instrument_count"):
+        expected.pop(key, None)
+    inputs = _inputs(expected=expected, observed=_observed(distinct_instruments=7))
+    rec = pr.build_piece_record(inputs, "run1")
+    assert rec["missing_required_count"] == 2  # len(list) fallback
+    assert rec["unexpected_part_count"] == 1  # len(list) fallback
+    assert rec["observed_instrument_count"] == 7  # observed distinct_instruments fallback
+    assert rec["expected_part_count"] is None  # no list to fall back to
+
+
+def test_quality_summary_band_distribution_and_counts():
+    inputs = _inputs(
+        predictions=[
+            _prediction("A.pdf", "Flute", part_sort_key="1"),
+            _prediction("B.pdf", "Oboe", part_sort_key="2"),
+            _prediction("C.pdf", "Horn", part_sort_key="3"),
+        ],
+        quality=[
+            _quality("A.pdf", quality_band="good"),
+            _quality("B.pdf", quality_band="review"),
+            _quality("C.pdf", quality_band="poor", notation_source_type="handwritten"),
+        ],
+    )
+    rec = pr.build_piece_record(inputs, "run1")
+    qs = rec["quality_summary"]
+    assert qs["band_counts"] == {"good": 1, "review": 1, "poor": 1, "unknown": 0}
+    assert qs["low_quality_doc_count"] == 2  # review + poor
+    assert qs["handwritten_doc_count"] == 1
+
+
+def test_action_items_name_offending_documents_and_parts():
+    inputs = _inputs(
+        expected=_expected(missing_required_parts=["Euphonium", "Percussion"],
+                           unexpected_parts=[{"predicted_part": "Kazoo"}]),
+        observed=_observed(duplicate_count=1),
+        predictions=[
+            _prediction("Oboe.pdf", "Oboe", part_sort_key="1", needs_review=True),
+            _prediction("Horn.pdf", "Horn", part_sort_key="2", duplicate_in_piece=True),
+        ],
+        quality=[
+            _quality("Oboe.pdf", quality_band="review", notation_source_type="handwritten"),
+            _quality("Horn.pdf", quality_band="good"),
+        ],
+    )
+    rec = pr.build_piece_record(inputs, "run1")
+    items = {i["reason_code"]: i["targets"] for i in rec["action_items"]}
+    assert items[pr.ReasonCode.MISSING_REQUIRED_PARTS] == ["Euphonium", "Percussion"]
+    assert items[pr.ReasonCode.LOW_QUALITY_SCANS] == ["Oboe.pdf"]
+    assert items[pr.ReasonCode.HANDWRITTEN_OR_ILLEGIBLE] == ["Oboe.pdf"]
+    assert items[pr.ReasonCode.UNEXPECTED_PARTS] == ["Kazoo"]
+    assert items[pr.ReasonCode.LOW_CONFIDENCE_PARTS] == ["Oboe.pdf"]
+    assert items[pr.ReasonCode.DUPLICATE_PARTS] == ["Horn.pdf"]
+    # action_items align 1:1 with reason_codes in the same order.
+    assert [i["reason_code"] for i in rec["action_items"]] == rec["reason_codes"]
+
+
 # --- Rendering -------------------------------------------------------------------------------
 
 
@@ -304,7 +380,17 @@ def test_render_report_contains_sections_and_actions():
     assert "Source the missing required part(s)" in md
 
 
-def test_render_thumbnail_link_when_present():
+def test_render_names_targets_and_band_distribution():
+    inputs = _inputs(
+        expected=_expected(missing_required_parts=["Euphonium"]),
+        predictions=[_prediction("Oboe.pdf", "Oboe")],
+        quality=[_quality("Oboe.pdf", quality_band="review")],
+    )
+    rec = pr.build_piece_record(inputs, "run1")
+    md = pr.render_piece_report(rec)
+    assert "Band distribution:" in md
+    assert "Euphonium" in md  # named target in recommended actions
+    assert "Oboe.pdf" in md  # low-quality document named in the action line
     inputs = _inputs(thumbnails={"001 Test Piece/Flute.pdf": "cache/render/x.png"})
     rec = pr.build_piece_record(inputs, "run1")
     md = pr.render_piece_report(rec)

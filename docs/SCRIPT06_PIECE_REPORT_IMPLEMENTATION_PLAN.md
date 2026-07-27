@@ -1,8 +1,8 @@
 # Script 06 — Piece Report Generator: Implementation Plan
 
-Status: **planned → implemented** (schema `1.0`). This document is the design of record for
-`scripts/06_piece_report.py`; the master plan (`docs/BAND_COLLECTION_ANALYSIS_PLAN.md` §4.6) links
-here.
+Status: **implemented** (schema `1.1`; see §12 for the v1.1 gap analysis and enhancements). This
+document is the design of record for `scripts/06_piece_report.py`; the master plan
+(`docs/BAND_COLLECTION_ANALYSIS_PLAN.md` §4.6) links here.
 
 ## 1. Purpose
 
@@ -162,3 +162,71 @@ orphan cleanup; and incremental reuse.
   codes and thumbnail references.
 - The per-piece JSON schema (`record_version 1.0`) is the stable contract for 07/08; the Markdown
   is human-facing only.
+
+## 12. v1.1 gap analysis and enhancements
+
+After the v1.0 implementation shipped, an audit compared what Script 06 emits against what a human
+working the reports and the planned Scripts 07/08 actually need. Three gaps were found; all are
+filled by **joining/rolling up data already present in the record** — no new music inference, AI,
+network, or PDF reads — so the "join, don't recompute" and "deterministic + offline" principles
+(§2) still hold. The schema is bumped `1.0 → 1.1` (which, via the config fingerprint in §8, forces
+a one-time full rebuild of cached reports).
+
+### 12.1 Gap 1 — dropped scalar counts from Script 04
+
+Script 04 already computes `expected_part_count`, `missing_required_count`, `unexpected_part_count`,
+and `observed_instrument_count`, but v1.0 echoed only the *lists* (`missing_required_parts`,
+`unexpected_parts`, …). Downstream needs the magnitudes: Script 08's priority formula scales
+`missing_critical_weight` by count, and Script 07 needs coverage denominators. v1.1 echoes all four
+scalars (falling back to `len(list)` / observed `distinct_instruments` when Script 04 is absent).
+
+### 12.2 Gap 2 — no per-concern magnitude / quality-band distribution
+
+v1.0 recorded only `worst_quality_band` and the coarse `severity` (`ok`/`review`/`high`). A reason
+code told you *whether* a concern existed but not *how many* documents were affected. v1.1 adds a
+`quality_summary` roll-up of the already-joined `documents[]`:
+
+- `band_counts`: `{good, review, poor, unknown}` document counts (the "distribution of quality
+  bands" Script 07 needs, without re-reading `quality_metrics.jsonl`).
+- `low_quality_doc_count`: poor + review documents.
+- `handwritten_doc_count`: documents whose notation source is handwritten / mixed-or-uncertain.
+
+This gives Script 08 a real magnitude to weight its `quality_penalty` and lets the human see
+"3 of 32 parts need re-scan" rather than just "worst band = review".
+
+### 12.3 Gap 3 — generic recommended actions (no named targets)
+
+v1.0 actions were generic sentences ("Re-scan the low-quality document(s)."). Since the record
+already knows exactly which documents/parts trigger each reason code, v1.1 adds a structured
+`action_items` list — one entry per reason code with its `action` string and a `targets` list:
+
+| Reason code | `targets` |
+|-------------|-----------|
+| `missing_required_parts` | missing required part labels |
+| `low_quality_scans` | poor/review document filenames |
+| `handwritten_or_illegible` | handwritten/uncertain document filenames |
+| `unexpected_parts` | unexpected part labels |
+| `low_confidence_parts` | filenames of documents flagged `needs_review` |
+| `duplicate_parts` | duplicated document filenames |
+| `missing_score` / `instrumentation_unresolved` | (none) |
+
+The Markdown "Recommended manual actions" section now names the offending documents/parts (truncated
+to the first 8 with a "+N more" suffix), turning the report into an actionable checklist.
+`recommended_actions` (the plain string list) is retained unchanged for backward compatibility.
+
+### 12.4 Explicitly out of scope (rejected to avoid scope creep)
+
+- A numeric priority score/rank — Script 08 owns the authoritative priority formula; `severity`
+  remains only a hint.
+- Redundant boolean flags (`is_complete`, `has_handwritten`, …) — derivable from
+  `completeness_tier` / `reason_codes` membership / `score_missing`.
+- Re-listing duplicate/unexpected documents as separate top-level structures — 07/08 can filter
+  `documents[]` directly (and `action_items[].targets` already names them).
+
+### 12.5 v1.1 record additions (summary)
+
+Added top-level fields: `expected_part_count`, `missing_required_count`, `unexpected_part_count`,
+`observed_instrument_count`, `quality_summary` (`band_counts` / `low_quality_doc_count` /
+`handwritten_doc_count`), and `action_items[]`. `record_version` becomes `"1.1"`. All v1.0 fields
+are unchanged, so the JSON remains a superset — a strictly additive, backward-compatible contract
+for Scripts 07/08.

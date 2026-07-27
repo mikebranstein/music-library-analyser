@@ -7,7 +7,7 @@ import os
 import re
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -66,8 +66,67 @@ COMPLETENESS_TIER_ORDER: tuple[str, ...] = (
 )
 
 
+class ReasonCode:
+    """Recommended-action reason codes recorded on each Script 06 piece record.
+
+    Shared here (not in Script 06) so Scripts 06/07/08 group and filter by one definition.
+    """
+
+    MISSING_SCORE = "missing_score"
+    MISSING_REQUIRED_PARTS = "missing_required_parts"
+    UNEXPECTED_PARTS = "unexpected_parts"
+    LOW_QUALITY_SCANS = "low_quality_scans"
+    HANDWRITTEN_OR_ILLEGIBLE = "handwritten_or_illegible"
+    LOW_CONFIDENCE_PARTS = "low_confidence_parts"
+    DUPLICATE_PARTS = "duplicate_parts"
+    INSTRUMENTATION_UNRESOLVED = "instrumentation_unresolved"
+
+
+# Canonical order (also drives Script 06 severity: the first codes are the most actionable).
+REASON_CODE_ORDER: tuple[str, ...] = (
+    ReasonCode.MISSING_SCORE,
+    ReasonCode.MISSING_REQUIRED_PARTS,
+    ReasonCode.LOW_QUALITY_SCANS,
+    ReasonCode.HANDWRITTEN_OR_ILLEGIBLE,
+    ReasonCode.UNEXPECTED_PARTS,
+    ReasonCode.LOW_CONFIDENCE_PARTS,
+    ReasonCode.DUPLICATE_PARTS,
+    ReasonCode.INSTRUMENTATION_UNRESOLVED,
+)
+
+# Human-readable recommended action for each reason code.
+REASON_ACTIONS: dict[str, str] = {
+    ReasonCode.MISSING_SCORE: "Locate and add a full/conductor score for this piece.",
+    ReasonCode.MISSING_REQUIRED_PARTS: "Source the missing required part(s) listed above.",
+    ReasonCode.UNEXPECTED_PARTS: "Confirm the extra observed part(s) belong to this edition.",
+    ReasonCode.LOW_QUALITY_SCANS: "Re-scan the low-quality document(s) at higher fidelity.",
+    ReasonCode.HANDWRITTEN_OR_ILLEGIBLE: (
+        "Verify the handwritten/low-legibility document(s) are usable; re-engrave if needed."
+    ),
+    ReasonCode.LOW_CONFIDENCE_PARTS: (
+        "Manually confirm the low-confidence / unmatched part label(s)."
+    ),
+    ReasonCode.DUPLICATE_PARTS: "Reconcile duplicated part(s) (keep the best copy).",
+    ReasonCode.INSTRUMENTATION_UNRESOLVED: (
+        "Instrumentation could not be resolved from an authority; confirm expected parts manually."
+    ),
+}
+
+
+class Severity:
+    """Piece-level severity hint (Script 08 owns the authoritative work-queue priority)."""
+
+    OK = "ok"
+    REVIEW = "review"
+    HIGH = "high"
+
+
+# Display/iteration order for severity tables: most severe first.
+SEVERITY_ORDER: tuple[str, ...] = (Severity.HIGH, Severity.REVIEW, Severity.OK)
+
+
 def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def normalize_rel_path(path: Path) -> str:

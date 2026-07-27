@@ -82,11 +82,15 @@ Primary outputs:
 - Join every upstream per-piece and per-document signal on `piece_id` (expected parts, observed parts, part predictions, quality metrics, documents, page thumbnails) into one report per piece; the stage is deterministic and fully offline (computes nothing new about the music)
 - Piece universe is the union of `piece_id`s across the expected / observed / predictions / quality sources, so a piece missing an upstream stage still gets a report; detected parts are ordered by Script 03's `part_sort_key` and joined to quality by `pdf_path`
 - Derive `reason_codes` (`missing_score`, `missing_required_parts`, `low_quality_scans`, `handwritten_or_illegible`, `unexpected_parts`, `low_confidence_parts`, `duplicate_parts`, `instrumentation_unresolved`), matching `recommended_actions`, a `severity` hint (`ok` / `review` / `high`), and a piece-level `needs_review` roll-up
+- Roll up magnitudes for downstream priority/aggregation: `quality_summary` (band distribution + low-quality / handwritten document counts), echoed Script 04 scalar counts (`expected_part_count`, `missing_required_count`, `unexpected_part_count`, `observed_instrument_count`), and `action_items` naming the specific offending documents/parts per reason code
 - Stream per-piece `.md` + `.json` as each completes; `--mode incremental` reuses cached reports by joined-input fingerprint, and orphan cleanup prunes only managed reports (never the checkpoint)
-- Emit `data/piece_reports/<piece_id>.{md,json}` (schema 1.0) plus a top-level index `data/piece_reports.md`
+- Emit `data/piece_reports/<piece_id>.{md,json}` (schema 1.1) plus a top-level index `data/piece_reports.md`
 
 7. `07_collection_report.py`
-- Aggregate metrics across all pieces
+- Aggregate every per-piece report (`data/piece_reports/*.json`, schema 1.1) into one collection-wide view; deterministic and fully offline (recomputes nothing — only counts / groups / orders Script 06's facts). Errors with a "run Script 06 first" message if there are no piece reports
+- Headline totals (complete sets, missing required parts, missing score, needs-review, high-severity, processing errors, total / low-quality / handwritten documents) plus distributions over completeness, lookup status, and severity, and a document quality-band distribution summed from each piece's `quality_summary.band_counts`
+- Reason-code frequency (pieces exhibiting each code, with its action string), top missing *required* instruments across the library (by `canonical_instrument` + `section`), summed review counts, and a high-severity `attention_pieces` list linking each piece's report
+- Emit `data/collection_reports/summary.md` (dashboard), `summary.json` (schema 1.0 aggregate), and `pieces.csv` (flat, non-prioritized per-piece export); prioritization is deferred to Script 08
 
 8. `08_manual_review_pack.py`
 - Generate prioritized review queue
@@ -132,6 +136,9 @@ project-root/
     piece_reports/
     piece_reports.md
     collection_reports/
+      summary.md
+      summary.json
+      pieces.csv
   cache/
     ocr/
     llm/
