@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import time
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -585,24 +586,37 @@ def _candidate_score(confidence: float | None, word_count: int) -> float:
 def run_ocr(page: Any, cfg: OcrConfig) -> dict[str, Any]:
     """Render a page and run multiple OCR passes; return OCR fields plus all pass candidates.
 
-    Renders once per distinct DPI, runs OSD once to correct orientation, then runs each
-    (dpi, psm) pass. Every non-empty pass is kept in ``ocr_candidates`` for the document-level
-    LLM consolidation; the highest-scoring pass populates the scalar ``ocr_text`` fields.
-    Never raises. OSD failures (common on sparse pages) leave the page in its original
-    orientation.
+    Convenience wrapper (serial path): renders on this thread then runs OCR. For the parallel
+    path, ``render_ocr_images`` (main thread, fitz) and ``ocr_from_images`` (worker thread,
+    Tesseract) are called separately so rendering stays off worker threads. Never raises.
     """
     if pytesseract is None or Image is None:
         return _empty_ocr_result("unavailable")
+    try:
+        images = render_ocr_images(page, cfg)
+    except Exception as exc:
+        return _empty_ocr_result(f"render failed: {exc}")
+    return ocr_from_images(images, cfg)
+
+
+def render_ocr_images(page: Any, cfg: OcrConfig) -> dict[int, Any]:
+    """Render the page once per distinct OCR-pass DPI. Uses fitz, so must run on the main thread."""
+    passes = tuple(cfg.passes) if cfg.multipass else ((cfg.dpi, 3),)
+    distinct_dpis = sorted({dpi for dpi, _ in passes})
+    return {dpi: _render_page_image(page, dpi) for dpi in distinct_dpis}
+
+
+def ocr_from_images(images: dict[int, Any], cfg: OcrConfig) -> dict[str, Any]:
+    """Run OSD + multi-pass Tesseract on pre-rendered images.
+
+    Thread-safe: touches only PIL images and the Tesseract subprocess (which releases the GIL),
+    never fitz. Runs OSD once (on the lowest-DPI image) to correct orientation, then each
+    (dpi, psm) pass. Every non-empty pass is kept in ``ocr_candidates``; the highest-scoring one
+    populates the scalar ``ocr_text`` fields. Never raises.
+    """
     result = _empty_ocr_result("success")
     passes = tuple(cfg.passes) if cfg.multipass else ((cfg.dpi, 3),)
     distinct_dpis = sorted({dpi for dpi, _ in passes})
-
-    images: dict[int, Any] = {}
-    try:
-        for dpi in distinct_dpis:
-            images[dpi] = _render_page_image(page, dpi)
-    except Exception as exc:
-        return _empty_ocr_result(f"render failed: {exc}")
 
     # Orientation/script detection once (on the lowest-DPI image); apply to all renders.
     base_dpi = distinct_dpis[0]
@@ -613,8 +627,7 @@ def run_ocr(page: Any, cfg: OcrConfig) -> dict[str, Any]:
         result["osd_orientation_conf"] = round(float(osd.get("orientation_conf", 0.0)), 3)
         result["osd_script"] = osd.get("script") or None
         if rotate in (90, 180, 270):
-            for dpi in list(images):
-                images[dpi] = images[dpi].rotate(-rotate, expand=True)
+            images = {dpi: img.rotate(-rotate, expand=True) for dpi, img in images.items()}
     except Exception as exc:  # pragma: no cover - OSD fails on low-content pages
         logger.debug("OSD skipped: %s", exc)
 
@@ -670,15 +683,56 @@ def ocr_page_cached(
     if cached is not None:
         return cached
     result = run_ocr(page, cfg)
-    # Only persist deterministic successes; transient states (unavailable/errors)
-    # should be retried on the next run.
-    if result.get("ocr_status") == "success":
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_json(path, result)
-        except Exception:  # pragma: no cover - cache is best-effort
-            logger.debug("Failed to write OCR cache for %s p%d", item.pdf_path, page_num)
+    persist_ocr_cache(result, cache_dir, item, page_num, cfg)
     return result
+
+
+def persist_ocr_cache(
+    result: dict[str, Any], cache_dir: Path, item: InventoryItem, page_num: int, cfg: OcrConfig
+) -> None:
+    """Cache only deterministic successes; transient states (unavailable/errors) are retried."""
+    if result.get("ocr_status") != "success":
+        return
+    path = ocr_cache_path(cache_dir, item, page_num, cfg)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(path, result)
+    except Exception:  # pragma: no cover - cache is best-effort
+        logger.debug("Failed to write OCR cache for %s p%d", item.pdf_path, page_num)
+
+
+def apply_ocr_fields(
+    text_rec: dict[str, Any], page_rec: dict[str, Any] | None, ocr: dict[str, Any]
+) -> None:
+    """Patch OCR-derived fields onto records built before their OCR future resolved.
+
+    Mirrors the OCR wiring in ``build_text_record``/``build_page_record`` for the parallel path.
+    """
+    ocr_text = ocr.get("ocr_text")
+    text_rec["ocr_text"] = ocr_text
+    text_rec["ocr_confidence"] = ocr.get("ocr_confidence")
+    text_rec["ocr_word_count"] = ocr.get("ocr_word_count")
+    text_rec["ocr_candidates"] = ocr.get("ocr_candidates") or []
+    text_rec["ocr_applied"] = True
+    text_rec["ocr_status"] = ocr.get("ocr_status", "not_applied")
+    text_rec["ocr_engine"] = OCR_ENGINE
+    text_rec["text_source"] = (
+        "embedded" if text_rec.get("text_is_searchable") else ("ocr" if ocr_text else "none")
+    )
+    if page_rec is not None:
+        page_rec["osd_rotation"] = ocr.get("osd_rotation")
+        page_rec["osd_orientation_conf"] = ocr.get("osd_orientation_conf")
+        page_rec["osd_script"] = ocr.get("osd_script")
+
+
+def apply_llm_fields(doc_record: dict[str, Any], ocr_llm: dict[str, Any] | None) -> None:
+    """Patch the five ``ocr_llm_*`` fields onto a document record after its LLM future resolves."""
+    o = ocr_llm or {}
+    doc_record["ocr_llm_status"] = o.get("ocr_llm_status", "not_applied")
+    doc_record["ocr_llm_instruments"] = o.get("ocr_llm_instruments", [])
+    doc_record["ocr_llm_raw"] = o.get("ocr_llm_raw", [])
+    doc_record["ocr_llm_confidence"] = o.get("ocr_llm_confidence")
+    doc_record["ocr_llm_notes"] = o.get("ocr_llm_notes", "")
 
 
 def _should_ocr(embedded_text: str | None, image_analysis: dict[str, Any]) -> bool:
@@ -1255,13 +1309,21 @@ def process_pdf(
     enable_rendering: bool,
     enable_image_metrics: bool = True,
     ocr_config: OcrConfig | None = None,
-    ocr_llm_config: OcrLlmConfig | None = None,
+    ocr_executor: ThreadPoolExecutor | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], int, int]:
-    """Return (text_records, page_records, document_record, page_error_count, pages_total)."""
+    """Return (text_records, page_records, document_record, page_error_count, pages_total).
+
+    When ``ocr_executor`` is provided, each scanned page is rendered on this thread (fitz is not
+    thread-safe) and its Tesseract passes are submitted to the pool, then resolved once all pages
+    are rendered. The per-file LLM classification is submitted asynchronously by the caller, so
+    the document record is built here with no LLM result (``ocr_llm=None``).
+    """
     text_records: list[dict[str, Any]] = []
     page_records: list[dict[str, Any]] = []
     page_errors = 0
     ocr_config = ocr_config or OcrConfig(enabled=False)
+    # page_num -> {future, text_rec, page_rec} for OCR passes running in the pool.
+    pending_ocr: dict[int, dict[str, Any]] = {}
 
     doc = fitz.open(abs_path)  # type: ignore[attr-defined]
     try:
@@ -1285,14 +1347,31 @@ def process_pdf(
                 zones = structure
                 geometry = analyze_page_geometry(page)
                 image_analysis = analyze_page_images(page, len((embedded_text or "").strip()))
+                ocr_future: Future | None = None
                 if ocr_config.enabled and _should_ocr(embedded_text, image_analysis):
-                    ocr = ocr_page_cached(page, cache_dir, item, page_num, ocr_config)
-                text_records.append(
-                    build_text_record(
-                        item, run_id, page_num, embedded_text, "success", None,
-                        header_candidates, top_lines, zones, ocr,
-                    )
+                    if ocr_executor is None:
+                        ocr = ocr_page_cached(page, cache_dir, item, page_num, ocr_config)
+                    else:
+                        cached = read_json(ocr_cache_path(cache_dir, item, page_num, ocr_config))
+                        if cached is not None:
+                            ocr = cached
+                        else:
+                            try:
+                                images = render_ocr_images(page, ocr_config)
+                                ocr_future = ocr_executor.submit(
+                                    ocr_from_images, images, ocr_config
+                                )
+                            except Exception as exc:  # pragma: no cover - defensive
+                                ocr = _empty_ocr_result(f"render failed: {exc}")
+                text_rec = build_text_record(
+                    item, run_id, page_num, embedded_text, "success", None,
+                    header_candidates, top_lines, zones, ocr,
                 )
+                text_records.append(text_rec)
+                if ocr_future is not None:
+                    pending_ocr[page_num] = {
+                        "future": ocr_future, "text_rec": text_rec, "page_rec": None,
+                    }
             except Exception as exc:
                 page_errors += 1
                 logger.warning(
@@ -1310,14 +1389,15 @@ def process_pdf(
                 is_blank_no_render = bool(
                     text_empty and not image_analysis.get("is_image_based")
                 )
-                page_records.append(
-                    build_page_record(
-                        item, run_id, page_num, render_dpi, None, None, -1, -1, -1,
-                        None, None, "success", None,
-                        geometry=geometry, image_analysis=image_analysis,
-                        is_blank=is_blank_no_render, ocr=ocr,
-                    )
+                page_rec = build_page_record(
+                    item, run_id, page_num, render_dpi, None, None, -1, -1, -1,
+                    None, None, "success", None,
+                    geometry=geometry, image_analysis=image_analysis,
+                    is_blank=is_blank_no_render, ocr=ocr,
                 )
+                page_records.append(page_rec)
+                if page_num in pending_ocr:
+                    pending_ocr[page_num]["page_rec"] = page_rec
                 continue
 
             if page is None:
@@ -1345,40 +1425,46 @@ def process_pdf(
                     page_num,
                     render["error_message"],
                 )
-            page_records.append(
-                build_page_record(
-                    item,
-                    run_id,
-                    page_num,
-                    render_dpi,
-                    render["thumbnail_rel"],
-                    render["thumbnail_hash"],
-                    render["width"],
-                    render["height"],
-                    render["file_size"],
-                    render["text_density"],
-                    render["black_white_ratio"],
-                    render["status"],
-                    render["error_message"],
-                    geometry=geometry,
-                    image_analysis=image_analysis,
-                    contrast_std=render["contrast_std"],
-                    blur_variance=render["blur_variance"],
-                    skew_angle_deg=render["skew_angle_deg"],
-                    is_blank=_compute_is_blank(render, embedded_text, image_analysis),
-                    has_staves=render["has_staves"],
-                    staff_line_count=render["staff_line_count"],
-                    ocr=ocr,
-                )
+            page_rec = build_page_record(
+                item,
+                run_id,
+                page_num,
+                render_dpi,
+                render["thumbnail_rel"],
+                render["thumbnail_hash"],
+                render["width"],
+                render["height"],
+                render["file_size"],
+                render["text_density"],
+                render["black_white_ratio"],
+                render["status"],
+                render["error_message"],
+                geometry=geometry,
+                image_analysis=image_analysis,
+                contrast_std=render["contrast_std"],
+                blur_variance=render["blur_variance"],
+                skew_angle_deg=render["skew_angle_deg"],
+                is_blank=_compute_is_blank(render, embedded_text, image_analysis),
+                has_staves=render["has_staves"],
+                staff_line_count=render["staff_line_count"],
+                ocr=ocr,
             )
+            page_records.append(page_rec)
+            if page_num in pending_ocr:
+                pending_ocr[page_num]["page_rec"] = page_rec
+
+        # Resolve this file's OCR passes (running concurrently in the pool) and finalize records.
+        for page_num, pend in pending_ocr.items():
+            try:
+                ocr_result = pend["future"].result()
+            except Exception as exc:  # pragma: no cover - defensive
+                ocr_result = _empty_ocr_result(f"ocr failed: {exc}")
+            apply_ocr_fields(pend["text_rec"], pend["page_rec"], ocr_result)
+            persist_ocr_cache(ocr_result, cache_dir, item, page_num, ocr_config)
+
         doc_status = "partial_error" if page_errors else "success"
-        ocr_llm_result: dict[str, Any] | None = None
-        if ocr_llm_config and ocr_llm_config.enabled:
-            ocr_llm_result = consolidate_part_instruments(
-                item, text_records, cache_dir, ocr_llm_config
-            )
         document_record = build_document_record(
-            item, run_id, text_records, page_records, doc_status, ocr_llm_result
+            item, run_id, text_records, page_records, doc_status, None
         )
         return text_records, page_records, document_record, page_errors, page_total
     finally:
@@ -1869,6 +1955,11 @@ def main(
         "--ocr-multipass/--single-pass-ocr",
         help="Run multiple OCR passes (varied PSM + DPI) and keep all as LLM candidates",
     ),
+    ocr_workers: int = typer.Option(
+        0,
+        help="Concurrent OCR worker threads (0 = auto min(8, CPU); 1 = serial). Also bounds "
+        "concurrent OCR-LLM classification calls.",
+    ),
     ocr_llm: bool = typer.Option(
         True,
         "--ocr-llm/--no-ocr-llm",
@@ -1893,6 +1984,10 @@ def main(
         raise typer.BadParameter("render-dpi must be between 24 and 600")
     if ocr_dpi < 72 or ocr_dpi > 1200:
         raise typer.BadParameter("ocr-dpi must be between 72 and 1200")
+    if ocr_workers < 0:
+        raise typer.BadParameter("ocr-workers must be >= 0")
+    if ocr_workers == 0:
+        ocr_workers = min(8, os.cpu_count() or 1)
     ocr_llm_page_scope = (ocr_llm_page_scope or "all").lower().strip()
     if ocr_llm_page_scope not in {"all", "first"}:
         raise typer.BadParameter("ocr-llm-page-scope must be 'all' or 'first'")
@@ -2060,6 +2155,27 @@ def main(
         )
         atomic_write_json(checkpoint_path, checkpoint_now)
 
+    # OCR runs each scanned page's Tesseract passes concurrently in this pool (rendering stays on
+    # the main thread). The LLM pool runs the per-file classification asynchronously: once a file
+    # is OCR'd we spin off its Copilot call and move on to the next PDF, then collect the results
+    # after the loop. Both pools are bounded by --ocr-workers.
+    ocr_executor = (
+        ThreadPoolExecutor(max_workers=ocr_workers)
+        if enable_ocr and ocr_workers > 1
+        else None
+    )
+    llm_executor = (
+        ThreadPoolExecutor(max_workers=ocr_workers) if ocr_llm_config.enabled else None
+    )
+    if ocr_executor is not None:
+        logger.info("OCR parallelism enabled: %d worker threads", ocr_workers)
+    if llm_executor is not None:
+        # Warm the shared taxonomy/prompt caches once so worker threads don't race to build them.
+        _ocr_llm_allowed_instruments()
+        _ocr_llm_template()
+    # (LLM future, its document record) pairs to resolve and patch after the OCR loop.
+    llm_futures: list[tuple[Future, dict[str, Any]]] = []
+
     for idx, item in enumerate(items, start=1):
         if item.piece_folder != current_folder:
             current_folder = item.piece_folder
@@ -2110,7 +2226,7 @@ def main(
                 enable_rendering,
                 enable_image_metrics,
                 ocr_config,
-                ocr_llm_config,
+                ocr_executor,
             )
         except Exception as exc:
             pdf_errors += 1
@@ -2120,6 +2236,12 @@ def main(
         text_records.extend(pdf_text)
         page_records.extend(pdf_pages)
         document_records.append(pdf_document)
+        if llm_executor is not None:
+            # Spin off the per-file classification and move on to the next PDF's OCR.
+            fut = llm_executor.submit(
+                consolidate_part_instruments, item, pdf_text, cache_dir, ocr_llm_config
+            )
+            llm_futures.append((fut, pdf_document))
         page_error_total += page_errs
         pages_done += page_total
         processed_pdfs += 1
@@ -2138,6 +2260,24 @@ def main(
             pages_done,
         )
         _flush_progress()
+
+    # Collect the asynchronous per-file LLM classifications and patch their document records.
+    if llm_futures:
+        logger.info("Waiting on %d OCR-LLM classification(s)...", len(llm_futures))
+        for fut, doc_rec in llm_futures:
+            try:
+                result = fut.result()
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "OCR-LLM classification failed for %s: %s", doc_rec.get("pdf_path"), exc
+                )
+                result = _empty_ocr_llm_result(f"error: {exc}")
+            if result is not None:
+                apply_llm_fields(doc_rec, result)
+    if ocr_executor is not None:
+        ocr_executor.shutdown(wait=True)
+    if llm_executor is not None:
+        llm_executor.shutdown(wait=True)
 
     text_records = sort_records(text_records)
     page_records = sort_records(page_records)
