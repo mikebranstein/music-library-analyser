@@ -176,6 +176,7 @@ venv.bak/
 /cache/llm/*
 /cache/ocr_llm/*
 /cache/vision/*
+/cache/windrep/*
 /outputs/*
 /test_fixtures/
 
