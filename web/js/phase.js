@@ -68,16 +68,34 @@
     var idField = ID_FIELD[entity];
     var page = ENTITY_PAGE[entity];
 
+    // Precompute the max for any in-cell bar columns that scale to the column max (used only
+    // when a column has no per-row `barOf` denominator of its own).
+    var barMax = {};
+    (spec.columns || []).forEach(function (c) {
+      if (c.bar && !c.barOf) {
+        barMax[c.key] = rows.reduce(function (m, r) {
+          return Math.max(m, Number(r[c.key]) || 0);
+        }, 0) || 1;
+      }
+    });
+
     var columns = (spec.columns || []).map(function (c) {
       return {
         key: c.key,
         label: c.label,
         num: !!c.num,
         filterText: function (row) { return row[c.key]; },
+        sortValue: c.bar ? function (row) { return Number(row[c.key]) || 0; } : undefined,
         render: function (row) {
           var v = row[c.key];
           if (c.badge === "severity") return MLG.severityBadge(v);
           if (c.display === "pct") return MLG.fmt.pctValue(v);
+          if (c.bar) {
+            // `barOf` makes the bar a true per-row percentage (value / row[barOf]); otherwise it
+            // scales to the collection-wide max for the column.
+            var denom = c.barOf ? (Number(row[c.barOf]) || 0) : barMax[c.key];
+            return cellBar(Number(v) || 0, denom, c.variant);
+          }
           if (c.link && page && idField) {
             return el("a", { href: MLG.rel(MLG.href(page, { id: row[idField] })), text: MLG.fmt.text(v) });
           }
@@ -87,6 +105,23 @@
     });
 
     app.appendChild(el("h2", { text: spec.caption || "Details" }));
-    app.appendChild(MLG.table(rows, columns, { filterPlaceholder: "Filter\u2026" }));
+    app.appendChild(MLG.table(rows, columns, {
+      filterPlaceholder: "Filter\u2026",
+      sortKey: spec.sortKey || null,
+      dir: spec.dir || "asc",
+    }));
+  }
+
+  // A compact in-cell horizontal bar (the "chart" graphic) paired with its raw value.
+  function cellBar(value, max, variant) {
+    var pct = Math.max(0, Math.min(100, max ? (100 * value) / max : 0));
+    var bar = el("div", { class: "cell-bar__fill" });
+    bar.style.width = pct + "%";
+    if (variant) bar.style.background = "var(--" + variant + ")";
+    var track = el("div", { class: "cell-bar__track", title: Math.round(pct) + "%" }, [bar]);
+    return el("div", { class: "cell-bar" }, [
+      el("span", { class: "cell-bar__num", text: MLG.fmt.num(value) }),
+      track,
+    ]);
   }
 })();

@@ -388,6 +388,10 @@ def build_pieces(
             docs = report.get("documents") or []
             if docs:
                 first_thumb = thumb_for(docs[0].get("thumbnail_path"))
+        expected_parts = (report or {}).get("expected_parts") or []
+        expected_ct = int((report or {}).get("expected_part_count") or len(expected_parts))
+        present_ct = sum(1 for e in expected_parts if e.get("present"))
+        missing_ct = max(expected_ct - present_ct, 0)
         pieces.append(
             {
                 "piece_id": piece_id,
@@ -399,6 +403,9 @@ def build_pieces(
                 "completeness_tier": sp.get("completeness_tier"),
                 "document_count": sp.get("document_count") or 0,
                 "page_count": page_count_by_piece.get(piece_id or "", 0),
+                "expected_part_count": expected_ct,
+                "present_part_count": present_ct,
+                "missing_part_count": missing_ct,
                 "missing_required_count": sp.get("missing_required_count") or 0,
                 "missing_required": _missing_required(report),
                 "instrumentation": _instrumentation(report),
@@ -549,14 +556,6 @@ def build_phases(
         }
         for p in pieces
     ]
-    missing_rows = [
-        {
-            "label": p.get("piece_title_guess") or p.get("piece_id"),
-            "value": int(p.get("missing_required_count") or 0),
-            "variant": "warning" if (p.get("missing_required_count") or 0) else "success",
-        }
-        for p in pieces
-    ]
     top_missing_rows = [
         {"label": _titlecase(s.get("section")), "value": s.get("missing_piece_count") or 0}
         for s in (summary.get("top_missing_sections") or [])
@@ -632,7 +631,21 @@ def build_phases(
                 {"label": "Expected parts", "value": expected_parts_total},
                 {"label": "Missing required", "value": missing_required_total},
             ],
-            "charts": [{"title": "Missing required parts by piece", "rows": missing_rows}],
+            "table": {
+                "caption": "Expected instrumentation by piece",
+                "entity": "piece",
+                "sortKey": "missing_part_count",
+                "dir": "desc",
+                "columns": [
+                    {"key": "catalog_number", "label": "Catalog #"},
+                    {"key": "title", "label": "Piece", "link": "piece"},
+                    {"key": "expected_part_count", "label": "Expected", "num": True},
+                    {"key": "present_part_count", "label": "Have", "num": True},
+                    {"key": "missing_part_count", "label": "Missing", "num": True, "bar": True, "barOf": "expected_part_count", "variant": "warning"},
+                    {"key": "completeness_score", "label": "Complete", "num": True, "display": "pct"},
+                ],
+                "source": "pieces",
+            },
         },
         "5": {
             "summary": _phase_summary(n_docs, "documents", "Scan quality scored; legibility issues flagged.", t_extract),

@@ -310,6 +310,31 @@ table.data th.num {
   font-variant-numeric: tabular-nums;
 }
 
+/* Compact in-cell bar graphic used inside data tables (e.g. missing parts per piece). */
+.cell-bar {
+  display: grid;
+  grid-template-columns: 2.5ch 1fr;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 90px;
+}
+.cell-bar__num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+.cell-bar__track {
+  background: var(--bg);
+  border: var(--hairline) solid var(--border);
+  border-radius: var(--radius-input);
+  height: 10px;
+  overflow: hidden;
+}
+.cell-bar__fill {
+  height: 100%;
+  background: var(--accent);
+}
+
 /* --- Expanders (heavy text) --- */
 details.expander {
   border: var(--hairline) solid var(--border);
