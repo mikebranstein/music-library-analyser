@@ -666,7 +666,15 @@ def generate_thumbnails(
     available: set[str] = set()
     converted = skipped = missing = 0
 
-    for cache_path in cache_paths:
+    total = len(cache_paths)
+    start_time = time.monotonic()
+    # Log a progress line at most every ~2s (plus first and last) so long runs show they are
+    # alive without flooding the log on fast, mostly-reused runs.
+    last_log = start_time
+    log_interval_s = 2.0
+    logger.info("Thumbnails: generating for %d referenced render(s) (rebuild=%s).", total, rebuild)
+
+    for index, cache_path in enumerate(cache_paths, start=1):
         web_rel = thumb_web_path(cache_path)
         if not web_rel:
             continue
@@ -691,12 +699,27 @@ def generate_thumbnails(
             logger.warning("Failed to convert thumbnail %s: %s", src, exc)
             missing += 1
 
+        now = time.monotonic()
+        if index == total or now - last_log >= log_interval_s:
+            last_log = now
+            logger.info(
+                "Thumbnails: [%d/%d] %.0f%% (%d converted, %d reused, %d missing/failed, %.1fs elapsed)",
+                index,
+                total,
+                (index / total * 100) if total else 100.0,
+                converted,
+                skipped,
+                missing,
+                now - start_time,
+            )
+
     logger.info(
-        "Thumbnails: %d converted, %d reused, %d missing/failed (of %d referenced).",
+        "Thumbnails: %d converted, %d reused, %d missing/failed (of %d referenced) in %.1fs.",
         converted,
         skipped,
         missing,
-        len(cache_paths),
+        total,
+        time.monotonic() - start_time,
     )
     return available
 
