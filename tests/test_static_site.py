@@ -54,13 +54,19 @@ def _report(piece_id: str = "p1", **overrides: Any) -> dict:
         "observed_parts": [
             {"predicted_part": "Flute", "instruments": [{"canonical_instrument": "flute", "section": "woodwind"}]},
         ],
+        "has_score": True,
+        "score_missing": False,
+        "score_types": ["full_score"],
         "documents": [
-            {"pdf_path": "001/flute.pdf", "predicted_part": "Flute", "quality_band": "good",
-             "thumbnail_path": "cache/render/p1_p0001_aaa.png", "notation_source_type": "printed_original",
-             "needs_review": False},
-            {"pdf_path": "001/oboe.pdf", "predicted_part": "Oboe", "quality_band": "poor",
-             "thumbnail_path": "cache/render/p1_p0002_bbb.png", "notation_source_type": "handwritten",
-             "needs_review": True},
+            {"pdf_path": "001/flute.pdf", "pdf_filename": "flute.pdf", "predicted_part": "Flute",
+             "quality_band": "good", "thumbnail_path": "cache/render/p1_p0001_aaa.png",
+             "notation_source_type": "printed_original", "needs_review": False, "is_score": False},
+            {"pdf_path": "001/oboe.pdf", "pdf_filename": "oboe.pdf", "predicted_part": "Oboe",
+             "quality_band": "poor", "thumbnail_path": "cache/render/p1_p0002_bbb.png",
+             "notation_source_type": "handwritten", "needs_review": True, "is_score": False},
+            {"pdf_path": "001/score.pdf", "pdf_filename": "score.pdf", "predicted_part": "Full Score",
+             "quality_band": "good", "notation_source_type": "printed_original", "needs_review": False,
+             "is_score": True, "score_type": "full_score"},
         ],
     }
     rec.update(overrides)
@@ -162,6 +168,39 @@ def test_build_pieces_projects_missing_required_and_score_pct():
     assert p["thumbnail"] == "assets/thumbs/p1_p0001_aaa.webp"
 
 
+def test_build_pieces_includes_instrumentation_and_score():
+    index = ss.index_reports([_report()])
+    pieces = ss.build_pieces(_summary()["pieces"], index, {"p1": 2}, lambda c: None)
+    p = pieces[0]
+
+    # Full expected-parts grid preserved in canonical order, with present/required flags.
+    assert p["has_expected_parts"] is True
+    labels = [part["label"] for part in p["instrumentation"]]
+    assert labels == ["Flute", "Oboe", "Harp"]
+
+    flute = p["instrumentation"][0]
+    assert flute["present"] is True and flute["required"] is True
+    # A present part links to its document(s) via the observed-parts canonical mapping.
+    assert flute["documents"] == [{"doc_id": ss.synth_doc_id("001/flute.pdf"), "filename": "flute.pdf"}]
+
+    oboe = p["instrumentation"][1]
+    assert oboe["present"] is False
+    assert oboe["documents"] == []  # missing -> no linked document
+
+    # Score is broken out with its linked document(s).
+    assert p["score"]["has_score"] is True
+    assert p["score"]["score_missing"] is False
+    assert p["score"]["score_types"] == ["full_score"]
+    assert p["score"]["documents"] == [
+        {
+            "doc_id": ss.synth_doc_id("001/score.pdf"),
+            "filename": "score.pdf",
+            "pdf_path": "001/score.pdf",
+            "score_type": "full_score",
+        }
+    ]
+
+
 def test_build_documents_synthesizes_ids_and_enriches():
     index = ss.index_reports([_report()])
     docs = ss.build_documents(_documents_jsonl(), index, lambda c: None)
@@ -170,6 +209,9 @@ def test_build_documents_synthesizes_ids_and_enriches():
     assert by_file["flute.pdf"]["instrument"] == "Flute"
     assert by_file["flute.pdf"]["section"] == "woodwind"
     assert by_file["oboe.pdf"]["quality"] == "poor"
+    # score flags projected from the report's per-document metadata
+    assert by_file["flute.pdf"]["is_score"] is False
+    assert by_file["flute.pdf"]["score_type"] is None
     # thumbnail resolver returned None -> stored None
     assert by_file["flute.pdf"]["thumbnail"] is None
 
