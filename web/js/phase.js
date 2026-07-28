@@ -25,6 +25,11 @@
     app.appendChild(MLG.pageHead("Phase " + n, meta.title));
     app.appendChild(el("p", { class: "muted", text: meta.blurb }));
 
+    // Rich, explanatory description: what this phase does, how it works, and why.
+    if (meta.detail) {
+      app.appendChild(el("div", { class: "card phase-about", html: meta.detail }));
+    }
+
     // Summary line + deferred timing note
     var summaryCard = el("div", { class: "card stack" });
     summaryCard.appendChild(el("p", { html:

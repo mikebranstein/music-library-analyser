@@ -28,15 +28,146 @@
   };
 
   // --- the 8 pipeline phases (static metadata; metrics come from MLG.data.phases) ---
+  // `blurb` is the one-line summary shown on the dashboard phase cards. `detail` is the richer,
+  // multi-paragraph explanation rendered at the top of each phase page: what the stage does, how
+  // it works, and why the approach was chosen.
   MLG.PHASES = [
-    { n: 1, slug: "phase-01-inventory", title: "Inventory", blurb: "Scan the library and group every PDF into pieces." },
-    { n: 2, slug: "phase-02-extract", title: "Extract & Read", blurb: "Render pages, OCR the scans, and vision-analyse each document." },
-    { n: 3, slug: "phase-03-classify", title: "Part Classification", blurb: "Predict the instrument / part each document represents." },
-    { n: 4, slug: "phase-04-expected", title: "Expected Instrumentation", blurb: "Infer the expected part set for each piece." },
-    { n: 5, slug: "phase-05-quality", title: "Quality Checks", blurb: "Score scan quality and flag legibility issues." },
-    { n: 6, slug: "phase-06-pieces", title: "Piece Reports", blurb: "Score completeness and severity for every piece." },
-    { n: 7, slug: "phase-07-collection", title: "Collection Report", blurb: "Roll up collection-wide statistics." },
-    { n: 8, slug: "phase-08-review", title: "Manual Review Pack", blurb: "Prioritize the pieces that most need human review." },
+    {
+      n: 1, slug: "phase-01-inventory", title: "Inventory",
+      blurb: "Scan the library and group every PDF into pieces.",
+      detail:
+        "<p><strong>What it does.</strong> Walks the entire library tree and records every PDF exactly once, " +
+        "grouping files into <em>pieces</em> by their containing folder. Each file is fingerprinted " +
+        "(content hash + size + modified time) and written to a checkpoint.</p>" +
+        "<p><strong>Why it works this way.</strong> The rest of the pipeline is expensive &mdash; it renders pages, " +
+        "runs OCR, and calls language models &mdash; so we never want to reprocess a file that has not changed. The " +
+        "fingerprint lets later runs skip untouched files and only redo the pieces that were actually added or edited.</p>" +
+        "<p><strong>The problem it solves.</strong> A real library is a messy pile of nested folders with duplicate and " +
+        "renamed files. This phase turns that pile into one stable, de-duplicated inventory keyed by piece and document, " +
+        "so every downstream stage has a single source of truth to join against instead of re-scanning the disk.</p>",
+    },
+    {
+      n: 2, slug: "phase-02-extract", title: "Extract & Read",
+      blurb: "Render pages, OCR the scans, and vision-analyse each document.",
+      detail:
+        "<p><strong>What it does.</strong> For every PDF it pulls any embedded (born-digital) text, renders each page " +
+        "to an image, and OCRs the pages that have no usable text layer. Alongside the text it measures objective " +
+        "image-quality signals per page &mdash; resolution/DPI, blur, skew, contrast, and blankness &mdash; and consolidates the " +
+        "noisy OCR reads into a clean list of instrument tokens.</p>" +
+        "<p><strong>Why it works this way.</strong> Much of the collection is scanned paper, so the PDFs carry no real " +
+        "text to search. We render and OCR those pages to recover their words, but OCR on old, skewed, or faint scans is " +
+        "unreliable &mdash; so we also record how trustworthy each page looks and reconcile the raw OCR through a model pass " +
+        "rather than trusting a single noisy read.</p>" +
+        "<p><strong>The problem it solves.</strong> Every later phase needs to <em>read</em> the music &mdash; the part name in " +
+        "the corner, the title, the instrument list on a score. This stage is the one place that turns pixels into text " +
+        "and quality metrics, so nothing downstream ever has to open a PDF again.</p>",
+    },
+    {
+      n: 3, slug: "phase-03-classify", title: "Part Classification",
+      blurb: "Predict the instrument / part each document represents.",
+      detail:
+        "<p><strong>What it does.</strong> Decides which instrument/part each document is (Flute 1, Trombone 2, a full " +
+        "score, &hellip;) using a rule-first, deterministic cascade. It starts from a baseline read of the filename and then " +
+        "lets more trustworthy in-file evidence override it, in a fixed order of precedence:</p>" +
+        "<ol>" +
+        "<li><strong>OCR&rarr;LLM consolidation</strong> &mdash; the document-level instrument list reconciled in Phase 2. " +
+        "This is the strongest in-file signal, because it already merged and cleaned the raw OCR.</li>" +
+        "<li><strong>Printed label in the upper-left corner</strong> &mdash; the part name engravers print at the top-left of " +
+        "the page. It is read <em>earliest-match-first</em> so the header label wins over anything further down, and it may " +
+        "override the filename even across instrument families (flagged for review when it does).</li>" +
+        "<li><strong>Same-section footer / credit instrument</strong> &mdash; a name in the footer or engraver credit may only " +
+        "relabel within the same section (e.g. Baritone &rarr; Euphonium); it can refine, but not overturn, the filename.</li>" +
+        "</ol>" +
+        "<p><strong>Why a cascade instead of one method.</strong> No single signal is reliable on its own. Filenames are " +
+        "convenient but full of typos, generic names, and mislabels. The printed label is authoritative but comes through " +
+        "noisy OCR. So we combine several signals with an explicit precedence and a confidence tier: trust the filename when " +
+        "nothing better exists, but let the page itself override it when they disagree.</p>" +
+        "<p><strong>The heuristics we guard against.</strong> Parts routinely print <em>cue</em> notes from another instrument " +
+        '(an "Oboe cue" inside a clarinet part), which would fool a naive keyword match &mdash; so <code>&lt;instrument&gt; cue</code> ' +
+        "annotations are stripped before matching and can never win. The instrument vocabulary lives in an editable lexicon " +
+        "(<code>config/regex_rules.yaml</code>) with a built-in fallback, and every decision records the evidence source that " +
+        "produced it so the result is auditable rather than a black box.</p>",
+    },
+    {
+      n: 4, slug: "phase-04-expected", title: "Expected Instrumentation",
+      blurb: "Infer the expected part set for each piece.",
+      detail:
+        "<p><strong>What it does.</strong> Works out which parts a piece <em>should</em> contain &mdash; its instrumentation " +
+        "contract &mdash; so missing parts can be detected. It runs up to three stages and stops at the first that returns a " +
+        "confident answer:</p>" +
+        "<ol>" +
+        "<li><strong>Local score OCR</strong> &mdash; if the piece already includes a full score PDF, read its instrument list " +
+        "directly (re-OCRing only the leading pages when the existing text is too thin) and summarise it into the contract.</li>" +
+        "<li><strong>Online authority lookup</strong> &mdash; ask an assistant to find the actual published score online and " +
+        "return its real instrumentation from authoritative sources, plus candidate score-image URLs.</li>" +
+        "<li><strong>Remote image OCR</strong> &mdash; when the lookup finds score images but no text, download and OCR those " +
+        "images locally, then summarise them into the contract.</li>" +
+        "</ol>" +
+        "<p><strong>Why it works this way.</strong> To know what is <em>missing</em> you first have to know what should be " +
+        "present, and there is no manifest that tells us. So we try the cheapest trustworthy source first (a score sitting in " +
+        "the folder), fall back to an online authority, and only then to OCR of images found online &mdash; spending effort in " +
+        "proportion to how hard the answer is to get.</p>" +
+        "<p><strong>The problem it solves.</strong> When no stage is confident, the piece degrades to a conservative " +
+        "observed-only record flagged for review. It never invents a &ldquo;missing&rdquo; part without an authoritative " +
+        "source, so completeness numbers stay honest.</p>",
+    },
+    {
+      n: 5, slug: "phase-05-quality", title: "Quality Checks",
+      blurb: "Score scan quality and flag legibility issues.",
+      detail:
+        "<p><strong>What it does.</strong> Scores how legible each document is and classifies its notation source " +
+        "(printed/engraved vs. handwritten). It <em>reuses</em> the objective per-page metrics Phase 2 already measured " +
+        "&mdash; resolution, skew, contrast, blur, OCR confidence, blankness &mdash; evaluates each page against configurable " +
+        "thresholds (<code>config/quality_thresholds.yaml</code>), and rolls the findings up into a per-document quality band.</p>" +
+        "<p><strong>Why it works this way.</strong> The engine is deterministic and threshold-driven rather than model-based, " +
+        "so the same scan always gets the same score and every flag can be traced to a concrete measurement. Crucially, it " +
+        "never raises an issue from a missing (null) metric &mdash; absence of a measurement is not evidence of a defect.</p>" +
+        "<p><strong>The problem it solves.</strong> It separates &ldquo;we could not read this well&rdquo; from &ldquo;a part " +
+        "is actually missing.&rdquo; Quality, legibility, and handwriting are informational (good / fair / poor, plus a " +
+        "handwritten flag): they help a librarian judge a scan, but they never on their own mark a piece incomplete.</p>",
+    },
+    {
+      n: 6, slug: "phase-06-pieces", title: "Piece Reports",
+      blurb: "Score completeness and severity for every piece.",
+      detail:
+        "<p><strong>What it does.</strong> Joins every upstream signal for a piece &mdash; observed parts, expected/missing " +
+        "parts, completeness, scan quality, notation source, confidence tiers, and review flags &mdash; into one report per " +
+        "piece, and derives a prioritised list of recommended manual actions.</p>" +
+        "<p><strong>Why it works this way.</strong> This stage computes nothing new about the music; it only surfaces the " +
+        "deterministic facts Phases 1&ndash;5 already produced. That keeps it fully offline (no AI, no network, no rendering), " +
+        "so it is cheap, fast, and easy to unit-test, and its output can never disagree with the phases it summarises.</p>" +
+        "<p><strong>The problem it solves.</strong> Everything the pipeline knows about a single piece is scattered across " +
+        "several datasets. This gives a librarian one page per piece that answers &ldquo;is it complete, how good are the " +
+        "scans, and what should I do next?&rdquo;</p>",
+    },
+    {
+      n: 7, slug: "phase-07-collection", title: "Collection Report",
+      blurb: "Roll up collection-wide statistics.",
+      detail:
+        "<p><strong>What it does.</strong> Aggregates every per-piece report into one collection-wide view: library size, " +
+        "completeness, scan quality, lookup coverage, the instruments that are most often missing, and the pieces that need " +
+        "attention.</p>" +
+        "<p><strong>Why it works this way.</strong> Like the piece reports, it is a pure reporting stage &mdash; it only " +
+        "counts, groups, and orders facts the earlier phases produced, so it stays deterministic and offline. No number here " +
+        "is re-derived; it is simply a roll-up of Phase 6.</p>" +
+        "<p><strong>The problem it solves.</strong> It turns hundreds of individual piece reports into the handful of " +
+        "headline numbers and rankings needed to understand the health of the whole library at a glance and to decide where " +
+        "to focus.</p>",
+    },
+    {
+      n: 8, slug: "phase-08-review", title: "Manual Review Pack",
+      blurb: "Prioritize the pieces that most need human review.",
+      detail:
+        "<p><strong>What it does.</strong> Turns the per-piece reports into a <em>prioritised</em> work queue, so limited " +
+        "librarian time targets the highest-value fixes first. It carries each piece's reason codes and recommended actions " +
+        "through verbatim.</p>" +
+        "<p><strong>Why it works this way.</strong> Unlike the pure reporting phases, this stage does compute one new thing: " +
+        "a transparent, auditable priority ordering. It still re-derives nothing &mdash; it only weights and orders the " +
+        "existing facts &mdash; so the ranking is reproducible and every position can be explained.</p>" +
+        "<p><strong>The problem it solves.</strong> A flat list of problems is not actionable when there are more issues than " +
+        "hours. This phase answers &ldquo;what should I fix first?&rdquo; by putting the most consequential, most fixable " +
+        "pieces at the top of the queue.</p>",
+    },
   ];
   MLG.phaseBySlug = function (slug) {
     return MLG.PHASES.filter(function (p) { return p.slug === slug; })[0] || null;

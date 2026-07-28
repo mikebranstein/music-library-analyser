@@ -16,6 +16,26 @@
   border-color: var(--border-strong);
   text-decoration: none;
 }
+.phase-about {
+  margin-top: var(--space-4);
+  line-height: 1.55;
+}
+.phase-about > * + * {
+  margin-top: var(--space-3);
+}
+.phase-about p {
+  color: var(--text);
+}
+.phase-about ol {
+  margin: 0;
+  padding-left: 1.25rem;
+}
+.phase-about ol > li + li {
+  margin-top: var(--space-2);
+}
+.phase-about code {
+  font-size: 0.85em;
+}
 .card__label {
   font-size: 0.72rem;
   text-transform: uppercase;
