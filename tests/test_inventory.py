@@ -93,6 +93,33 @@ def test_inventory_full_and_incremental_reuse(tmp_path: Path) -> None:
     assert (output_path.parent / ".inventory_checkpoint.json").exists()
 
 
+def test_subfolders_collapse_into_top_level_piece(tmp_path: Path) -> None:
+    """PDFs in nested subfolders belong to their top-level folder's piece, not a new one."""
+    inventory = load_inventory_module()
+
+    library_root = tmp_path / "library"
+    make_one_page_pdf(library_root / "368 Czardas" / "Solo Clarinet.pdf")
+    make_one_page_pdf(library_root / "368 Czardas" / "Solo Alternatives" / "Alto Sax.pdf")
+    make_one_page_pdf(library_root / "368 Czardas" / "Score" / "Full Score.pdf")
+
+    output_path = tmp_path / "data" / "raw_inventory.jsonl"
+    result = runner.invoke(
+        inventory.app,
+        ["--library-root", str(library_root), "--output", str(output_path), "--mode", "full"],
+    )
+    assert result.exit_code == 0, result.stdout
+
+    records = read_jsonl(output_path)
+    assert len(records) == 3
+    # Every PDF (including those in subfolders) shares one piece_folder and one piece_id.
+    assert {r["piece_folder"] for r in records} == {"368 Czardas"}
+    assert len({r["piece_id"] for r in records}) == 1
+    # The original nested location is preserved in the per-file path.
+    paths = {r["pdf_path"] for r in records}
+    assert "368 Czardas/Solo Alternatives/Alto Sax.pdf" in paths
+    assert "368 Czardas/Score/Full Score.pdf" in paths
+
+
 def test_inventory_persists_incrementally_during_run(tmp_path: Path, monkeypatch) -> None:
     """Records + checkpoint are written per PDF, not only once at the end."""
     inventory = load_inventory_module()

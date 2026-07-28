@@ -72,8 +72,16 @@ def discover_pdfs(library_root: Path) -> list[PdfEntry]:
         if not pdf.is_file() or pdf.is_symlink():
             continue
         rel_file = normalize_rel_path(pdf.relative_to(library_root))
-        piece_folder_path = pdf.parent.relative_to(library_root)
-        piece_folder = normalize_rel_path(piece_folder_path)
+        # A piece is the TOP-LEVEL folder under the library root. Any nested subfolders
+        # (e.g. "368 Czardas/Solo Alternatives/...") collapse into that single parent piece
+        # rather than each forming a separate piece. A PDF sitting directly at the library root
+        # (no folder) becomes its own piece, keyed by its filename stem.
+        rel_to_root = pdf.relative_to(library_root)
+        parent_parts = rel_to_root.parent.parts
+        if parent_parts:
+            piece_folder = normalize_rel_path(Path(parent_parts[0]))
+        else:
+            piece_folder = normalize_rel_path(Path(rel_to_root.stem))
         piece_hash = sha256_text(piece_folder)
         piece_id = hash_hex(piece_hash)[:16]
         entries.append(
