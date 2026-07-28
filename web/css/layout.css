@@ -1,0 +1,218 @@
+/* layout.css - page skeleton: header/nav, breadcrumbs, main grid, footer. */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: var(--accent-on-pale);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  color: var(--text);
+  font-weight: 600;
+  line-height: 1.25;
+  margin: 0 0 var(--space-3);
+}
+h1 {
+  font-size: 1.6rem;
+}
+h2 {
+  font-size: 1.2rem;
+  margin-top: var(--space-6);
+}
+h3 {
+  font-size: 1.02rem;
+  margin-top: var(--space-5);
+}
+p {
+  margin: 0 0 var(--space-3);
+}
+
+/* --- Header / primary nav --- */
+.site-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: var(--surface);
+  border-bottom: var(--hairline) solid var(--border);
+}
+.site-header__inner {
+  max-width: var(--maxw);
+  margin: 0 auto;
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-weight: 700;
+  font-size: 1.05rem;
+  letter-spacing: 0.01em;
+  color: var(--text);
+  white-space: nowrap;
+}
+.brand__mark {
+  width: 20px;
+  height: 20px;
+  color: var(--accent);
+}
+.nav {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-wrap: wrap;
+}
+.nav a {
+  color: var(--text-secondary);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-input);
+  font-weight: 500;
+}
+.nav a:hover {
+  color: var(--text);
+  background: var(--bg);
+  text-decoration: none;
+}
+.nav a[aria-current="page"] {
+  color: var(--accent-on-pale);
+  background: var(--accent-fill);
+}
+.header-tools {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* dropdown for the pipeline phase list */
+.menu {
+  position: relative;
+}
+.menu__panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  min-width: 260px;
+  background: var(--surface-raised);
+  border: var(--hairline) solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-overlay);
+  padding: var(--space-2);
+  display: none;
+}
+.menu[open] .menu__panel,
+.menu__panel.open {
+  display: block;
+}
+.menu__panel a {
+  display: block;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-input);
+  color: var(--text-secondary);
+}
+.menu__panel a:hover {
+  background: var(--bg);
+  color: var(--text);
+  text-decoration: none;
+}
+
+/* --- Breadcrumbs --- */
+.breadcrumbs {
+  max-width: var(--maxw);
+  margin: 0 auto;
+  padding: var(--space-3) var(--space-4) 0;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+.breadcrumbs a {
+  color: var(--text-secondary);
+}
+.breadcrumbs .sep {
+  color: var(--text-muted);
+}
+
+/* --- Main --- */
+main {
+  max-width: var(--maxw);
+  margin: 0 auto;
+  padding: var(--space-5) var(--space-4) var(--space-7);
+}
+.page-head {
+  margin-bottom: var(--space-4);
+}
+.page-head__eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.grid {
+  display: grid;
+  gap: var(--space-4);
+}
+.grid--kpi {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+.grid--2 {
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
+.grid--phases {
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+}
+
+/* --- Footer --- */
+.site-footer {
+  max-width: var(--maxw);
+  margin: 0 auto;
+  padding: var(--space-5) var(--space-4);
+  border-top: var(--hairline) solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+.site-footer code {
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+}
+
+@media (max-width: 720px) {
+  .nav a span.nav-label {
+    display: none;
+  }
+  main {
+    padding: var(--space-4) var(--space-3) var(--space-6);
+  }
+}

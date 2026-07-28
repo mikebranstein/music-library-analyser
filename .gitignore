@@ -198,6 +198,15 @@ venv.bak/
 .dmypy.json
 dmypy.json
 
+# --- Static site (Script 09) ---
+# The data layer is NEVER source-controlled: real runs derive from copyrighted sheet
+# music, so nothing under web/data/ is committed. A fully made-up sample lives in
+# web/data-sample/ (committed) and can be copied into web/data/ to preview the scaffold
+# (python web/seed_sample.py). Generated thumbnails / bundled PDFs are also ignored.
+/web/data/
+/web/assets/thumbs/
+/web/assets/pdfs/
+
 # Pyre type checker
 .pyre/
 

@@ -896,6 +896,70 @@ per-record work is trivial regex classification, and `observed_parts_by_piece.js
 - The instrumentation split establishes the folder convention (`data/<report_stem>/` for per-piece
   Markdown, with the top-level `.md` as an index). Reuse this shape for any future per-piece report.
 
+## 4.11 Script 09: Static Site Data Builder (`09_static_site.py`)
+
+Status: **implemented** (site schema `1.0`).
+
+Purpose:
+
+Transform the pipeline's existing output (Scripts 01-08) into the data layer a static web gallery
+reads, so the collection can be browsed visually (dashboard → pieces → documents → pages → the
+original PDF). Like Scripts 06-08 this is a pure *presentation* transform: it never re-derives
+completeness, quality, severity, instruments, or reason codes — it only reshapes and copies the
+facts the earlier stages produced into the shapes the site renders.
+
+Zero-build web contract (why the output looks the way it does):
+
+The `web/` site is hand-authored vanilla HTML/CSS/JS with **no build step and no server** — it must
+open by double-clicking `index.html` (`file://`). That rules out `fetch`/ES modules (blocked under
+`file://`), so Script 09 emits data as classic `<script>` modules that register plain objects onto a
+`window.MLG` global. Each `web/data/*.js` file is `MLG.register("<key>", <json>);`. Non-ASCII (and
+the JSON-legal but JS-illegal `U+2028`/`U+2029`) is escaped so every module is safe to load as a
+classic script.
+
+Inputs (under `--data-dir`, default `data/`):
+
+- `collection_reports/summary.json` (Script 07) — dashboard KPIs, distributions, attention list, and
+  the per-piece rollup that seeds the pieces index.
+- `piece_reports/*.json` (Script 06) — per-piece detail: `documents[]`, `expected_parts[]`,
+  `observed_parts[]`, and per-document `thumbnail_path`.
+- `documents.jsonl` (Script 02) — per-document OCR / vision detail.
+- `pages.jsonl` (Script 02) — per-page geometry and quality metrics.
+- `review_pack/manual_review_queue.json` (Script 08) — the prioritized queue (phase 8 view).
+
+Outputs (under `--web-dir`, default `web/`):
+
+- `data/00_manifest.js` `10_dashboard.js` `20_phases.js` `30_pieces.js` `40_documents.js`
+  `50_pages.js` — the six registered data modules, loaded in that order.
+- `assets/thumbs/*.webp` — downsized WebP thumbnails (via Pillow, already a dependency) of the
+  render cache PNGs referenced by documents and pages.
+- `assets/pdfs/...` — only with `--copy-pdfs`; bundles the original PDFs so the deep-drill-down link
+  works without a configured library path.
+
+Identity synthesis (the pipeline has no persistent per-document id): `doc_id = sha256(pdf_path)[:16]`
+over the forward-slash-normalized library-relative path (stable across OS separators);
+`page_id = <doc_id>__p<page_num>`. Piece ids come straight from Script 06.
+
+Score convention: pipeline completeness scores are `0..1` floats; the site displays percentages, so
+Script 09 multiplies by 100 (one decimal) when building the web models.
+
+Design (testability): every model is produced by a pure builder (`build_manifest`, `build_dashboard`,
+`build_pieces`, `build_documents`, `build_pages`, `build_phases`) that takes a thumbnail-resolver
+callable and never touches the filesystem. The only heavyweight / environment-dependent step —
+WebP generation — is isolated in `generate_thumbnails`, and the resolver only maps a cache path to a
+web path when a usable thumbnail actually exists, so the models never reference a missing image.
+`docs/SCRIPT09_STATIC_SITE_IMPLEMENTATION_PLAN.md` is the design of record.
+
+PDF deep-drill-down: the site links to the *original* PDFs (thumbnails are a preview, not the
+endpoint). Documents carry the library-relative `pdf_path`; the manifest records the `library_root`,
+and the site composes a `file://` link from a base directory the viewer sets once (or from
+`assets/pdfs/` when `--copy-pdfs` bundled them).
+
+Privacy / copyright: the generated `web/data/` and `web/assets/{thumbs,pdfs}/` derive from
+copyrighted sheet music and are **never** source-controlled (git-ignored). A made-up fixture lives in
+`web/data-sample/` and `web/seed_sample.py` seeds it into `web/data/` for a copyright-safe preview; a
+fresh clone shows a friendly "run Script 09" callout until real data is generated.
+
 ## 5. Core Decision Model
 
 Use confidence tiers everywhere:

@@ -1,0 +1,407 @@
+/* components.css - cards, badges, tables, charts, expanders, buttons, settings. */
+
+/* --- Cards / panels --- */
+.card {
+  background: var(--surface);
+  border: var(--hairline) solid var(--border);
+  border-radius: var(--radius-card);
+  padding: var(--space-4);
+}
+.card--link {
+  display: block;
+  color: inherit;
+  transition: border-color 0.12s ease;
+}
+.card--link:hover {
+  border-color: var(--border-strong);
+  text-decoration: none;
+}
+.card__label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.card__value {
+  font-size: 1.9rem;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1.1;
+  margin-top: var(--space-1);
+}
+.card__hint {
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  margin-top: var(--space-1);
+}
+
+/* --- Phase card (pipeline flow strip) --- */
+.phase-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-height: 128px;
+}
+.phase-card__idx {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+.phase-card__title {
+  font-weight: 600;
+}
+.phase-card__blurb {
+  font-size: 0.84rem;
+  color: var(--text-secondary);
+  flex: 1;
+}
+.phase-card__count {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+/* --- Badges / chips (color always paired with the text label) --- */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px;
+  border-radius: var(--radius-chip);
+  font-size: 0.75rem;
+  font-weight: 600;
+  border: var(--hairline) solid var(--border);
+  background: var(--surface-raised);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.badge::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.9;
+}
+.badge--high {
+  color: var(--state-high);
+  border-color: color-mix(in srgb, var(--state-high) 40%, var(--border));
+}
+.badge--review,
+.badge--warning {
+  color: var(--state-review);
+  border-color: color-mix(in srgb, var(--state-review) 40%, var(--border));
+}
+.badge--ok,
+.badge--good,
+.badge--success {
+  color: var(--state-ok);
+  border-color: color-mix(in srgb, var(--state-ok) 40%, var(--border));
+}
+.badge--poor,
+.badge--error {
+  color: var(--error);
+  border-color: color-mix(in srgb, var(--error) 40%, var(--border));
+}
+.badge--muted,
+.badge--unknown {
+  color: var(--text-muted);
+}
+.badge--plain::before {
+  display: none;
+}
+
+/* --- Tables --- */
+.table-wrap {
+  overflow-x: auto;
+  border: var(--hairline) solid var(--border);
+  border-radius: var(--radius-card);
+}
+table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+table.data th,
+table.data td {
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: var(--hairline) solid var(--border);
+  vertical-align: top;
+}
+table.data thead th {
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-weight: 600;
+  position: sticky;
+  top: 0;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+table.data thead th[data-sort]::after {
+  content: " \2195";
+  color: var(--text-muted);
+  font-size: 0.8em;
+}
+table.data thead th[aria-sort="ascending"]::after {
+  content: " \2191";
+  color: var(--accent);
+}
+table.data thead th[aria-sort="descending"]::after {
+  content: " \2193";
+  color: var(--accent);
+}
+table.data tbody tr {
+  background: var(--surface);
+}
+table.data tbody tr:hover {
+  background: var(--bg);
+}
+table.data td.num,
+table.data th.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Buttons / inputs --- */
+.btn {
+  font: inherit;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--surface-raised);
+  border: var(--hairline) solid var(--border-strong);
+  border-radius: var(--radius-button);
+  padding: var(--space-2) var(--space-3);
+  cursor: pointer;
+}
+.btn:hover {
+  border-color: var(--accent);
+}
+.btn--accent {
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+:root[data-theme="dark"] .btn--accent {
+  color: var(--accent-fill);
+}
+.btn--icon {
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+.input {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface-raised);
+  border: var(--hairline) solid var(--border);
+  border-radius: var(--radius-input);
+  padding: var(--space-2) var(--space-3);
+}
+.input:focus {
+  outline: 2px solid var(--border-strong);
+  outline-offset: 1px;
+}
+
+/* --- Global search --- */
+.search {
+  position: relative;
+}
+.search__input {
+  width: 210px;
+}
+.search__results {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  width: 340px;
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--surface-raised);
+  border: var(--hairline) solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-overlay);
+  display: none;
+}
+.search__results.open {
+  display: block;
+}
+.search__result {
+  display: block;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: var(--hairline) solid var(--border);
+  color: var(--text);
+}
+.search__result:hover {
+  background: var(--bg);
+  text-decoration: none;
+}
+.search__result small {
+  color: var(--text-muted);
+}
+.search__group {
+  padding: 6px var(--space-3);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  background: var(--surface);
+}
+
+/* --- Charts (inline SVG) --- */
+.chart {
+  width: 100%;
+}
+.chart__row {
+  display: grid;
+  grid-template-columns: 130px 1fr 48px;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-2);
+  font-size: 0.85rem;
+}
+.chart__label {
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chart__track {
+  background: var(--bg);
+  border: var(--hairline) solid var(--border);
+  border-radius: var(--radius-input);
+  height: 16px;
+  overflow: hidden;
+}
+.chart__bar {
+  height: 100%;
+  background: var(--accent);
+}
+.chart__value {
+  text-align: right;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Expanders (heavy text) --- */
+details.expander {
+  border: var(--hairline) solid var(--border);
+  border-radius: var(--radius-card);
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface);
+  margin-bottom: var(--space-3);
+}
+details.expander > summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+details.expander pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  margin: var(--space-3) 0 0;
+}
+
+/* --- Thumbnails --- */
+.thumb {
+  border: var(--hairline) solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg);
+  display: block;
+  max-width: 100%;
+}
+.thumb--card {
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  object-fit: cover;
+}
+.thumb-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: var(--space-3);
+}
+
+/* --- Definition list for entity facts --- */
+.facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-2) var(--space-4);
+  margin: 0;
+  font-size: 0.9rem;
+}
+.facts dt {
+  color: var(--text-muted);
+}
+.facts dd {
+  margin: 0;
+  color: var(--text);
+}
+
+/* --- Settings dialog --- */
+dialog.settings {
+  border: var(--hairline) solid var(--border-strong);
+  border-radius: var(--radius-card);
+  background: var(--surface-raised);
+  color: var(--text);
+  max-width: 520px;
+  width: 92%;
+  box-shadow: var(--shadow-overlay);
+}
+dialog.settings::backdrop {
+  background: rgba(23, 21, 17, 0.4);
+}
+.settings__field {
+  margin: var(--space-3) 0;
+}
+.settings__field label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: var(--space-1);
+}
+.settings__field .input {
+  width: 100%;
+}
+.settings__hint {
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+
+.callout {
+  border: var(--hairline) solid color-mix(in srgb, var(--warning) 45%, var(--border));
+  border-left-width: 3px;
+  border-radius: var(--radius-card);
+  background: var(--accent-fill);
+  color: var(--accent-on-pale);
+  padding: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-4);
+  font-size: 0.9rem;
+}
+
+.muted {
+  color: var(--text-muted);
+}
+.mono {
+  font-family: var(--font-mono);
+}
+.pdf-path {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  word-break: break-all;
+  color: var(--text-secondary);
+}
+.stack > * + * {
+  margin-top: var(--space-3);
+}
+.row {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  align-items: center;
+}

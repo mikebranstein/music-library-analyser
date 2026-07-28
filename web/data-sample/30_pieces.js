@@ -1,0 +1,33 @@
+MLG.register("pieces", [
+  {
+    piece_id: "p001",
+    title: "Mexican Hat Dance",
+    catalog_number: "001",
+    piece_folder: "001 Mexican Hat Dance",
+    severity: "high",
+    completeness_score: 62,
+    completeness_tier: "partial",
+    document_count: 2,
+    page_count: 3,
+    missing_required_count: 2,
+    missing_required: [
+      { label: "Tuba", canonical_instrument: "tuba", section: "Low Brass" },
+      { label: "Snare Drum", canonical_instrument: "snare_drum", section: "Percussion" },
+    ],
+    thumbnail: null,
+  },
+  {
+    piece_id: "p002",
+    title: "Amazing Grace",
+    catalog_number: "002",
+    piece_folder: "002 Amazing Grace",
+    severity: "ok",
+    completeness_score: 95,
+    completeness_tier: "complete",
+    document_count: 1,
+    page_count: 2,
+    missing_required_count: 0,
+    missing_required: [],
+    thumbnail: null,
+  },
+]);

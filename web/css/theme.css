@@ -1,0 +1,102 @@
+/*
+ * theme.css - color + shape language.
+ * Source of truth: docs/WEB_DESIGN_REFERENCE.md ("paper & ink" light / "stage light" dark).
+ * Neutrals do ~90% of the work; a single brass accent marks what matters. No gradients,
+ * no glassmorphism, borders over shadows, no pure black/white.
+ */
+
+:root {
+  /* Shape language */
+  --radius-card: 3px;
+  --radius-input: 4px;
+  --radius-button: 5px;
+  --radius-chip: 999px; /* pills reserved for small status chips only */
+
+  --hairline: 1px;
+  --shadow-overlay: 0 2px 4px rgba(23, 21, 17, 0.18); /* overlays only */
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+
+  --font-sans: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+
+  --maxw: 1180px;
+}
+
+/* Light mode - "paper" (default) */
+:root,
+:root[data-theme="light"] {
+  --bg: #F6F1E7;
+  --surface: #FCFAF4;
+  --surface-raised: #FFFFFF;
+  --border: #DCD3BE;
+  --border-strong: #C4B89C;
+  --text: #231F1A;
+  --text-secondary: #6B6152;
+  --text-muted: #9C9280;
+  --accent: #9C6B14;
+  --accent-on-pale: #7A5510;
+  --accent-fill: #F1E3C4;
+  --success: #4B6B4C;
+  --warning: #9C6B14;
+  --error: #8C3B31;
+  color-scheme: light;
+}
+
+/* Dark mode - "stage light" (a separate palette, not an inversion) */
+:root[data-theme="dark"] {
+  --bg: #171511;
+  --surface: #1F1C17;
+  --surface-raised: #26221C;
+  --border: #3A352B;
+  --border-strong: #524A3A;
+  --text: #EDE6D6;
+  --text-secondary: #A69A82;
+  --text-muted: #746A56;
+  --accent: #D9AE4E;
+  --accent-on-pale: #EDE6D6;
+  --accent-fill: #3A2F17;
+  --success: #84AE86;
+  --warning: #D9AE4E;
+  --error: #C77468;
+  color-scheme: dark;
+}
+
+/* Follow the OS on first load when no explicit choice has been stored. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --bg: #171511;
+    --surface: #1F1C17;
+    --surface-raised: #26221C;
+    --border: #3A352B;
+    --border-strong: #524A3A;
+    --text: #EDE6D6;
+    --text-secondary: #A69A82;
+    --text-muted: #746A56;
+    --accent: #D9AE4E;
+    --accent-on-pale: #EDE6D6;
+    --accent-fill: #3A2F17;
+    --success: #84AE86;
+    --warning: #D9AE4E;
+    --error: #C77468;
+    color-scheme: dark;
+  }
+}
+
+/* Semantic state -> pipeline vocabulary mapping (always paired with a label/icon in markup). */
+:root {
+  --state-high: var(--error);
+  --state-review: var(--warning);
+  --state-ok: var(--success);
+
+  --quality-good: var(--success);
+  --quality-review: var(--warning);
+  --quality-poor: var(--error);
+  --quality-unknown: var(--text-muted);
+}
