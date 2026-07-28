@@ -184,17 +184,14 @@ def build_manifest(
 
 
 def _attention_reason(ap: dict[str, Any]) -> str:
-    """Short human summary of why a piece needs attention (from Script 07 fields)."""
+    """Short human summary of why a piece needs attention (from Script 07 fields).
+
+    Scan quality and handwriting are informational only and are never cited as a reason.
+    """
     bits: list[str] = []
     missing = ap.get("missing_required_count") or 0
     if missing:
         bits.append(f"{missing} required part{'s' if missing != 1 else ''} missing")
-    low_q = ap.get("low_quality_doc_count") or 0
-    if low_q:
-        bits.append(f"{low_q} low-quality scan{'s' if low_q != 1 else ''}")
-    hand = ap.get("handwritten_doc_count") or 0
-    if hand:
-        bits.append(f"{hand} handwritten doc{'s' if hand != 1 else ''}")
     if not bits:
         codes = ap.get("reason_codes") or []
         if codes:
@@ -256,7 +253,7 @@ def build_dashboard(
         },
         "quality": {
             "good": quality.get("good") or 0,
-            "review": quality.get("review") or 0,
+            "fair": quality.get("fair") or 0,
             "poor": quality.get("poor") or 0,
             "unknown": quality.get("unknown") or 0,
         },

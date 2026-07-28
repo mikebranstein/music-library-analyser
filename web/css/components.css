@@ -88,6 +88,7 @@
   border-color: color-mix(in srgb, var(--state-high) 40%, var(--border));
 }
 .badge--review,
+.badge--fair,
 .badge--warning {
   color: var(--state-review);
   border-color: color-mix(in srgb, var(--state-review) 40%, var(--border));

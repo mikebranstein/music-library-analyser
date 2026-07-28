@@ -43,7 +43,7 @@ quality_checks:
   # Quality-score cutoffs for the reported band.
   bands:
     good_min_score: 80
-    review_min_score: 50
+    fair_min_score: 50
 
 # --- Script 05 notation-source classification ----------------------------------------------
 # Distinguishes engraved/printed originals from handwritten manuscript parts using the signals
@@ -66,9 +66,10 @@ notation_source:
 
 # --- Script 05 vision adjudication ---------------------------------------------------------
 # Adjudicates the optional vision signal Script 02 writes to documents.jsonl (run Script 02 with
-# --use-vision). Deterministic OCR/image metrics cannot tell handwritten manuscript from a
-# readable printed photocopy, so a confident vision verdict takes precedence: it overrides the
-# notation source and prevents a handwritten / low-legibility scan from scoring as "good".
+# --use-vision). Deterministic OCR/image metrics cannot tell a faint/hard-to-read scan from a
+# clean one, so a confident vision verdict takes precedence: it overrides the notation source and,
+# for legibility only, caps the quality band. Handwriting is recorded as a notation flag but never
+# downgrades the band -- a neat hand-copied part is fully usable.
 vision:
   # Honor vision_* fields when present. Set false to ignore them even after Script 02 wrote them.
   enabled: true
@@ -76,9 +77,8 @@ vision:
   min_confidence: 0.50
   # Replace notation_source_type/confidence with the vision verdict when confident.
   override_notation_source: true
-  # Band caps (a handwritten or hard-to-read scan warrants human review regardless of metrics).
-  # "review" => never "good"; "poor" => forced to the lowest band.
-  handwritten_caps_band_at: review
-  fair_legibility_caps_band_at: review
+  # Legibility band caps. "fair" => at most fair; "poor" => forced to the lowest band. These map
+  # the model's legibility judgment straight onto the reported quality band.
+  fair_legibility_caps_band_at: fair
   poor_legibility_caps_band_at: poor
 

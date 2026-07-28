@@ -100,7 +100,7 @@ def test_load_thresholds_yaml_override(tmp_path: Path):
     assert thresholds["quality_checks"]["min_estimated_dpi"] == 150
     # Overridden nested key is merged, not replaced wholesale.
     assert thresholds["quality_checks"]["bands"]["good_min_score"] == 90
-    assert thresholds["quality_checks"]["bands"]["review_min_score"] == 50
+    assert thresholds["quality_checks"]["bands"]["fair_min_score"] == 50
     # Untouched defaults survive.
     assert thresholds["quality_checks"]["max_skew_angle_deg"] == 3.0
 
@@ -231,11 +231,11 @@ def test_score_document_clean_is_good():
 
 
 def test_score_document_penalizes_by_fraction():
-    # Heavy blur (weight 30) on all pages -> 100 - 30 = 70 -> review band.
+    # Heavy blur (weight 30) on all pages -> 100 - 30 = 70 -> fair band.
     lists = [[qc.ISSUE_HEAVY_BLUR], [qc.ISSUE_HEAVY_BLUR]]
     score, band, summary, top, count = qc.score_document(lists, 2, _thr())
     assert score == 70.0
-    assert band == qc.QualityBand.REVIEW
+    assert band == qc.QualityBand.FAIR
     assert summary[qc.ISSUE_HEAVY_BLUR] == 2
     assert top[0] == qc.ISSUE_HEAVY_BLUR
     assert count == 2
@@ -251,7 +251,7 @@ def test_score_document_partial_fraction():
 
 
 def test_score_document_poor_band():
-    # Two heavy issues on every page drive the score below the review cutoff.
+    # Two heavy issues on every page drive the score below the fair cutoff.
     lists = [[qc.ISSUE_BLANK_PAGE, qc.ISSUE_NOISE_PAGE]] * 3
     score, band, _s, _t, _c = qc.score_document(lists, 3, _thr())
     assert score <= 50
@@ -323,7 +323,6 @@ def test_build_quality_record_good_document():
     rec = qc.build_quality_record("band/p1/cornet.pdf", pages, texts, None, _thr(), "run1")
     assert rec["quality_band"] == qc.QualityBand.GOOD
     assert rec["quality_score"] == 100.0
-    assert rec["needs_review"] is False
     assert rec["page_count"] == 2
     assert rec["analyzed_page_count"] == 2
     assert rec["notation_source_type"] == qc.NotationSource.PRINTED
@@ -337,7 +336,6 @@ def test_build_quality_record_flags_issues_and_worst_page():
     assert rec["worst_page"] == 2
     assert qc.ISSUE_HEAVY_BLUR in rec["issue_summary"]
     assert rec["page_issue_count"] == 1
-    assert rec["needs_review"] is True
 
 
 def test_build_quality_record_uses_doc_meta():
@@ -354,7 +352,6 @@ def test_build_quality_record_no_analyzable_pages_is_unknown():
     rec = qc.build_quality_record("band/p1/cornet.pdf", pages, {}, None, _thr(), "run1")
     assert rec["quality_band"] == qc.QualityBand.UNKNOWN
     assert rec["quality_score"] is None
-    assert rec["needs_review"] is True
     assert rec["analyzed_page_count"] == 0
 
 
@@ -366,7 +363,7 @@ def _vision_meta(**overrides: Any) -> dict:
         "piece_id": "p1",
         "vision_status": "success",
         "vision_notation_source": "handwritten",
-        "vision_legibility": "fair",
+        "vision_legibility": "good",
         "vision_confidence": 0.85,
         "vision_notes": "manuscript",
     }
@@ -374,8 +371,8 @@ def _vision_meta(**overrides: Any) -> dict:
     return meta
 
 
-def test_vision_handwritten_caps_good_document_at_review():
-    # A clean scan that would score GOOD is capped to REVIEW once vision says handwritten.
+def test_vision_handwritten_flags_but_does_not_cap_band():
+    # A clean, readable hand-copied part is flagged as handwritten but keeps its GOOD band.
     pages = [_page(page_num=1)]
     texts = {1: _text(1)}
     rec = qc.build_quality_record(
@@ -383,9 +380,21 @@ def test_vision_handwritten_caps_good_document_at_review():
     )
     assert rec["vision_applied"] is True
     assert rec["notation_source_type"] == qc.NotationSource.HANDWRITTEN
-    assert rec["quality_band"] == qc.QualityBand.REVIEW
-    assert rec["needs_review"] is True
+    assert rec["quality_band"] == qc.QualityBand.GOOD
     assert qc.ISSUE_HANDWRITTEN in rec["top_issues"]
+
+
+def test_vision_fair_legibility_caps_band_at_fair():
+    # Genuine readability degradation caps a GOOD-scoring document at FAIR.
+    pages = [_page(page_num=1)]
+    texts = {1: _text(1)}
+    rec = qc.build_quality_record(
+        "band/p1/eb_horn.pdf", pages, texts,
+        _vision_meta(vision_notation_source="printed_original", vision_legibility="fair"),
+        _thr(), "run1",
+    )
+    assert rec["vision_applied"] is True
+    assert rec["quality_band"] == qc.QualityBand.FAIR
 
 
 def test_vision_poor_legibility_caps_band_at_poor():

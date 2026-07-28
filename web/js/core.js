@@ -133,7 +133,7 @@
 
   // --- badges (color is always paired with a text label) -------------------
   var SEVERITY_CLASS = { high: "high", review: "review", ok: "ok" };
-  var QUALITY_CLASS = { good: "good", review: "review", poor: "poor", unknown: "unknown" };
+  var QUALITY_CLASS = { good: "good", fair: "fair", poor: "poor", unknown: "unknown" };
 
   MLG.badge = function (text, variant) {
     return el("span", { class: "badge badge--" + (variant || "muted"), text: fmt.text(text) });

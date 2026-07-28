@@ -80,7 +80,7 @@
   MLG.qualityChips = function (q) {
     return el("div", { class: "row" }, [
       MLG.badge((q.good || 0) + " good", "good"),
-      MLG.badge((q.review || 0) + " review", "review"),
+      MLG.badge((q.fair || 0) + " fair", "fair"),
       MLG.badge((q.poor || 0) + " poor", "poor"),
     ]);
   };

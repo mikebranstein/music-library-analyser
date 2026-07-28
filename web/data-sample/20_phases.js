@@ -86,13 +86,13 @@ MLG.register("phases", {
     summary: { records: 3, unit: "documents", note: "Scan quality scored; legibility issues flagged.", timestamp: "2025-01-01T12:00:00Z" },
     stats: [
       { label: "Good", value: 2 },
-      { label: "Review", value: 1 },
+      { label: "Fair", value: 1 },
       { label: "Poor", value: 0 },
     ],
     charts: [
       { title: "Quality bands", rows: [
         { label: "Good", value: 2, variant: "success" },
-        { label: "Review", value: 1, variant: "warning" },
+        { label: "Fair", value: 1, variant: "warning" },
         { label: "Poor", value: 0, variant: "error" },
       ] },
     ],

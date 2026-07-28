@@ -76,8 +76,6 @@ class ReasonCode:
     MISSING_SCORE = "missing_score"
     MISSING_REQUIRED_PARTS = "missing_required_parts"
     UNEXPECTED_PARTS = "unexpected_parts"
-    LOW_QUALITY_SCANS = "low_quality_scans"
-    HANDWRITTEN_OR_ILLEGIBLE = "handwritten_or_illegible"
     LOW_CONFIDENCE_PARTS = "low_confidence_parts"
     DUPLICATE_PARTS = "duplicate_parts"
     INSTRUMENTATION_UNRESOLVED = "instrumentation_unresolved"
@@ -87,8 +85,6 @@ class ReasonCode:
 REASON_CODE_ORDER: tuple[str, ...] = (
     ReasonCode.MISSING_SCORE,
     ReasonCode.MISSING_REQUIRED_PARTS,
-    ReasonCode.LOW_QUALITY_SCANS,
-    ReasonCode.HANDWRITTEN_OR_ILLEGIBLE,
     ReasonCode.UNEXPECTED_PARTS,
     ReasonCode.LOW_CONFIDENCE_PARTS,
     ReasonCode.DUPLICATE_PARTS,
@@ -100,10 +96,6 @@ REASON_ACTIONS: dict[str, str] = {
     ReasonCode.MISSING_SCORE: "Locate and add a full/conductor score for this piece.",
     ReasonCode.MISSING_REQUIRED_PARTS: "Source the missing required part(s) listed above.",
     ReasonCode.UNEXPECTED_PARTS: "Confirm the extra observed part(s) belong to this edition.",
-    ReasonCode.LOW_QUALITY_SCANS: "Re-scan the low-quality document(s) at higher fidelity.",
-    ReasonCode.HANDWRITTEN_OR_ILLEGIBLE: (
-        "Verify the handwritten/low-legibility document(s) are usable; re-engrave if needed."
-    ),
     ReasonCode.LOW_CONFIDENCE_PARTS: (
         "Manually confirm the low-confidence / unmatched part label(s)."
     ),

@@ -86,14 +86,14 @@ class QualityBand:
     """Values of the ``quality_band`` field."""
 
     GOOD = "good"
-    REVIEW = "review"
+    FAIR = "fair"
     POOR = "poor"
     UNKNOWN = "unknown"  # document had no scoreable pages
 
 
 QUALITY_BAND_ORDER: tuple[str, ...] = (
     QualityBand.GOOD,
-    QualityBand.REVIEW,
+    QualityBand.FAIR,
     QualityBand.POOR,
     QualityBand.UNKNOWN,
 )
@@ -145,7 +145,7 @@ DEFAULT_THRESHOLDS: dict[str, Any] = {
         },
         "bands": {
             "good_min_score": 80,
-            "review_min_score": 50,
+            "fair_min_score": 50,
         },
     },
     "notation_source": {
@@ -157,15 +157,15 @@ DEFAULT_THRESHOLDS: dict[str, Any] = {
         "min_confidence": 0.30,
     },
     # Adjudication of the optional Script 02 vision signal (vision_* fields on documents.jsonl).
-    # A confident vision verdict overrides the deterministic notation source and caps the quality
-    # band, because deterministic metrics cannot tell handwritten manuscript from a readable
-    # printed photocopy. Set enabled=false to ignore vision fields even when present.
+    # A confident vision verdict overrides the deterministic notation source and (for legibility
+    # only) caps the quality band, because deterministic metrics cannot tell a faint/hard-to-read
+    # scan from a clean one. Handwriting is recorded as a notation flag but never downgrades the
+    # band. Set enabled=false to ignore vision fields even when present.
     "vision": {
         "enabled": True,
         "min_confidence": 0.50,
         "override_notation_source": True,
-        "handwritten_caps_band_at": "review",
-        "fair_legibility_caps_band_at": "review",
+        "fair_legibility_caps_band_at": "fair",
         "poor_legibility_caps_band_at": "poor",
     },
 }
@@ -352,8 +352,8 @@ def evaluate_page(
 def band_for(score: float, bands: dict[str, Any]) -> str:
     if score >= bands["good_min_score"]:
         return QualityBand.GOOD
-    if score >= bands["review_min_score"]:
-        return QualityBand.REVIEW
+    if score >= bands["fair_min_score"]:
+        return QualityBand.FAIR
     return QualityBand.POOR
 
 
@@ -506,11 +506,11 @@ def _worst_page(page_findings: list[dict[str, Any]]) -> int | None:
 
 # --- Vision adjudication ---------------------------------------------------------------------
 
-_BAND_RANK = {QualityBand.GOOD: 3, QualityBand.REVIEW: 2, QualityBand.POOR: 1}
+_BAND_RANK = {QualityBand.GOOD: 3, QualityBand.FAIR: 2, QualityBand.POOR: 1}
 
 
 def _cap_band(current: str, cap: str) -> str:
-    """Return the worse of ``current`` and ``cap`` (GOOD > REVIEW > POOR); UNKNOWN is untouched."""
+    """Return the worse of ``current`` and ``cap`` (GOOD > FAIR > POOR); UNKNOWN is untouched."""
     if current not in _BAND_RANK or cap not in _BAND_RANK:
         return current
     return current if _BAND_RANK[current] <= _BAND_RANK[cap] else cap
@@ -523,9 +523,11 @@ def adjudicate_with_vision(
 
     Deterministic OCR/image metrics cannot separate handwritten manuscript from a readable printed
     photocopy, so a confident vision verdict (vision_status == "success") takes precedence: it
-    replaces ``notation_source_type`` and prevents a handwritten / low-legibility document from
-    scoring as ``good``. Vision fields are echoed onto the record for transparency; when the
-    verdict is missing, disabled, or below ``min_confidence`` the deterministic result is kept.
+    replaces ``notation_source_type`` and, for *legibility* only, caps the quality band (a
+    genuinely faint/hard-to-read scan cannot score ``good``). Handwriting is recorded as a notation
+    flag/issue but never downgrades the band -- neat manuscript is fully usable. Vision fields are
+    echoed onto the record for transparency; when the verdict is missing, disabled, or below
+    ``min_confidence`` the deterministic result is kept.
     """
     vcfg = thresholds.get("vision", {}) or {}
     meta = doc_meta or {}
@@ -565,11 +567,12 @@ def adjudicate_with_vision(
         return
 
     new_issues: list[str] = []
+    # Handwriting is a notation flag only: record the issue for visibility but do NOT cap the band
+    # (a neat hand-copied part is fully readable/usable).
     if source == NotationSource.HANDWRITTEN:
-        record["quality_band"] = _cap_band(
-            record["quality_band"], vcfg.get("handwritten_caps_band_at", QualityBand.REVIEW)
-        )
         new_issues.append(ISSUE_HANDWRITTEN)
+    # Legibility is the only signal that caps the band, because it reflects whether a human can
+    # actually read the page regardless of how the notation was produced.
     if legibility == "poor":
         record["quality_band"] = _cap_band(
             record["quality_band"], vcfg.get("poor_legibility_caps_band_at", QualityBand.POOR)
@@ -577,7 +580,7 @@ def adjudicate_with_vision(
         new_issues.append(ISSUE_LOW_LEGIBILITY)
     elif legibility == "fair":
         record["quality_band"] = _cap_band(
-            record["quality_band"], vcfg.get("fair_legibility_caps_band_at", QualityBand.REVIEW)
+            record["quality_band"], vcfg.get("fair_legibility_caps_band_at", QualityBand.FAIR)
         )
 
     if new_issues:
@@ -589,7 +592,6 @@ def adjudicate_with_vision(
                 top.append(code)
         record["issue_summary"] = summary
         record["top_issues"] = top
-    record["needs_review"] = record["quality_band"] != QualityBand.GOOD
 
 
 def build_quality_record(
@@ -638,7 +640,6 @@ def build_quality_record(
     if analyzed == 0:
         record["quality_score"] = None
         record["quality_band"] = QualityBand.UNKNOWN
-        record["needs_review"] = True
         record["page_issue_count"] = 0
         record["issue_summary"] = {}
         record["top_issues"] = []
@@ -654,7 +655,6 @@ def build_quality_record(
     )
     record["quality_score"] = score
     record["quality_band"] = band
-    record["needs_review"] = band != QualityBand.GOOD
     record["page_issue_count"] = page_issue_count
     record["issue_summary"] = summary
     record["top_issues"] = top_issues
@@ -860,7 +860,7 @@ def main(
     use_vision: bool = typer.Option(
         True, "--use-vision/--no-vision",
         help="Honor the Script 02 vision signal (vision_* fields on documents.jsonl): override "
-        "notation source and cap the band for handwritten/low-legibility scans",
+        "notation source and cap the band for low-legibility scans (handwriting is flagged only)",
     ),
     concurrency: int = typer.Option(
         1, "--concurrency", "-j", help="Documents to evaluate in parallel (CPU-light; 1 is fine)"
@@ -886,7 +886,7 @@ def main(
     if use_vision:
         logger.info(
             "Vision adjudication enabled: confident vision_* verdicts on documents.jsonl will "
-            "override notation source and cap the quality band."
+            "override notation source and cap the quality band for low-legibility scans."
         )
 
     thresholds, thresholds_source = load_thresholds(config_path.resolve())

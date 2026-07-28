@@ -226,33 +226,26 @@ def test_missing_score_flagged():
     assert rec["score_missing"] is True
 
 
-def test_poor_quality_is_high_severity():
+def test_poor_quality_does_not_drive_severity_or_reason_codes():
+    # Scan quality is informational only: a poor scan never flags the piece for review.
     inputs = _inputs(
         expected=_expected(missing_required_parts=[], needs_review=False),
         quality=[_quality("Flute.pdf", quality_band="poor", quality_score=20.0)],
     )
     rec = pr.build_piece_record(inputs, "run1")
-    assert pr.ReasonCode.LOW_QUALITY_SCANS in rec["reason_codes"]
-    assert rec["severity"] == pr.Severity.HIGH
+    assert not any("quality" in str(c).lower() for c in rec["reason_codes"])
+    assert rec["severity"] != pr.Severity.HIGH
 
 
-def test_review_quality_is_review_severity():
-    inputs = _inputs(
-        expected=_expected(missing_required_parts=[], needs_review=False),
-        quality=[_quality("Flute.pdf", quality_band="review")],
-    )
-    rec = pr.build_piece_record(inputs, "run1")
-    assert pr.ReasonCode.LOW_QUALITY_SCANS in rec["reason_codes"]
-    assert rec["severity"] == pr.Severity.REVIEW
-
-
-def test_handwritten_notation_flagged():
+def test_handwritten_notation_not_flagged_as_reason():
+    # Handwriting is a note only; it never becomes a reason code.
     inputs = _inputs(
         expected=_expected(missing_required_parts=[], needs_review=False),
         quality=[_quality("Flute.pdf", notation_source_type="handwritten")],
     )
     rec = pr.build_piece_record(inputs, "run1")
-    assert pr.ReasonCode.HANDWRITTEN_OR_ILLEGIBLE in rec["reason_codes"]
+    assert rec["quality_summary"]["handwritten_doc_count"] == 1
+    assert not any("handwritten" in str(c).lower() for c in rec["reason_codes"])
 
 
 def test_unexpected_and_duplicate_and_lowconf_flagged():
@@ -330,14 +323,14 @@ def test_quality_summary_band_distribution_and_counts():
         ],
         quality=[
             _quality("A.pdf", quality_band="good"),
-            _quality("B.pdf", quality_band="review"),
+            _quality("B.pdf", quality_band="fair"),
             _quality("C.pdf", quality_band="poor", notation_source_type="handwritten"),
         ],
     )
     rec = pr.build_piece_record(inputs, "run1")
     qs = rec["quality_summary"]
-    assert qs["band_counts"] == {"good": 1, "review": 1, "poor": 1, "unknown": 0}
-    assert qs["low_quality_doc_count"] == 2  # review + poor
+    assert qs["band_counts"] == {"good": 1, "fair": 1, "poor": 1, "unknown": 0}
+    assert qs["low_quality_doc_count"] == 2  # fair + poor
     assert qs["handwritten_doc_count"] == 1
 
 
@@ -351,15 +344,13 @@ def test_action_items_name_offending_documents_and_parts():
             _prediction("Horn.pdf", "Horn", part_sort_key="2", duplicate_in_piece=True),
         ],
         quality=[
-            _quality("Oboe.pdf", quality_band="review", notation_source_type="handwritten"),
+            _quality("Oboe.pdf", quality_band="fair", notation_source_type="handwritten"),
             _quality("Horn.pdf", quality_band="good"),
         ],
     )
     rec = pr.build_piece_record(inputs, "run1")
     items = {i["reason_code"]: i["targets"] for i in rec["action_items"]}
     assert items[pr.ReasonCode.MISSING_REQUIRED_PARTS] == ["Euphonium", "Percussion"]
-    assert items[pr.ReasonCode.LOW_QUALITY_SCANS] == ["Oboe.pdf"]
-    assert items[pr.ReasonCode.HANDWRITTEN_OR_ILLEGIBLE] == ["Oboe.pdf"]
     assert items[pr.ReasonCode.UNEXPECTED_PARTS] == ["Kazoo"]
     assert items[pr.ReasonCode.LOW_CONFIDENCE_PARTS] == ["Oboe.pdf"]
     assert items[pr.ReasonCode.DUPLICATE_PARTS] == ["Horn.pdf"]

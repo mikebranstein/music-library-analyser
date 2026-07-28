@@ -110,7 +110,7 @@ def _count_by(records: list[dict[str, Any]], field: str, order: tuple[str, ...])
 
 def _sum_band_counts(records: list[dict[str, Any]]) -> dict[str, int]:
     """Sum the per-piece document-level quality band counts across the whole collection."""
-    totals = {"good": 0, "review": 0, "poor": 0, "unknown": 0}
+    totals = {"good": 0, "fair": 0, "poor": 0, "unknown": 0}
     for rec in records:
         band_counts = (rec.get("quality_summary") or {}).get("band_counts") or {}
         for band, count in band_counts.items():

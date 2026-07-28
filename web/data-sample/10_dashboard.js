@@ -7,7 +7,7 @@ MLG.register("dashboard", {
   ],
   completeness: { score: 78, tier: "partial", label: "Collection completeness" },
   severity: { high: 1, review: 0, ok: 1 },
-  quality: { good: 2, review: 1, poor: 0, unknown: 0 },
+  quality: { good: 2, fair: 1, poor: 0, unknown: 0 },
   attention: [
     {
       piece_id: "p001",
@@ -15,7 +15,7 @@ MLG.register("dashboard", {
       catalog_number: "001",
       severity: "high",
       completeness_score: 62,
-      reason: "2 required parts missing; 1 low-quality scan",
+      reason: "2 required parts missing",
     },
   ],
   phase_flow: [

@@ -197,7 +197,6 @@ def test_build_dashboard_reason_and_completeness():
     assert dash["severity"] == {"high": 0, "review": 1, "ok": 0}
     att = dash["attention"][0]
     assert "1 required part missing" in att["reason"]
-    assert "1 low-quality scan" in att["reason"]
     assert att["completeness_score"] == 50.0
 
 

@@ -108,14 +108,12 @@ def test_priority_breakdown_and_score():
         "severity_base": 20,
         "missing_score": 40,
         "missing_required_parts": 20,
-        "low_quality_docs": 6,
-        "handwritten_docs": 4,
         "low_confidence_parts": 5,
         "unmatched_parts": 5,
         "duplicate_parts": 2,
         "unexpected_parts": 3,
     }
-    assert sum(breakdown.values()) == 105
+    assert sum(breakdown.values()) == 95
 
 
 def test_needs_review_count_not_double_counted():

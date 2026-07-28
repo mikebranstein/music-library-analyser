@@ -54,7 +54,7 @@ def _piece(piece_id: str = "p1", **overrides: Any) -> dict:
         "reason_codes": [],
         "expected_parts": [],
         "quality_summary": {
-            "band_counts": {"good": 3, "review": 0, "poor": 0, "unknown": 0},
+            "band_counts": {"good": 3, "fair": 0, "poor": 0, "unknown": 0},
             "low_quality_doc_count": 0,
             "handwritten_doc_count": 0,
         },
@@ -106,7 +106,7 @@ def test_totals_count_expected_flags(tmp_path: Path) -> None:
             score_missing=True,
             document_count=4,
             quality_summary={
-                "band_counts": {"good": 1, "review": 1, "poor": 2, "unknown": 0},
+                "band_counts": {"good": 1, "fair": 1, "poor": 2, "unknown": 0},
                 "low_quality_doc_count": 2,
                 "handwritten_doc_count": 1,
             },
@@ -155,7 +155,7 @@ def test_quality_band_distribution_sums_documents(tmp_path: Path) -> None:
         _piece(
             "p1",
             quality_summary={
-                "band_counts": {"good": 2, "review": 1, "poor": 0, "unknown": 0},
+                "band_counts": {"good": 2, "fair": 1, "poor": 0, "unknown": 0},
                 "low_quality_doc_count": 1,
                 "handwritten_doc_count": 0,
             },
@@ -163,7 +163,7 @@ def test_quality_band_distribution_sums_documents(tmp_path: Path) -> None:
         _piece(
             "p2",
             quality_summary={
-                "band_counts": {"good": 1, "review": 0, "poor": 3, "unknown": 1},
+                "band_counts": {"good": 1, "fair": 0, "poor": 3, "unknown": 1},
                 "low_quality_doc_count": 3,
                 "handwritten_doc_count": 0,
             },
@@ -172,7 +172,7 @@ def test_quality_band_distribution_sums_documents(tmp_path: Path) -> None:
     summary = cr.build_summary(records, "run1", "src")
     assert summary["quality_band_distribution"] == {
         "good": 3,
-        "review": 1,
+        "fair": 1,
         "poor": 3,
         "unknown": 1,
     }
@@ -191,7 +191,6 @@ def test_reason_code_frequency_counts_pieces_not_occurrences(tmp_path: Path) -> 
     freq = summary["reason_code_frequency"]
     assert freq["missing_score"] == 2
     assert freq["missing_required_parts"] == 1
-    assert freq["low_quality_scans"] == 0
     # All codes from the shared order are present.
     for code in cr.REASON_CODE_ORDER:
         assert code in freq

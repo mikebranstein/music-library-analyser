@@ -96,7 +96,7 @@
   --state-ok: var(--success);
 
   --quality-good: var(--success);
-  --quality-review: var(--warning);
+  --quality-fair: var(--warning);
   --quality-poor: var(--error);
   --quality-unknown: var(--text-muted);
 }

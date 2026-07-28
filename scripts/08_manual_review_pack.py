@@ -54,8 +54,6 @@ CHECKPOINT_FILENAME = ".piece_report_checkpoint.json"
 WEIGHTS: dict[str, int] = {
     "missing_score": 40,  # a missing conductor score blocks performance
     "missing_required_part": 10,  # per missing required part
-    "low_quality_doc": 6,  # per low-quality document (re-scan effort/risk)
-    "handwritten_doc": 4,  # per handwritten/uncertain document
     "low_confidence_part": 5,  # per low-confidence part label
     "unmatched_part": 5,  # per unmatched part
     "duplicate_part": 2,  # per duplicated part to reconcile
@@ -113,14 +111,14 @@ def load_piece_records(piece_reports_dir: Path) -> LoadResult:
 
 
 def _priority_breakdown(rec: dict[str, Any]) -> dict[str, int]:
-    """Per-component point contributions for one piece (self-describing; zeros included)."""
-    quality = rec.get("quality_summary") or {}
+    """Per-component point contributions for one piece (self-describing; zeros included).
+
+    Scan quality and handwriting are informational only and deliberately excluded from priority.
+    """
     review = rec.get("review_counts") or {}
     severity = rec.get("severity")
 
     missing_required = int(rec.get("missing_required_count") or 0)
-    low_quality = int(quality.get("low_quality_doc_count") or 0)
-    handwritten = int(quality.get("handwritten_doc_count") or 0)
     low_confidence = int(review.get("low_confidence_count") or 0)
     unmatched = int(review.get("unmatched_count") or 0)
     duplicate = int(review.get("duplicate_count") or 0)
@@ -130,8 +128,6 @@ def _priority_breakdown(rec: dict[str, Any]) -> dict[str, int]:
         "severity_base": SEVERITY_BASE.get(severity, 0),
         "missing_score": WEIGHTS["missing_score"] if rec.get("score_missing") else 0,
         "missing_required_parts": missing_required * WEIGHTS["missing_required_part"],
-        "low_quality_docs": low_quality * WEIGHTS["low_quality_doc"],
-        "handwritten_docs": handwritten * WEIGHTS["handwritten_doc"],
         "low_confidence_parts": low_confidence * WEIGHTS["low_confidence_part"],
         "unmatched_parts": unmatched * WEIGHTS["unmatched_part"],
         "duplicate_parts": duplicate * WEIGHTS["duplicate_part"],

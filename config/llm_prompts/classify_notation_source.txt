@@ -19,11 +19,20 @@ Judge two things from the image(s):
    - "mixed_or_uncertain": genuinely cannot tell, or the page mixes printed and handwritten music.
 
 2) legibility -- can a human musician actually read and play from this page?
-   - "good": clean and easy to read.
-   - "fair": readable by an experienced player but degraded (faint copy, cramped, some ambiguity).
-   - "poor": hard to read; heavy bleed-through, cut-off, very faint, or ambiguous throughout.
+   - "good": the notes, rhythms, and markings can be read without effort. Judge legibility ONLY by
+     whether the musical content is readable -- NOT by cosmetic condition. A clean, professionally
+     engraved print is "good" even if it has a rubber stamp/ownership mark, a fold or scan line,
+     minor speckling, or slightly tight (but clearly readable) divisi/chord passages. Neat
+     handwriting that reads clearly is also "good".
+   - "fair": genuinely degraded so that reading takes real effort in places -- faint/washed-out
+     ink, cramped writing with ambiguous pitches or rhythms, or crowding that forces you to guess.
+     Reserve this for real readability problems, not mere cosmetic blemishes on an otherwise clear
+     page.
+   - "poor": hard to read throughout: heavy bleed-through, significant cut-off content, very faint,
+     or ambiguous across most of the page.
 
-Do not penalize legibility for mere page skew or rotation if the content is otherwise readable.
+Do not penalize legibility for mere page skew or rotation, stamps, fold marks, or cosmetic
+blemishes if the musical content is otherwise readable.
 
 Respond with exactly one JSON object between the sentinel lines and nothing else:
 <<<VISION_JSON>>>

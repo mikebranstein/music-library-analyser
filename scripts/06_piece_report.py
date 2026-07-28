@@ -59,11 +59,13 @@ logger = logging.getLogger("script06.piece_report")
 # ReasonCode / REASON_CODE_ORDER / REASON_ACTIONS / Severity are shared vocabulary and now live in
 # scripts._common (imported above) so Scripts 06/07/08 group and filter by one definition.
 
-# Quality bands considered actionable, matching Script 05's vocabulary.
+# Quality bands, matching Script 05's vocabulary. Quality is reported for information only and
+# never drives review/severity/actions, so these are used solely to describe scans in the report.
 _QUALITY_POOR = "poor"
-_QUALITY_REVIEW = "review"
+_QUALITY_FAIR = "fair"
 
-# Notation sources that warrant a legibility check, matching Script 05's vocabulary.
+# Notation sources that indicate handwriting, matching Script 05's vocabulary. Recorded as an
+# informational flag only (handwriting never triggers review).
 _NOTATION_HANDWRITTEN = "handwritten"
 _NOTATION_MIXED = "mixed_or_uncertain"
 
@@ -167,7 +169,6 @@ def _document_rows(inputs: PieceInputs) -> list[dict[str, Any]]:
                 "quality_score": qual.get("quality_score"),
                 "notation_source_type": qual.get("notation_source_type"),
                 "quality_top_issues": qual.get("top_issues") or [],
-                "quality_needs_review": bool(qual.get("needs_review")),
                 "thumbnail_path": inputs.thumbnails.get(pdf_path or ""),
                 "part_sort_key": pred.get("part_sort_key") or "",
             }
@@ -198,18 +199,8 @@ def _derive_findings(inputs: PieceInputs, doc_rows: list[dict[str, Any]]) -> dic
     if missing_required:
         reason_codes.append(ReasonCode.MISSING_REQUIRED_PARTS)
 
-    # Quality: any poor/review-band document, and any handwritten / low-legibility notation.
-    poor_docs = [r for r in doc_rows if r.get("quality_band") == _QUALITY_POOR]
-    review_docs = [r for r in doc_rows if r.get("quality_band") == _QUALITY_REVIEW]
-    if poor_docs or review_docs:
-        reason_codes.append(ReasonCode.LOW_QUALITY_SCANS)
-    handwritten_docs = [
-        r
-        for r in doc_rows
-        if r.get("notation_source_type") in (_NOTATION_HANDWRITTEN, _NOTATION_MIXED)
-    ]
-    if handwritten_docs:
-        reason_codes.append(ReasonCode.HANDWRITTEN_OR_ILLEGIBLE)
+    # Quality and notation source (handwritten) are reported for information only and never add a
+    # reason code, drive severity, or flag a piece for review.
 
     if expected.get("unexpected_parts"):
         reason_codes.append(ReasonCode.UNEXPECTED_PARTS)
@@ -230,8 +221,8 @@ def _derive_findings(inputs: PieceInputs, doc_rows: list[dict[str, Any]]) -> dic
     # Canonical ordering + de-dupe.
     ordered = [c for c in REASON_CODE_ORDER if c in reason_codes]
 
-    # Severity: high when a required part or the score is missing, or any scan is poor.
-    high = bool(missing_required) or score_missing or bool(poor_docs)
+    # Severity: high when a required part or the score is missing (quality never escalates).
+    high = bool(missing_required) or score_missing
     severity = Severity.HIGH if high else (Severity.REVIEW if ordered else Severity.OK)
 
     needs_review = (
@@ -250,7 +241,7 @@ def _derive_findings(inputs: PieceInputs, doc_rows: list[dict[str, Any]]) -> dic
     }
 
 
-_BAND_SEVERITY = {"unknown": 0, "good": 1, "review": 2, "poor": 3}
+_BAND_SEVERITY = {"unknown": 0, "good": 1, "fair": 2, "poor": 3}
 
 
 def _worst_band(bands: list[str]) -> str | None:
@@ -267,7 +258,7 @@ def _quality_summary(doc_rows: list[dict[str, Any]]) -> dict[str, Any]:
     distribution and Script 08 a magnitude to weight its quality penalty, without recomputing
     anything about the music.
     """
-    band_counts = {"good": 0, "review": 0, "poor": 0, "unknown": 0}
+    band_counts = {"good": 0, "fair": 0, "poor": 0, "unknown": 0}
     for row in doc_rows:
         band = row.get("quality_band")
         band_counts[band if band in band_counts else "unknown"] += 1
@@ -278,7 +269,7 @@ def _quality_summary(doc_rows: list[dict[str, Any]]) -> dict[str, Any]:
     )
     return {
         "band_counts": band_counts,
-        "low_quality_doc_count": band_counts["poor"] + band_counts["review"],
+        "low_quality_doc_count": band_counts["poor"] + band_counts["fair"],
         "handwritten_doc_count": handwritten,
     }
 
@@ -300,16 +291,6 @@ def _build_action_items(
     targets_by_code: dict[str, list[str]] = {
         ReasonCode.MISSING_SCORE: [],
         ReasonCode.MISSING_REQUIRED_PARTS: list(expected.get("missing_required_parts") or []),
-        ReasonCode.LOW_QUALITY_SCANS: _doc_names(
-            [r for r in doc_rows if r.get("quality_band") in (_QUALITY_POOR, _QUALITY_REVIEW)]
-        ),
-        ReasonCode.HANDWRITTEN_OR_ILLEGIBLE: _doc_names(
-            [
-                r
-                for r in doc_rows
-                if r.get("notation_source_type") in (_NOTATION_HANDWRITTEN, _NOTATION_MIXED)
-            ]
-        ),
         ReasonCode.UNEXPECTED_PARTS: [
             _unexpected_label(u) for u in (expected.get("unexpected_parts") or [])
         ],
@@ -485,7 +466,7 @@ def render_piece_report(rec: dict[str, Any]) -> str:
             qscore = d.get("quality_score")
             if isinstance(qscore, (int, float)):
                 qual = f"{qual} ({qscore:.0f})"
-            review = "yes" if (d.get("needs_review") or d.get("quality_needs_review")) else "-"
+            review = "yes" if d.get("needs_review") else "-"
             name = d.get("pdf_filename") or d.get("pdf_path")
             thumb = d.get("thumbnail_path")
             name_cell = f"[{md_cell(name)}]({thumb})" if thumb else md_cell(name)
@@ -567,7 +548,7 @@ def render_piece_report(rec: dict[str, Any]) -> str:
     bands_count = qs.get("band_counts") or {}
     out.append(
         f"- **Band distribution:** good {bands_count.get('good', 0)}, "
-        f"review {bands_count.get('review', 0)}, poor {bands_count.get('poor', 0)}, "
+        f"fair {bands_count.get('fair', 0)}, poor {bands_count.get('poor', 0)}, "
         f"unknown {bands_count.get('unknown', 0)}"
     )
     if qs.get("handwritten_doc_count"):
@@ -575,7 +556,7 @@ def render_piece_report(rec: dict[str, Any]) -> str:
     flagged = [
         d
         for d in docs
-        if d.get("quality_band") in (_QUALITY_POOR, _QUALITY_REVIEW) or d.get("quality_top_issues")
+        if d.get("quality_band") in (_QUALITY_POOR, _QUALITY_FAIR) or d.get("quality_top_issues")
     ]
     if flagged:
         out.append("")
