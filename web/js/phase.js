@@ -60,7 +60,9 @@
   };
 
   function renderTable(app, spec) {
-    var rows = MLG.get(spec.source, []).slice();
+    // Rows come either from a registered dataset (`source`) or inline in the spec (`rows`),
+    // the latter for aggregates that aren't a standalone entity (e.g. missing-section rollups).
+    var rows = (spec.rows || MLG.get(spec.source, [])).slice();
     if (spec.filter && spec.filter.field && spec.filter.in) {
       rows = rows.filter(function (r) { return spec.filter.in.indexOf(r[spec.filter.field]) >= 0; });
     }

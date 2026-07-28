@@ -548,7 +548,7 @@ def build_phases(
     missing_required_total = sum(int(p.get("missing_required_count") or 0) for p in pieces)
 
     top_missing_rows = [
-        {"label": _titlecase(s.get("section")), "value": s.get("missing_piece_count") or 0}
+        {"section": _titlecase(s.get("section")), "missing_piece_count": s.get("missing_piece_count") or 0}
         for s in (summary.get("top_missing_sections") or [])
     ]
 
@@ -685,7 +685,16 @@ def build_phases(
                 {"label": "Mean completeness", "value": _score_pct(score_summary.get("mean")) or 0, "display": f"{_score_pct(score_summary.get('mean')) or 0:.0f}%"},
                 {"label": "Pieces at risk", "value": (severity.get("high") or 0) + (severity.get("review") or 0)},
             ],
-            "charts": [{"title": "Top missing sections", "rows": top_missing_rows}],
+            "table": {
+                "caption": "Top missing sections",
+                "sortKey": "missing_piece_count",
+                "dir": "desc",
+                "columns": [
+                    {"key": "section", "label": "Section"},
+                    {"key": "missing_piece_count", "label": "Pieces missing", "num": True, "bar": True, "variant": "warning"},
+                ],
+                "rows": top_missing_rows,
+            },
         },
         "8": {
             "summary": _phase_summary(len(queue), "pieces flagged", "Prioritized manual-review queue.", t_review),
