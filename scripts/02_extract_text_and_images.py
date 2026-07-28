@@ -998,7 +998,7 @@ _VISION_PROMPT_PATH = (
 )
 VISION_RESULT_START = "<<<VISION_JSON>>>"
 VISION_RESULT_END = "<<<END_VISION_JSON>>>"
-VISION_PROMPT_VERSION = "2"  # bump to invalidate cached vision results when the prompt changes
+VISION_PROMPT_VERSION = "3"  # bump to invalidate cached vision results when the prompt changes
 VISION_NOTATION_VALUES = {"printed_original", "handwritten", "mixed_or_uncertain"}
 VISION_LEGIBILITY_VALUES = {"good", "fair", "poor"}
 
@@ -1011,14 +1011,29 @@ DEFAULT_VISION_PROMPT = (
     "- Source folder: {piece_folder}\n\n"
     "Image file path(s) to open and inspect (absolute paths on this machine):\n"
     "{image_paths}\n\n"
-    "Judge two things from the image(s):\n"
+    "Judge the following from the image(s):\n"
     "1) notation_source: printed_original, handwritten, or mixed_or_uncertain (hand-copied\n"
     "   manuscript counts as handwritten even when the staff lines are pre-printed).\n"
     "2) legibility: good, fair, or poor -- can a human musician actually read and play this page?\n"
-    "Do not penalize legibility for mere page skew or rotation if the content is readable.\n\n"
+    "   Do not penalize legibility for mere page skew or rotation if the content is readable.\n"
+    "3) instruments: read the PRINTED PART LABEL (usually top-centre or upper-left of the first\n"
+    "   music page) and report which instrument(s) this part is written for. Use ONLY tokens from\n"
+    "   the allowed list below, choosing the closest match. A single physical part may cover more\n"
+    "   than one instrument (e.g. a doubling like Flute + Piccolo, or a percussion book). Return an\n"
+    "   empty list if you genuinely cannot read any instrument name.\n"
+    "4) part_numbers: if the printed label names specific numbered chairs (e.g. '1st & 2nd\n"
+    "   Flutes', 'Oboe 1 & 2', 'Clarinet 1-2-3'), return those chair numbers as integers in order\n"
+    "   ([1, 2]). If the label carries no chair number, or names only a single unnumbered part,\n"
+    "   return an empty list.\n"
+    "5) part_label: the printed part label transcribed verbatim (e.g. '1st & 2nd Flutes'), or an\n"
+    "   empty string if none is visible.\n"
+    "Report only what the printed label actually shows -- never guess numbers from the file name.\n\n"
+    "Allowed instrument tokens (choose ONLY from this list):\n"
+    "{allowed_instruments}\n\n"
     "Respond with exactly one JSON object between the sentinel lines and nothing else:\n"
     f"{VISION_RESULT_START}\n"
-    '{{"notation_source": "printed_original", "legibility": "good", "confidence": 0.0, "notes": ""}}\n'
+    '{{"notation_source": "printed_original", "legibility": "good", "instruments": ["flute"], '
+    '"part_numbers": [1, 2], "part_label": "1st & 2nd Flutes", "confidence": 0.0, "notes": ""}}\n'
     f"{VISION_RESULT_END}\n"
 )
 
@@ -1051,13 +1066,16 @@ def _vision_template() -> str:
     return _VISION_TEMPLATE
 
 
-def build_vision_prompt(template: str, item: InventoryItem, image_paths: list[str]) -> str:
+def build_vision_prompt(
+    template: str, item: InventoryItem, image_paths: list[str], allowed: list[str] | None = None
+) -> str:
     """Fill the vision prompt placeholders."""
     result = template
     for key, value in {
         "pdf_filename": item.pdf_filename,
         "piece_folder": item.piece_folder,
         "image_paths": "\n".join(image_paths),
+        "allowed_instruments": ", ".join(allowed or []),
     }.items():
         result = result.replace("{" + key + "}", str(value))
     return result
@@ -1121,6 +1139,9 @@ def _empty_vision_result(status: str) -> dict[str, Any]:
         "vision_status": status,
         "vision_notation_source": None,
         "vision_legibility": None,
+        "vision_instruments": [],
+        "vision_part_numbers": [],
+        "vision_part_label": "",
         "vision_confidence": None,
         "vision_notes": "",
     }
@@ -1165,7 +1186,9 @@ def classify_notation_vision(
     image_paths = [
         str((workspace_root / str(p.get("thumbnail_path"))).resolve()) for p in selected
     ]
-    prompt = build_vision_prompt(_vision_template(), item, image_paths)
+    prompt = build_vision_prompt(
+        _vision_template(), item, image_paths, _ocr_llm_allowed_instruments()
+    )
     logger.info("Vision: classifying notation source for %s", item.pdf_path)
     try:
         parsed = llm_fn(prompt, cfg)
@@ -1181,6 +1204,13 @@ def classify_notation_vision(
         result["vision_legibility"] = (
             legibility if legibility in VISION_LEGIBILITY_VALUES else None
         )
+        result["vision_instruments"] = _canonicalize_vision_instruments(
+            parsed.get("instruments")
+        )
+        result["vision_part_numbers"] = _coerce_vision_part_numbers(
+            parsed.get("part_numbers")
+        )
+        result["vision_part_label"] = str(parsed.get("part_label") or "").strip()
         result["vision_confidence"] = parsed.get("confidence")
         result["vision_notes"] = str(parsed.get("notes") or "")
     logger.info(
@@ -1197,11 +1227,43 @@ def classify_notation_vision(
     return result
 
 
+def _canonicalize_vision_instruments(raw: Any) -> list[str]:
+    """Map the vision-reported instrument names to allowed canonical tokens (drops unknowns)."""
+    if not isinstance(raw, list):
+        return []
+    allowed_set = set(_ocr_llm_allowed_instruments())
+    alias_to_canonical = _ocr_llm_taxonomy().get("alias_to_canonical", {})
+    out: list[str] = []
+    for name in raw:
+        canon = canonicalize_instrument(str(name), alias_to_canonical)
+        if canon in allowed_set and canon not in out:
+            out.append(canon)
+    return out
+
+
+def _coerce_vision_part_numbers(raw: Any) -> list[int]:
+    """Ordered, de-duplicated chair numbers (1..20) from the vision response; drops junk."""
+    if not isinstance(raw, list):
+        return []
+    out: list[int] = []
+    for value in raw:
+        try:
+            chair = int(value)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= chair <= 20 and chair not in out:
+            out.append(chair)
+    return out
+
+
 def apply_vision_fields(doc_record: dict[str, Any], vision: dict[str, Any]) -> None:
     """Patch the vision_* fields of a document record from a vision result."""
     doc_record["vision_status"] = vision.get("vision_status", "not_applied")
     doc_record["vision_notation_source"] = vision.get("vision_notation_source")
     doc_record["vision_legibility"] = vision.get("vision_legibility")
+    doc_record["vision_instruments"] = vision.get("vision_instruments", [])
+    doc_record["vision_part_numbers"] = vision.get("vision_part_numbers", [])
+    doc_record["vision_part_label"] = vision.get("vision_part_label", "")
     doc_record["vision_confidence"] = vision.get("vision_confidence")
     doc_record["vision_notes"] = vision.get("vision_notes", "")
 
@@ -1448,6 +1510,9 @@ def build_document_record(
         "vision_status": "not_applied",
         "vision_notation_source": None,
         "vision_legibility": None,
+        "vision_instruments": [],
+        "vision_part_numbers": [],
+        "vision_part_label": "",
         "vision_confidence": None,
         "vision_notes": "",
         "processing_status": status,
@@ -2507,7 +2572,10 @@ def main(
                 if (
                     vision_executor is not None
                     and _doc_is_scanned(reused_doc)
-                    and reused_doc.get("vision_status") != "success"
+                    and (
+                        reused_doc.get("vision_status") != "success"
+                        or "vision_instruments" not in reused_doc
+                    )
                 ):
                     vfut = vision_executor.submit(
                         classify_notation_vision, item,

@@ -246,6 +246,59 @@ def test_classify_unnumbered_single_part_without_combined_label_unchanged():
     assert [(f["canonical"], f["part_index"]) for f in rec["instruments"]] == [
         ("oboe", None)
     ]
+
+
+def test_vision_facets_reads_instruments_and_chairs():
+    lexicon, _ = _lexicon_and_compiled()
+    doc = {
+        "vision_status": "success",
+        "vision_instruments": ["flute"],
+        "vision_part_numbers": [1, 2],
+    }
+    assert classifier.vision_facets(doc, lexicon) == (["flute"], [1, 2])
+    # A non-success vision result contributes nothing.
+    assert classifier.vision_facets({"vision_status": "error: boom"}, lexicon) == ([], [])
+    # Hallucinated instrument tokens are dropped.
+    bad = {"vision_status": "success", "vision_instruments": ["not_real"], "vision_part_numbers": []}
+    assert classifier.vision_facets(bad, lexicon) == ([], [])
+
+
+def test_classify_uses_vision_part_read_for_chairs():
+    # Filename says only the plural "Flutes"; the vision pass read "1st & 2nd Flutes" off the image
+    # even though OCR was unusable. The part must expand into both chairs.
+    inv = {
+        "pdf_path": "P/005 Mancini Medley Flutes.pdf",
+        "pdf_filename": "005 Mancini Medley Flutes.pdf",
+        "piece_folder": "005 Mancini Medley",
+        "piece_id": "abc",
+        "file_fingerprint": "fp1",
+    }
+    doc = {
+        "vision_status": "success",
+        "vision_instruments": ["flute"],
+        "vision_part_numbers": [1, 2],
+        "vision_part_label": "1st & 2nd Flutes",
+    }
+    rec = _classify(inv, doc=doc)
+    canonicals = {(f["canonical"], f["part_index"]) for f in rec["instruments"]}
+    assert canonicals == {("flute", 1), ("flute", 2)}
+    assert "Flute 1" in rec["predicted_part"] and "Flute 2" in rec["predicted_part"]
+
+
+def test_classify_vision_ignored_without_success():
+    # A failed vision result must not alter the filename-based classification.
+    inv = {
+        "pdf_path": "P/005 Mancini Medley Flutes.pdf",
+        "pdf_filename": "005 Mancini Medley Flutes.pdf",
+        "piece_folder": "005 Mancini Medley",
+        "piece_id": "abc",
+        "file_fingerprint": "fp1",
+    }
+    doc = {"vision_status": "error: boom", "vision_instruments": [], "vision_part_numbers": []}
+    rec = _classify(inv, doc=doc)
+    assert [(f["canonical"], f["part_index"]) for f in rec["instruments"]] == [
+        ("flute", None)
+    ]
     lexicon, _ = _lexicon_and_compiled()
     assert classifier.detect_score(classifier.normalize("Full Score"), lexicon) == "full"
     assert classifier.detect_score(classifier.normalize("Conductor"), lexicon) == "conductor"

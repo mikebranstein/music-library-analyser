@@ -9,7 +9,7 @@ Part context:
 Image file path(s) to open and inspect (absolute paths on this machine):
 {image_paths}
 
-Judge two things from the image(s):
+Judge the following from the image(s):
 
 1) notation_source -- how the music was produced:
    - "printed_original": professionally engraved/typeset or a clean printed original; uniform
@@ -34,7 +34,25 @@ Judge two things from the image(s):
 Do not penalize legibility for mere page skew or rotation, stamps, fold marks, or cosmetic
 blemishes if the musical content is otherwise readable.
 
+3) instruments -- read the PRINTED PART LABEL (usually top-centre or upper-left of the first music
+   page) and report which instrument(s) this part is written for. Use ONLY tokens from the allowed
+   list below, choosing the closest match. A single physical part may cover more than one
+   instrument (e.g. a doubling like Flute + Piccolo, or a percussion book that covers several
+   instruments). Return an empty list if you genuinely cannot read any instrument name.
+
+4) part_numbers -- if the printed label names specific numbered chairs (e.g. "1st & 2nd Flutes",
+   "Oboe 1 & 2", "Clarinet 1-2-3"), return those chair numbers as integers in order ([1, 2]). If
+   the label carries no chair number, or names only a single unnumbered part, return an empty list.
+
+5) part_label -- the printed part label transcribed verbatim (e.g. "1st & 2nd Flutes"), or an empty
+   string if none is visible.
+
+Report only what the printed label actually shows -- never guess numbers from the file name.
+
+Allowed instrument tokens (choose ONLY from this list):
+{allowed_instruments}
+
 Respond with exactly one JSON object between the sentinel lines and nothing else:
 <<<VISION_JSON>>>
-{"notation_source": "printed_original", "legibility": "good", "confidence": 0.0, "notes": ""}
+{"notation_source": "printed_original", "legibility": "good", "instruments": ["flute"], "part_numbers": [1, 2], "part_label": "1st & 2nd Flutes", "confidence": 0.0, "notes": ""}
 <<<END_VISION_JSON>>>

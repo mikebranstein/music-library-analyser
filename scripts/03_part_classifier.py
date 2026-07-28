@@ -588,6 +588,39 @@ def llm_instruments(doc_record: dict[str, Any] | None, lexicon: dict[str, Any]) 
     return out
 
 
+def vision_facets(
+    doc_record: dict[str, Any] | None, lexicon: dict[str, Any]
+) -> tuple[list[str], list[int]]:
+    """Canonical instrument(s) and chair numbers the vision pass read from the page image.
+
+    Script 02's vision review inspects the rendered page and transcribes the printed part label --
+    the only reliable signal for scanned parts whose OCR is unusable. Returns ``(canonicals,
+    chairs)`` keeping only lexicon-known instrument tokens (a hallucinated token is dropped); both
+    are empty when vision did not run successfully or read no label.
+    """
+    if not doc_record or doc_record.get("vision_status") != "success":
+        return [], []
+    families = lexicon.get("families", {})
+    canon: list[str] = []
+    raw = doc_record.get("vision_instruments")
+    if isinstance(raw, list):
+        for value in raw:
+            token = str(value).strip()
+            if token and token in families and token not in canon:
+                canon.append(token)
+    chairs: list[int] = []
+    raw_nums = doc_record.get("vision_part_numbers")
+    if isinstance(raw_nums, list):
+        for value in raw_nums:
+            try:
+                chair = int(value)
+            except (TypeError, ValueError):
+                continue
+            if chair not in chairs:
+                chairs.append(chair)
+    return canon, chairs
+
+
 def make_facet(
     canonical: str, lexicon: dict[str, Any], section_map: dict[str, str]
 ) -> dict[str, Any]:
@@ -835,6 +868,7 @@ def classify_document(
         filename_section = filename_facets[0]["section"] if filename_facets else None
 
         llm_canon = llm_instruments(doc_record, lexicon)
+        vis_canon, vis_chairs = vision_facets(doc_record, lexicon)
         # The printed part name sits in the upper-left corner and is read earliest-match-first so the
         # label wins over any surviving reference. The full page text is a weaker signal, used only
         # to confirm the filename or recover a same-section footer/credit instrument.
@@ -882,6 +916,35 @@ def classify_document(
             else:
                 same_section = filename_section == instruments[0]["section"]
                 confidence = 0.80 if same_section else 0.70
+                evidence = "combined"
+                conflict = not same_section
+        elif vis_canon:
+            # (1b) The vision pass read the rendered page image and named the instrument(s) on the
+            # printed label -- authoritative for scanned parts whose OCR is unusable. Chair numbers
+            # it transcribed expand a single-instrument part into one facet per chair; otherwise a
+            # single read inherits the filename index only when they name the same instrument.
+            facets = [make_facet(c, lexicon, section_map) for c in vis_canon]
+            if len(facets) == 1:
+                if len(vis_chairs) >= 2:
+                    base = facets[0]
+                    facets = [{**base, "part_index": chair} for chair in vis_chairs]
+                elif len(vis_chairs) == 1:
+                    facets[0]["part_index"] = vis_chairs[0]
+                elif filename_index is not None and filename_primary == vis_canon[0]:
+                    facets[0]["part_index"] = filename_index
+            instruments = facets
+            matched_alias = vis_canon[0]
+            alternates = []
+            filename_match = bool(filename_facets)
+            text_match = True
+            if filename_primary is None:
+                confidence, evidence = 0.80, "vision"
+            elif filename_primary in set(vis_canon):
+                confidence, evidence = 0.88, "combined"
+            else:
+                # Vision saw a different instrument than the filename -> trust the image but flag it.
+                same_section = filename_section == facets[0]["section"]
+                confidence = 0.78 if same_section else 0.68
                 evidence = "combined"
                 conflict = not same_section
         elif content_canon is not None and len(filename_facets) <= 1:
@@ -946,24 +1009,32 @@ def classify_document(
     # never changes the instrument's identity -- so it is safe against cue/reference false matches.
     if not is_score and len(instruments) == 1 and instruments[0]["part_index"] is None:
         base = instruments[0]
-        for source in (ocr_norm, full_norm):
-            if not source:
-                continue
-            chairs = combined_chairs(source, base["canonical"], compiled)
-            if len(chairs) >= 2:
-                instruments = [
-                    {
-                        "canonical": base["canonical"],
-                        "part_index": chair,
-                        "family": base["family"],
-                        "section": base["section"],
-                    }
-                    for chair in chairs
-                ]
-                text_match = True
-                if evidence in ("filename", "none", "text"):
-                    evidence = "combined"
-                break
+        chairs: list[int] = []
+        # Vision-read chairs (when it named this same instrument) are the most reliable source; fall
+        # back to scanning the OCR / page text for a printed combined label.
+        if len(vis_chairs) >= 2 and (not vis_canon or base["canonical"] in set(vis_canon)):
+            chairs = list(vis_chairs)
+        if len(chairs) < 2:
+            for source in (ocr_norm, full_norm):
+                if not source:
+                    continue
+                found = combined_chairs(source, base["canonical"], compiled)
+                if len(found) >= 2:
+                    chairs = found
+                    break
+        if len(chairs) >= 2:
+            instruments = [
+                {
+                    "canonical": base["canonical"],
+                    "part_index": chair,
+                    "family": base["family"],
+                    "section": base["section"],
+                }
+                for chair in chairs
+            ]
+            text_match = True
+            if evidence in ("filename", "none", "text", "ocr_llm", "vision"):
+                evidence = "combined"
 
     first = instruments[0] if instruments else None
     if is_score:

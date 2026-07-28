@@ -150,6 +150,30 @@ def test_classify_notation_vision_parses_and_validates(tmp_path: Path):
     assert result["vision_confidence"] == 0.85
 
 
+def test_classify_notation_vision_reads_part_label(tmp_path: Path):
+    extract = load_module("02_extract_text_and_images.py", "extract_vision_part")
+    item = _ocr_item(extract)
+    pages = [{"page_num": 1, "thumbnail_path": "cache/render/x_p0001_a.png", "thumbnail_hash": "h1"}]
+    cfg = extract.VisionConfig(enabled=True, page_scope="first")
+
+    def fake_llm(prompt: str, _cfg):
+        assert "Allowed instrument tokens" in prompt  # allowed list was injected
+        return {
+            "notation_source": "printed_original", "legibility": "good",
+            "instruments": ["Flute", "not_a_real_instrument"], "part_numbers": [1, 2, "x", 2],
+            "part_label": "1st & 2nd Flutes", "confidence": 0.9,
+        }
+
+    result = extract.classify_notation_vision(
+        item, pages, tmp_path / "cache", tmp_path, cfg, llm_fn=fake_llm
+    )
+    assert result is not None
+    # Unknown instrument dropped; numbers coerced/de-duplicated; junk removed.
+    assert result["vision_instruments"] == ["flute"]
+    assert result["vision_part_numbers"] == [1, 2]
+    assert result["vision_part_label"] == "1st & 2nd Flutes"
+
+
 def test_classify_notation_vision_rejects_unknown_enum(tmp_path: Path):
     extract = load_module("02_extract_text_and_images.py", "extract_vision_enum")
     item = _ocr_item(extract)
