@@ -64,6 +64,16 @@
     return d;
   };
 
+  // A collapsible section wrapping arbitrary DOM (not just <pre> text). Open by default unless
+  // `open` is explicitly false.
+  MLG.detailsSection = function (summary, node, open) {
+    var d = el("details", { class: "expander expander--section" });
+    if (open !== false) d.setAttribute("open", "");
+    d.appendChild(el("summary", { text: summary }));
+    if (node) d.appendChild(node);
+    return d;
+  };
+
   MLG.section = function (title, node) {
     var frag = document.createDocumentFragment();
     frag.appendChild(el("h2", { text: title }));

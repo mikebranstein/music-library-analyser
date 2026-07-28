@@ -153,6 +153,91 @@ def _missing_required(report: dict[str, Any] | None) -> list[dict[str, Any]]:
     return out
 
 
+def _canonical_by_predicted_part(report: dict[str, Any]) -> dict[str, str]:
+    """Map a predicted_part label (as attached to documents) to its canonical instrument.
+
+    Learned from the Script 06 ``observed_parts`` rollup, where each observed part carries both
+    the predicted_part label and the canonical instrument(s) it resolved to.
+    """
+    mapping: dict[str, str] = {}
+    for observed in report.get("observed_parts") or []:
+        part = observed.get("predicted_part")
+        instruments = observed.get("instruments") or []
+        canonical = instruments[0].get("canonical_instrument") if instruments else None
+        if part and canonical and part not in mapping:
+            mapping[part] = canonical
+    return mapping
+
+
+def _instrumentation(report: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Project a report's full expected-parts list into the site's instrumentation grid.
+
+    Parts keep their upstream canonical order (``part_index``). Present parts are linked to the
+    document(s) that satisfy them by matching the part's canonical instrument to each document's
+    predicted part (via the observed-parts rollup).
+    """
+    if not report:
+        return []
+    canonical_by_part = _canonical_by_predicted_part(report)
+    # canonical instrument -> [ {doc_id, filename}, ... ] for the documents in this piece.
+    docs_by_canonical: dict[str, list[dict[str, Any]]] = {}
+    for doc in report.get("documents") or []:
+        pdf_path = doc.get("pdf_path")
+        if not pdf_path:
+            continue
+        predicted = doc.get("predicted_part")
+        canonical = canonical_by_part.get(predicted or "")
+        if not canonical:
+            continue
+        docs_by_canonical.setdefault(canonical, []).append(
+            {
+                "doc_id": synth_doc_id(pdf_path),
+                "filename": doc.get("pdf_filename") or Path(pdf_path.replace("\\", "/")).name,
+            }
+        )
+    parts: list[dict[str, Any]] = []
+    for part in report.get("expected_parts") or []:
+        canonical = part.get("canonical_instrument")
+        present = bool(part.get("present"))
+        parts.append(
+            {
+                "part_index": part.get("part_index"),
+                "canonical_instrument": canonical,
+                "label": part.get("label"),
+                "section": part.get("section"),
+                "required": bool(part.get("required")),
+                "present": present,
+                "documents": docs_by_canonical.get(canonical or "", []) if present else [],
+            }
+        )
+    return parts
+
+
+def _score_info(report: dict[str, Any] | None) -> dict[str, Any]:
+    """Summarize a piece's score presence and link to the score document(s)."""
+    if not report:
+        return {"has_score": None, "score_missing": False, "score_types": [], "documents": []}
+    docs: list[dict[str, Any]] = []
+    for doc in report.get("documents") or []:
+        if not doc.get("is_score"):
+            continue
+        pdf_path = doc.get("pdf_path") or ""
+        docs.append(
+            {
+                "doc_id": synth_doc_id(pdf_path),
+                "filename": doc.get("pdf_filename") or Path(pdf_path.replace("\\", "/")).name,
+                "pdf_path": pdf_path,
+                "score_type": doc.get("score_type"),
+            }
+        )
+    return {
+        "has_score": report.get("has_score"),
+        "score_missing": bool(report.get("score_missing")),
+        "score_types": report.get("score_types") or [],
+        "documents": docs,
+    }
+
+
 def _score_pct(value: Any) -> float | None:
     """Convert a pipeline 0..1 completeness score to a 0..100 percentage (1 decimal)."""
     if value is None:
@@ -293,6 +378,9 @@ def build_pieces(
                 "page_count": page_count_by_piece.get(piece_id or "", 0),
                 "missing_required_count": sp.get("missing_required_count") or 0,
                 "missing_required": _missing_required(report),
+                "instrumentation": _instrumentation(report),
+                "has_expected_parts": bool((report or {}).get("expected_parts")),
+                "score": _score_info(report),
                 "thumbnail": first_thumb,
             }
         )
@@ -323,6 +411,8 @@ def build_documents(
                 "pdf_path": pdf_path,
                 "instrument": instrument,
                 "section": index.section_by_predicted_part.get(predicted_part or ""),
+                "is_score": bool(doc_meta.get("is_score")),
+                "score_type": doc_meta.get("score_type"),
                 "page_count": rec.get("page_count") or 0,
                 "quality": doc_meta.get("quality_band"),
                 "notation_source": rec.get("vision_notation_source")

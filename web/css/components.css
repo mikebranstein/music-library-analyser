@@ -308,6 +308,32 @@ details.expander pre {
   color: var(--text-secondary);
   margin: var(--space-3) 0 0;
 }
+/* A collapsible section that wraps richer content (tables, cards) rather than plain text. */
+details.expander--section {
+  padding: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-4);
+}
+details.expander--section > summary {
+  font-size: 1.05rem;
+  color: var(--text);
+}
+details.expander--section[open] > summary {
+  margin-bottom: var(--space-3);
+}
+details.expander--section .table-wrap {
+  margin: 0;
+}
+
+/* --- Instrumentation grid --- */
+table.data.instrumentation td .stack-tight > * + * {
+  margin-top: var(--space-1);
+}
+table.data tbody tr.is-missing {
+  background: var(--accent-fill);
+}
+table.data tbody tr.is-missing:hover {
+  background: color-mix(in srgb, var(--accent-fill) 80%, var(--border));
+}
 
 /* --- Thumbnails --- */
 .thumb {
