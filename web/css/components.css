@@ -17,11 +17,13 @@
   text-decoration: none;
 }
 .phase-about {
-  margin-top: var(--space-4);
   line-height: 1.55;
 }
 .phase-about > * + * {
   margin-top: var(--space-3);
+}
+.phase-about > :first-child {
+  margin-top: 0;
 }
 .phase-about p {
   color: var(--text);

@@ -25,9 +25,11 @@
     app.appendChild(MLG.pageHead("Phase " + n, meta.title));
     app.appendChild(el("p", { class: "muted", text: meta.blurb }));
 
-    // Rich, explanatory description: what this phase does, how it works, and why.
+    // Rich, explanatory description behind a collapsible toggle: what this phase does, how it
+    // works, and why. Collapsed by default so the page leads with metrics, not prose.
     if (meta.detail) {
-      app.appendChild(el("div", { class: "card phase-about", html: meta.detail }));
+      var about = el("div", { class: "phase-about", html: meta.detail });
+      app.appendChild(MLG.detailsSection("How this phase works", about, false));
     }
 
     // Summary line + deferred timing note
