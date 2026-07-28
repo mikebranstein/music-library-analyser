@@ -57,6 +57,22 @@ def _report(piece_id: str = "p1", **overrides: Any) -> dict:
         "has_score": True,
         "score_missing": False,
         "score_types": ["full_score"],
+        "work_identity": {
+            "title_guess": "Test Piece",
+            "catalog_number": "001",
+            "identity_candidates": {
+                "composer": "Regex Composer",
+                "arranger": "Regex Arranger",
+                "publisher": "Regex Publisher",
+                "copyright_year": 1975,
+            },
+            "resolved": {
+                "composer": "Jane Doe",
+                "publisher": "Acme Editions",
+                "year": "1981",
+                "summary": "A short test work. It exists only in fixtures.",
+            },
+        },
         "documents": [
             {"pdf_path": "001/flute.pdf", "pdf_filename": "flute.pdf", "predicted_part": "Flute",
              "quality_band": "good", "thumbnail_path": "cache/render/p1_p0001_aaa.png",
@@ -199,6 +215,34 @@ def test_build_pieces_includes_instrumentation_and_score():
             "score_type": "full_score",
         }
     ]
+
+
+def test_build_pieces_projects_metadata_preferring_resolved():
+    index = ss.index_reports([_report()])
+    pieces = ss.build_pieces(_summary()["pieces"], index, {"p1": 2}, lambda c: None)
+    meta = pieces[0]["metadata"]
+    # Resolved (online-lookup) identity wins over the regex identity_candidates.
+    assert meta["composer"] == "Jane Doe"
+    assert meta["publisher"] == "Acme Editions"
+    assert meta["year"] == "1981"
+    assert meta["summary"] == "A short test work. It exists only in fixtures."
+    # Falls back to identity_candidates when the lookup did not resolve the field.
+    assert meta["arranger"] == "Regex Arranger"
+
+
+def test_build_pieces_metadata_defaults_to_none_without_identity():
+    report = _report()
+    report.pop("work_identity", None)
+    index = ss.index_reports([report])
+    pieces = ss.build_pieces(_summary()["pieces"], index, {"p1": 2}, lambda c: None)
+    meta = pieces[0]["metadata"]
+    assert meta == {
+        "composer": None,
+        "arranger": None,
+        "publisher": None,
+        "year": None,
+        "summary": None,
+    }
 
 
 def test_build_documents_synthesizes_ids_and_enriches():

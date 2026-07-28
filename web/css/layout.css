@@ -187,6 +187,16 @@ main {
 .grid--2 {
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
 }
+/* Piece Overview: wide left metadata panel, narrow right completeness panel. */
+.grid--overview {
+  grid-template-columns: minmax(0, 2.4fr) minmax(220px, 1fr);
+  align-items: start;
+}
+@media (max-width: 720px) {
+  .grid--overview {
+    grid-template-columns: 1fr;
+  }
+}
 .grid--phases {
   grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
 }

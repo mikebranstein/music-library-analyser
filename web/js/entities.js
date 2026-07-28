@@ -57,26 +57,34 @@
     app.appendChild(el("div", { class: "row" }, [MLG.severityBadge(p.severity), MLG.badge(fmt.title(p.completeness_tier), "muted")]));
 
     // --- Overview / metadata ------------------------------------------------
-    var row = el("div", { class: "grid grid--2", style: "margin-top:var(--space-4)" });
+    // Overview spans the wide left column (metadata + score); Completeness is a
+    // narrow panel on the right.
+    var meta = p.metadata || {};
+    var row = el("div", { class: "grid grid--overview", style: "margin-top:var(--space-4)" });
+
+    var overview = el("div", { class: "card" }, [el("div", { class: "card__label", text: "Overview" })]);
+    if (meta.summary) {
+      overview.appendChild(el("p", { class: "piece-summary", text: fmt.text(meta.summary) }));
+    }
+    overview.appendChild(MLG.facts([
+      meta.composer ? ["Composer", fmt.text(meta.composer)] : null,
+      meta.arranger ? ["Arranger", fmt.text(meta.arranger)] : null,
+      meta.publisher ? ["Publisher", fmt.text(meta.publisher)] : null,
+      meta.year ? ["Year", fmt.text(meta.year)] : null,
+      ["Score", pieceScoreFact(p)],
+      ["Catalog #", p.catalog_number],
+      ["Folder", p.piece_folder],
+      ["Documents", fmt.num(p.document_count)],
+      ["Pages", fmt.num(p.page_count)],
+      ["Missing required", fmt.num(p.missing_required_count)],
+    ]));
+    row.appendChild(overview);
+
     row.appendChild(el("div", { class: "card" }, [
       el("div", { class: "card__label", text: "Completeness" }),
-      el("div", { class: "row", style: "margin-top:var(--space-3)" }, [MLG.donut(p.completeness_score, "Completeness")]),
-    ]));
-    row.appendChild(el("div", { class: "card" }, [
-      el("div", { class: "card__label", text: "Overview" }),
-      MLG.facts([
-        ["Catalog #", p.catalog_number],
-        ["Folder", p.piece_folder],
-        ["Documents", fmt.num(p.document_count)],
-        ["Pages", fmt.num(p.page_count)],
-        ["Missing required", fmt.num(p.missing_required_count)],
-      ]),
+      el("div", { class: "row", style: "margin-top:var(--space-3); justify-content:center" }, [MLG.donut(p.completeness_score, "Completeness")]),
     ]));
     app.appendChild(row);
-
-    // --- Score (broken out near the metadata, not with the other files) -----
-    app.appendChild(el("h2", { text: "Score" }));
-    app.appendChild(pieceScoreCard(p));
 
     // --- Instrumentation (collapsible) --------------------------------------
     var instrumentation = p.instrumentation || [];
@@ -112,40 +120,40 @@
     ));
   }
 
-  // Score card: presence, type(s), and links to the score document(s) + original PDF.
-  function pieceScoreCard(p) {
+  // Score fact for the Overview panel: presence, full/partial indicator, and link(s) to the
+  // score document(s). Returned as a single node so it can live in the Overview facts list.
+  function pieceScoreFact(p) {
     var score = p.score || {};
     var docs = score.documents || [];
-    var card = el("div", { class: "card" });
+    var wrap = el("div", { class: "stack-tight" });
+
     var head = el("div", { class: "row" });
     if (docs.length) {
-      head.appendChild(MLG.badge("Score present", "ok"));
+      var types = score.score_types || [];
+      var isFull = types.indexOf("full_score") !== -1;
+      if (isFull) {
+        head.appendChild(MLG.badge("Full score", "ok"));
+      } else if (types.length) {
+        head.appendChild(MLG.badge("Partial score", "warning"));
+        head.appendChild(el("span", { class: "muted", text: types.map(fmt.title).join(", ") }));
+      } else {
+        head.appendChild(MLG.badge("Score present", "ok"));
+      }
     } else if (score.score_missing) {
-      head.appendChild(MLG.badge("No score detected", "high"));
+      head.appendChild(MLG.badge("No score", "high"));
     } else {
       head.appendChild(MLG.badge("Score unknown", "muted"));
     }
-    if (score.score_types && score.score_types.length) {
-      head.appendChild(el("span", { class: "muted", text: score.score_types.map(fmt.title).join(", ") }));
-    }
-    card.appendChild(head);
+    wrap.appendChild(head);
 
-    if (docs.length) {
-      var list = el("div", { class: "stack", style: "margin-top:var(--space-3)" });
-      docs.forEach(function (d) {
-        var wrap = el("div", { class: "stack" });
-        wrap.appendChild(link("document.html", { id: d.doc_id }, d.filename));
-        wrap.appendChild(MLG.pdfControl(d.pdf_path));
-        list.appendChild(wrap);
-      });
-      card.appendChild(list);
-    } else {
-      card.appendChild(el("p", { class: "muted", style: "margin-top:var(--space-2)", text: "No full/condensed score is linked to this piece." }));
-    }
-    return card;
+    docs.forEach(function (d) {
+      wrap.appendChild(link("document.html", { id: d.doc_id }, d.filename));
+    });
+    return wrap;
   }
 
-  // Instrumentation grid: canonical order, required/optional, present/missing, and doc links.
+  // Instrumentation grid: canonical order, required/optional, present/missing. The instrument
+  // name links to the original document when one satisfies the part.
   function instrumentationTable(parts) {
     var t = el("table", { class: "data instrumentation" });
     t.appendChild(el("thead", {}, [el("tr", {}, [
@@ -154,7 +162,6 @@
       el("th", { text: "Section" }),
       el("th", { text: "Required" }),
       el("th", { text: "Status" }),
-      el("th", { text: "Document" }),
     ])]));
     var tb = el("tbody");
     parts.forEach(function (part, i) {
@@ -162,24 +169,24 @@
       var missingRequired = part.required && !part.present;
       var tr = el("tr", missingRequired ? { class: "is-missing" } : {});
       tr.appendChild(el("td", { class: "num", text: String(idx) }));
-      tr.appendChild(el("td", { text: fmt.text(part.label || part.canonical_instrument) }));
+      tr.appendChild(el("td", {}, [instrumentCell(part)]));
       tr.appendChild(el("td", { text: fmt.text(part.section) }));
       tr.appendChild(el("td", {}, [MLG.badge(part.required ? "Required" : "Optional", part.required ? "muted" : "plain")]));
       tr.appendChild(el("td", {}, [part.present ? MLG.badge("Present", "ok") : MLG.badge("Missing", part.required ? "high" : "muted")]));
-      tr.appendChild(el("td", {}, [partDocuments(part.documents)]));
       tb.appendChild(tr);
     });
     t.appendChild(tb);
     return el("div", { class: "table-wrap" }, [t]);
   }
 
-  function partDocuments(docs) {
-    if (!docs || !docs.length) return document.createTextNode("\u2014");
-    var wrap = el("div", { class: "stack-tight" });
-    docs.forEach(function (d) {
-      wrap.appendChild(link("document.html", { id: d.doc_id }, d.filename));
-    });
-    return wrap;
+  // Instrument name, linked to the original document when the part is satisfied by one.
+  function instrumentCell(part) {
+    var label = fmt.text(part.label || part.canonical_instrument);
+    var docs = part.documents || [];
+    if (docs.length) {
+      return link("document.html", { id: docs[0].doc_id }, label);
+    }
+    return document.createTextNode(label);
   }
 
   function missingRequiredTable(missing) {

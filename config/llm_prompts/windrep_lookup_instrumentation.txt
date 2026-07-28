@@ -61,6 +61,12 @@ Populate `evidence_sources` only with WindRep URLs you actually consulted -- eit
 `url` (the exact page you read), `title` (the page title), `snippet` (a short quoted passage that
 lists the instrumentation), and `retrieved` (an ISO date or `"unknown"`).
 
+In `work_identity.summary`, write a concise 2–3 sentence description of the piece for a
+library catalog reader: what the work is and, when the windrep.org page or general music
+knowledge supports it, a meaningful note about its history, origin, composer/arranger, or
+character. Keep it factual; do not fabricate specifics you cannot support. Set `summary` to
+`null` if you cannot say anything meaningful beyond the title.
+
 ## Output contract REQUIRED
 
 Respond with exactly one JSON object, and nothing else, wrapped between the sentinel lines below.
@@ -80,7 +86,8 @@ types exactly as shown.
     "arranger": null,
     "publisher": null,
     "catalog_number": null,
-    "year": null
+    "year": null,
+    "summary": null
   },
   "expected_parts": [
     {

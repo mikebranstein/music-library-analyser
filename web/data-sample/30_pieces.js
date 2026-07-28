@@ -59,6 +59,14 @@ MLG.register("pieces", [
       score_types: [],
       documents: [],
     },
+    metadata: {
+      composer: "Traditional (Mexico)",
+      arranger: "F. Fennell",
+      publisher: "Carl Fischer",
+      year: 1948,
+      summary:
+        "\u201cJarabe Tapat\u00edo,\u201d popularly known as the Mexican Hat Dance, is Mexico\u2019s national folk dance, codified in the early 20th century. This concert-band setting pairs the tune\u2019s courtship rhythms with bright, dance-like scoring.",
+    },
     thumbnail: null,
   },
   {
@@ -87,6 +95,14 @@ MLG.register("pieces", [
           score_type: "full_score",
         },
       ],
+    },
+    metadata: {
+      composer: "Traditional",
+      arranger: null,
+      publisher: "Public Domain",
+      year: 1779,
+      summary:
+        "\u201cAmazing Grace\u201d is a Christian hymn with words written in 1772 by English poet and clergyman John Newton, set to the folk melody \u201cNew Britain.\u201d It remains one of the most recognizable and widely arranged tunes in the English-speaking world.",
     },
     thumbnail: null,
   },

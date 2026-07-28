@@ -68,7 +68,12 @@ If the text is too short, too noisy, cropped, or does not clearly show instrumen
 * Do not create extra parts from cue staves, ossia staves, condensed reductions, or short-term
   divisi unless they are separately named printed parts.
 
-***
+  In `work_identity.summary`, if the score text (title, composer/arranger, subtitle, program
+  note) or well-established general music knowledge lets you, write a concise 2–3 sentence
+  description of the piece for a library catalog reader. Keep it factual; do not fabricate
+  specifics you cannot support. Set `summary` to `null` if nothing meaningful can be said.
+
+  ***
 
 ## Confidence calibration
 
@@ -89,7 +94,7 @@ types exactly as shown.
 {{"match_found": true, "identity_match_confidence": 0.0, "ensemble_type": "inferred_snake_case_type",
   "ensemble_display_name": "Human readable ensemble name", "score_expected": true,
   "work_identity": {{"title": null, "composer": null, "arranger": null,
-    "publisher": null, "catalog_number": null, "year": null}},
+    "publisher": null, "catalog_number": null, "year": null, "summary": null}},
   "expected_parts": [
     {{"canonical_instrument": "clarinet", "part_index": 1, "label": "1st Clarinet",
       "section": "clarinets", "required": true}}

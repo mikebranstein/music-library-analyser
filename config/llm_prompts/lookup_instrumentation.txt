@@ -305,6 +305,17 @@ For pieces that plausibly have no published edition:
 
 ***
 
+## Work summary
+
+In `work_identity.summary`, write a concise 2–3 sentence description of the piece for a
+library catalog reader: what the work is and, when you can support it from the sources you
+consulted or from well-established general music knowledge, a meaningful note about its
+history, origin, composer/arranger, or character. Keep it factual and neutral; do not
+fabricate specifics (dates, premieres, dedications) you cannot support. If you cannot say
+anything meaningful beyond the title, set `summary` to `null`.
+
+***
+
 ## Output contract REQUIRED
 
 Respond with exactly one JSON object, and nothing else, wrapped between the sentinel lines below.
@@ -326,7 +337,8 @@ Keep the field names, nesting, and value types exactly as shown.
 "arranger": null,
 "publisher": null,
 "catalog\_number": null,
-"year": null
+"year": null,
+"summary": null
 },
 "expected\_parts": \[
 {

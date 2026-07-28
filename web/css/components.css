@@ -426,6 +426,15 @@ dialog.settings::backdrop {
 .stack > * + * {
   margin-top: var(--space-3);
 }
+.stack-tight > * + * {
+  margin-top: var(--space-1);
+}
+.piece-summary {
+  margin: var(--space-2) 0 var(--space-3);
+  color: var(--text-secondary);
+  font-size: 0.92rem;
+  max-width: 70ch;
+}
 .row {
   display: flex;
   gap: var(--space-2);

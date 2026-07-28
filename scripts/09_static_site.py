@@ -238,6 +238,32 @@ def _score_info(report: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _piece_metadata(report: dict[str, Any] | None) -> dict[str, Any]:
+    """Project a piece's catalog metadata for the Overview panel.
+
+    Prefers the online-lookup ``work_identity.resolved`` values (Script 04's authoritative edition
+    identity), falling back to the best-effort ``identity_candidates`` scraped from the document
+    text in Script 02. ``summary`` is only ever supplied by the lookup.
+    """
+    work_identity = (report or {}).get("work_identity") or {}
+    resolved = work_identity.get("resolved") or {}
+    candidates = work_identity.get("identity_candidates") or {}
+
+    def pick(*values: Any) -> Any:
+        for value in values:
+            if value not in (None, ""):
+                return value
+        return None
+
+    return {
+        "composer": pick(resolved.get("composer"), candidates.get("composer")),
+        "arranger": pick(resolved.get("arranger"), candidates.get("arranger")),
+        "publisher": pick(resolved.get("publisher"), candidates.get("publisher")),
+        "year": pick(resolved.get("year"), candidates.get("copyright_year")),
+        "summary": pick(resolved.get("summary")),
+    }
+
+
 def _score_pct(value: Any) -> float | None:
     """Convert a pipeline 0..1 completeness score to a 0..100 percentage (1 decimal)."""
     if value is None:
@@ -378,6 +404,7 @@ def build_pieces(
                 "instrumentation": _instrumentation(report),
                 "has_expected_parts": bool((report or {}).get("expected_parts")),
                 "score": _score_info(report),
+                "metadata": _piece_metadata(report),
                 "thumbnail": first_thumb,
             }
         )

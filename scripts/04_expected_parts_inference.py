@@ -202,7 +202,7 @@ DEFAULT_PROMPT_TEMPLATE = (
     '{{"match_found": true, "identity_match_confidence": 0.0, "ensemble_type": "",\n'
     '  "ensemble_display_name": "", "score_expected": true,\n'
     '  "work_identity": {{"title": null, "composer": null, "arranger": null,\n'
-    '    "publisher": null, "catalog_number": null, "year": null}},\n'
+    '    "publisher": null, "catalog_number": null, "year": null, "summary": null}},\n'
     '  "expected_parts": [], "candidate_score_images": [], "evidence_sources": [], "notes": ""}}\n'
     f"{RESULT_END}\n"
 )
@@ -228,7 +228,7 @@ DEFAULT_SUMMARIZE_TEMPLATE = (
     '{{"match_found": true, "identity_match_confidence": 0.0, "ensemble_type": "",\n'
     '  "ensemble_display_name": "", "score_expected": true,\n'
     '  "work_identity": {{"title": null, "composer": null, "arranger": null,\n'
-    '    "publisher": null, "catalog_number": null, "year": null}},\n'
+    '    "publisher": null, "catalog_number": null, "year": null, "summary": null}},\n'
     '  "expected_parts": [], "evidence_sources": [], "notes": ""}}\n'
     f"{RESULT_END}\n"
 )
