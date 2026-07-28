@@ -238,6 +238,17 @@ def _score_info(report: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _instrumentation_source(report: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Pass through Script 04's instrumentation provenance summary.
+
+    Answers "where did this instrumentation come from?" on the piece detail page: the resolution
+    method (score OCR / web lookup / image OCR / fallback), confidence, LLM notes, and any web
+    source URLs. Returns ``None`` when the upstream report predates this field.
+    """
+    prov = (report or {}).get("instrumentation_provenance")
+    return prov if isinstance(prov, dict) else None
+
+
 def _piece_metadata(report: dict[str, Any] | None) -> dict[str, Any]:
     """Project a piece's catalog metadata for the Overview panel.
 
@@ -411,6 +422,7 @@ def build_pieces(
                 "instrumentation": _instrumentation(report),
                 "has_expected_parts": bool((report or {}).get("expected_parts")),
                 "score": _score_info(report),
+                "instrumentation_source": _instrumentation_source(report),
                 "metadata": _piece_metadata(report),
                 "thumbnail": first_thumb,
             }
@@ -548,7 +560,11 @@ def build_phases(
     missing_required_total = sum(int(p.get("missing_required_count") or 0) for p in pieces)
 
     top_missing_rows = [
-        {"section": _titlecase(s.get("section")), "missing_piece_count": s.get("missing_piece_count") or 0}
+        {
+            "section_id": s.get("section"),
+            "section": _titlecase(s.get("section")),
+            "missing_piece_count": s.get("missing_piece_count") or 0,
+        }
         for s in (summary.get("top_missing_sections") or [])
     ]
 
@@ -687,10 +703,11 @@ def build_phases(
             ],
             "table": {
                 "caption": "Top missing sections",
+                "entity": "section",
                 "sortKey": "missing_piece_count",
                 "dir": "desc",
                 "columns": [
-                    {"key": "section", "label": "Section"},
+                    {"key": "section", "label": "Section", "link": "section"},
                     {"key": "missing_piece_count", "label": "Pieces missing", "num": True, "bar": True, "variant": "warning"},
                 ],
                 "rows": top_missing_rows,

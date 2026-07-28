@@ -112,6 +112,16 @@ METHOD_AUTHORITY = "authority_lookup"
 METHOD_SCORE_IMAGE = "score_image_ocr"
 METHOD_FALLBACK = "conservative_fallback"
 
+# Human-readable labels for each resolution path, surfaced on the web dashboard as the
+# "where did this instrumentation come from?" provenance.
+METHOD_LABELS = {
+    METHOD_LOCAL_SCORE: "OCR of local score",
+    METHOD_WINDREP: "Web lookup (Wind Repertory Project)",
+    METHOD_AUTHORITY: "Web lookup (authority source)",
+    METHOD_SCORE_IMAGE: "OCR of score image from web",
+    METHOD_FALLBACK: "No authoritative source (observed parts only)",
+}
+
 # Order Script 03 score types are preferred when picking a piece's best local score to OCR.
 SCORE_TYPE_PREFERENCE = {"full": 0, "conductor": 1, "condensed": 2, "short": 3}
 
@@ -1264,6 +1274,72 @@ def build_work_identity(
     return identity
 
 
+# --- Instrumentation provenance --------------------------------------------------------------
+
+
+def _normalize_sources(evidence: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Project raw ``evidence_sources`` into compact ``{title, url, snippet}`` rows.
+
+    Keeps only entries carrying at least one non-empty field so the dashboard never renders empty
+    source rows.
+    """
+    out: list[dict[str, Any]] = []
+    for src in evidence or []:
+        if not isinstance(src, dict):
+            continue
+        url = str(src.get("url") or "").strip()
+        title = str(src.get("title") or "").strip()
+        snippet = str(src.get("snippet") or "").strip()
+        if not (url or title or snippet):
+            continue
+        out.append({"title": title or url or "source", "url": url, "snippet": snippet})
+    return out
+
+
+def build_instrumentation_provenance(
+    *,
+    detection_method: str,
+    lookup_status: str,
+    identity_match_confidence: float,
+    lookup_model: str,
+    lookup_notes: str,
+    evidence: list[dict[str, Any]] | None,
+    local_score_path: str | None = None,
+    ocr_source: str | None = None,
+) -> dict[str, Any]:
+    """Summarize where a piece's instrumentation came from.
+
+    Folds the resolution path, confidence, LLM context/notes, and any web evidence into one
+    self-contained object that Scripts 06/09 carry forward verbatim so the dashboard can answer
+    "where did we get this instrumentation from?" (OCR of the score, web search + which URLs, or an
+    LLM authority lookup).
+    """
+    label = METHOD_LABELS.get(detection_method, detection_method.replace("_", " ").title())
+    if detection_method == METHOD_LOCAL_SCORE:
+        summary = "Read from the OCR'd text of the piece's own score."
+    elif detection_method == METHOD_SCORE_IMAGE:
+        summary = "Read from OCR of a score image found via web search."
+    elif detection_method in (METHOD_WINDREP, METHOD_AUTHORITY):
+        summary = "Identified by an LLM web search of authoritative publisher/catalog sources."
+    else:
+        summary = (
+            "No authoritative instrumentation found; only the parts observed in the library copy "
+            "are known."
+        )
+    return {
+        "method": detection_method,
+        "method_label": label,
+        "summary": summary,
+        "status": lookup_status,
+        "confidence": round(float(identity_match_confidence or 0.0), 3),
+        "model": lookup_model or None,
+        "notes": (lookup_notes or "").strip(),
+        "local_score_path": local_score_path,
+        "ocr_source": ocr_source,
+        "sources": _normalize_sources(evidence),
+    }
+
+
 # --- Per-piece inference ---------------------------------------------------------------------
 
 
@@ -1308,6 +1384,14 @@ def conservative_record(
         "identity_match_confidence": round(float(identity_match_confidence or 0.0), 3),
         "authority_coverage": "none",
         "evidence_sources": evidence or [],
+        "instrumentation_provenance": build_instrumentation_provenance(
+            detection_method="conservative_fallback",
+            lookup_status=lookup_status,
+            identity_match_confidence=identity_match_confidence,
+            lookup_model=lookup_model,
+            lookup_notes=lookup_notes,
+            evidence=evidence,
+        ),
         "work_identity": build_work_identity(piece, doc, lookup_identity),
         "expected_parts": [],
         "missing_parts": [],
@@ -1386,6 +1470,16 @@ def build_matched_record(
         ),
         "authority_coverage": "full" if evidence else "none",
         "evidence_sources": evidence,
+        "instrumentation_provenance": build_instrumentation_provenance(
+            detection_method=detection_method,
+            lookup_status=LookupStatus.MATCHED,
+            identity_match_confidence=float(result.get("identity_match_confidence") or 0.0),
+            lookup_model=lookup_model,
+            lookup_notes=str(result.get("notes") or ""),
+            evidence=evidence,
+            local_score_path=local_score_path,
+            ocr_source=ocr_source,
+        ),
         "work_identity": build_work_identity(piece, doc, result.get("work_identity")),
         "expected_parts": expected,
         "missing_parts": missing,

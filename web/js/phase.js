@@ -4,8 +4,8 @@
   var MLG = (window.MLG = window.MLG || {});
   var el = MLG.el;
 
-  var ID_FIELD = { document: "doc_id", page: "page_id", piece: "piece_id" };
-  var ENTITY_PAGE = { document: "pages/document.html", page: "pages/page.html", piece: "pages/piece.html" };
+  var ID_FIELD = { document: "doc_id", page: "page_id", piece: "piece_id", section: "section_id" };
+  var ENTITY_PAGE = { document: "pages/document.html", page: "pages/page.html", piece: "pages/piece.html", section: "pages/section.html" };
 
   MLG.renderPage = function () {
     var app = document.getElementById("app");

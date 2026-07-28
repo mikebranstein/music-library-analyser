@@ -514,6 +514,43 @@ def test_infer_piece_confident_complete():
     assert rec["ensemble_type"] == "concert_band"
 
 
+def test_infer_piece_records_web_lookup_provenance():
+    piece = _piece(observed=[_observed("cornet", 1)])
+    parts = [
+        {"canonical_instrument": "cornet", "part_index": 1, "label": "Cornet 1", "required": True},
+    ]
+    rec = expected.infer_piece(
+        piece, None, "run1",
+        config=dict(expected.DEFAULT_LOOKUP_CONFIG),
+        prompt_template="{title_guess}",
+        lookup_enabled=True,
+        lookup_fn=lambda p, c: _score_result(parts),
+    )
+    prov = rec["instrumentation_provenance"]
+    assert prov["method"] == "authority_lookup"
+    assert prov["method_label"] == "Web lookup (authority source)"
+    assert prov["status"] == "matched"
+    # Raw evidence_sources are projected into compact {title, url, snippet} rows for the site.
+    assert prov["sources"] == [
+        {"title": "Pub", "url": "https://example.com", "snippet": ""}
+    ]
+
+
+def test_conservative_record_provenance_marks_fallback():
+    piece = _piece(observed=[_observed("flute", 1)])
+    rec = expected.infer_piece(
+        piece, None, "run1",
+        config=dict(expected.DEFAULT_LOOKUP_CONFIG),
+        prompt_template="{title_guess}",
+        lookup_enabled=False,
+        lookup_fn=lambda p, c: _score_result([]),
+    )
+    prov = rec["instrumentation_provenance"]
+    assert prov["method"] == "conservative_fallback"
+    assert prov["sources"] == []
+    assert "No authoritative" in prov["summary"]
+
+
 def test_infer_piece_lookup_full_names_reconcile_with_observed_abbreviations():
     # Regression: the lookup LLM emits full instrument names (e.g. "Alto Saxophone") while Script
     # 03 emits abbreviated canonical tokens (e.g. "alto_sax"). Without canonicalization the two

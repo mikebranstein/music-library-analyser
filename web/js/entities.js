@@ -105,6 +105,15 @@
       app.appendChild(el("p", { class: "muted", text: "No authoritative instrumentation available for this piece." }));
     }
 
+    // --- Instrumentation source / provenance (collapsible) ------------------
+    if (p.instrumentation_source) {
+      app.appendChild(MLG.detailsSection(
+        "Instrumentation source",
+        instrumentationSourceCard(p.instrumentation_source),
+        false
+      ));
+    }
+
     // --- Documents (collapsed by default, at the bottom) --------------------
     var docs = MLG.get("documents", []).filter(function (d) { return d.piece_id === id; });
     app.appendChild(MLG.detailsSection(
@@ -187,6 +196,61 @@
       return link("document.html", { id: docs[0].doc_id }, label);
     }
     return document.createTextNode(label);
+  }
+
+  // "Where did this instrumentation come from?" \u2014 provenance summary for the piece detail
+  // page: the resolution method, confidence, LLM notes, and any web source links. Kept collapsed
+  // so it sits beneath the instrumentation grid without crowding the overview.
+  function instrumentationSourceCard(src) {
+    var METHOD_VARIANT = {
+      local_score_ocr: "ok",
+      score_image_ocr: "ok",
+      windrep_lookup: "review",
+      authority_lookup: "review",
+      conservative_fallback: "muted",
+    };
+    var wrap = el("div", { class: "stack-tight" });
+
+    var head = el("div", { class: "row" }, [
+      MLG.badge(fmt.text(src.method_label || src.method), METHOD_VARIANT[src.method] || "muted"),
+    ]);
+    if (src.status) head.appendChild(MLG.badge("Lookup: " + fmt.title(src.status), "plain"));
+    if (src.confidence != null) {
+      head.appendChild(el("span", { class: "muted", text: "Confidence " + fmt.pctValue(src.confidence * 100) }));
+    }
+    wrap.appendChild(head);
+
+    if (src.summary) wrap.appendChild(el("p", { class: "piece-summary", text: fmt.text(src.summary) }));
+
+    var factPairs = [
+      src.model ? ["LLM model", fmt.text(src.model)] : null,
+      src.local_score_path ? ["Score file OCR'd", fmt.text(src.local_score_path)] : null,
+      src.ocr_source ? ["OCR source", fmt.title(src.ocr_source)] : null,
+    ].filter(Boolean);
+    if (factPairs.length) wrap.appendChild(MLG.facts(factPairs));
+
+    if (src.notes) {
+      wrap.appendChild(el("div", { class: "card__label", text: "LLM notes" }));
+      wrap.appendChild(el("p", { class: "piece-summary", text: fmt.text(src.notes) }));
+    }
+
+    var sources = src.sources || [];
+    if (sources.length) {
+      wrap.appendChild(el("div", { class: "card__label", text: "Sources (" + sources.length + ")" }));
+      var ul = el("ul", { class: "source-list" });
+      sources.forEach(function (s) {
+        var li = el("li");
+        if (s.url) {
+          li.appendChild(el("a", { href: s.url, text: fmt.text(s.title || s.url), target: "_blank", rel: "noopener noreferrer" }));
+        } else {
+          li.appendChild(document.createTextNode(fmt.text(s.title)));
+        }
+        if (s.snippet) li.appendChild(el("div", { class: "muted source-snippet", text: fmt.text(s.snippet) }));
+        ul.appendChild(li);
+      });
+      wrap.appendChild(ul);
+    }
+    return wrap;
   }
 
   function missingRequiredTable(missing) {
@@ -332,12 +396,62 @@
     if (ocr) { app.appendChild(el("h2", { text: "Text" })); app.appendChild(ocr); }
   }
 
+  // ---- section detail (drill-down from phase 7 "Top missing sections") ----
+  // Lists every piece that is missing one or more *required* parts belonging to this section.
+  function renderSectionDetail(app) {
+    if (MLG.warnIfNoData(app)) return;
+    var id = MLG.param("id"); // raw section key, e.g. "flutes"
+    var label = fmt.title(id);
+    MLG.breadcrumbs([
+      { label: "Dashboard", href: MLG.rel("index.html") },
+      { label: "Collection Report", href: MLG.rel("pages/phase-07-collection.html") },
+      { label: id ? label : "Section" },
+    ]);
+    if (!id) return notFound(app, "Section");
+
+    var rows = [];
+    MLG.get("pieces", []).forEach(function (p) {
+      var missing = (p.missing_required || []).filter(function (m) { return m.section === id; });
+      if (missing.length) {
+        rows.push({
+          piece_id: p.piece_id,
+          catalog_number: p.catalog_number,
+          title: p.title,
+          severity: p.severity,
+          completeness_score: p.completeness_score,
+          missing_in_section: missing.length,
+          missing_parts: missing.map(function (m) { return fmt.text(m.label); }).join(", "),
+        });
+      }
+    });
+
+    app.appendChild(MLG.pageHead("Missing section", label));
+    app.appendChild(el("p", { class: "muted", text:
+      rows.length + " piece" + (rows.length === 1 ? "" : "s") +
+      " missing one or more required " + label + " parts." }));
+
+    if (!rows.length) {
+      app.appendChild(el("div", { class: "callout", text: "No pieces are missing required parts in this section." }));
+      return;
+    }
+
+    app.appendChild(MLG.table(rows, [
+      { key: "catalog_number", label: "#", filterText: function (r) { return r.catalog_number; } },
+      { key: "title", label: "Piece", render: function (r) { return link("piece.html", { id: r.piece_id }, r.title); }, filterText: function (r) { return r.title; } },
+      { key: "severity", label: "Severity", render: function (r) { return MLG.severityBadge(r.severity); }, sortValue: function (r) { return r.severity; }, filterText: function (r) { return r.severity; } },
+      { key: "completeness_score", label: "Complete", num: true, render: function (r) { return fmt.pctValue(r.completeness_score); } },
+      { key: "missing_in_section", label: "Missing here", num: true },
+      { key: "missing_parts", label: "Missing parts", filterText: function (r) { return r.missing_parts; } },
+    ], { sortKey: "missing_in_section", dir: "desc", filterPlaceholder: "Filter pieces\u2026" }));
+  }
+
   var VIEWS = {
     pieces: renderPiecesIndex,
     piece: renderPieceDetail,
     documents: renderDocumentsIndex,
     document: renderDocumentDetail,
     page: renderPageDetail,
+    section: renderSectionDetail,
   };
 
   MLG.renderPage = function () {

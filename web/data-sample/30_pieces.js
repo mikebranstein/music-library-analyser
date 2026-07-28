@@ -67,6 +67,30 @@ MLG.register("pieces", [
       summary:
         "\u201cJarabe Tapat\u00edo,\u201d popularly known as the Mexican Hat Dance, is Mexico\u2019s national folk dance, codified in the early 20th century. This concert-band setting pairs the tune\u2019s courtship rhythms with bright, dance-like scoring.",
     },
+    instrumentation_source: {
+      method: "authority_lookup",
+      method_label: "Web lookup (authority source)",
+      summary: "Identified by an LLM web search of authoritative publisher/catalog sources.",
+      status: "matched",
+      confidence: 0.82,
+      model: "gpt-5",
+      notes:
+        "Matched the Carl Fischer concert-band edition arranged by Frederick Fennell. Instrumentation taken from the publisher's part list; baritone provided in BC only.",
+      local_score_path: null,
+      ocr_source: null,
+      sources: [
+        {
+          title: "Carl Fischer \u2013 Mexican Hat Dance (concert band)",
+          url: "https://www.carlfischer.com/",
+          snippet: "Full concert band instrumentation with optional parts listed for the Fennell edition.",
+        },
+        {
+          title: "Wind Repertory Project \u2013 Jarabe Tapat\u00edo",
+          url: "https://www.windrep.org/",
+          snippet: "Catalog entry confirming standard concert-band scoring and part breakdown.",
+        },
+      ],
+    },
     thumbnail: null,
   },
   {
@@ -103,6 +127,19 @@ MLG.register("pieces", [
       year: 1779,
       summary:
         "\u201cAmazing Grace\u201d is a Christian hymn with words written in 1772 by English poet and clergyman John Newton, set to the folk melody \u201cNew Britain.\u201d It remains one of the most recognizable and widely arranged tunes in the English-speaking world.",
+    },
+    instrumentation_source: {
+      method: "local_score_ocr",
+      method_label: "OCR of local score",
+      summary: "Read from the OCR'd text of the piece's own score.",
+      status: "matched",
+      confidence: 0.91,
+      model: "gpt-5",
+      notes:
+        "Instrumentation read directly from the OCR'd full score included with the piece; all listed parts were present in the scan.",
+      local_score_path: "002 Amazing Grace/002 Amazing Grace - Full Score.pdf",
+      ocr_source: "local_score",
+      sources: [],
     },
     thumbnail: null,
   },

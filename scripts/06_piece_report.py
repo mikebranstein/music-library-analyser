@@ -333,6 +333,7 @@ def build_piece_record(inputs: PieceInputs, run_id: str) -> dict[str, Any]:
     record["identity_match_confidence"] = expected.get("identity_match_confidence")
     record["work_identity"] = expected.get("work_identity")
     record["evidence_sources"] = expected.get("evidence_sources") or []
+    record["instrumentation_provenance"] = expected.get("instrumentation_provenance")
     record["expected_parts"] = expected.get("expected_parts") or []
     record["missing_required_parts"] = expected.get("missing_required_parts") or []
     record["missing_optional_parts"] = expected.get("missing_optional_parts") or []

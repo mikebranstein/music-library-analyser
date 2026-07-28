@@ -245,6 +245,26 @@ def test_build_pieces_metadata_defaults_to_none_without_identity():
     }
 
 
+def test_build_pieces_passes_through_instrumentation_source():
+    prov = {
+        "method": "authority_lookup",
+        "method_label": "Web lookup (authority source)",
+        "summary": "Identified by an LLM web search of authoritative publisher/catalog sources.",
+        "status": "matched",
+        "confidence": 0.82,
+        "sources": [{"title": "Pub", "url": "https://example.com", "snippet": ""}],
+    }
+    index = ss.index_reports([_report(instrumentation_provenance=prov)])
+    pieces = ss.build_pieces(_summary()["pieces"], index, {"p1": 2}, lambda c: None)
+    assert pieces[0]["instrumentation_source"] == prov
+
+
+def test_build_pieces_instrumentation_source_none_when_absent():
+    index = ss.index_reports([_report()])
+    pieces = ss.build_pieces(_summary()["pieces"], index, {"p1": 2}, lambda c: None)
+    assert pieces[0]["instrumentation_source"] is None
+
+
 def test_build_documents_synthesizes_ids_and_enriches():
     index = ss.index_reports([_report()])
     docs = ss.build_documents(_documents_jsonl(), index, lambda c: None)
