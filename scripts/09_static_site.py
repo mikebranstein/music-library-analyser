@@ -547,15 +547,6 @@ def build_phases(
     expected_parts_total = sum(int(rep.get("expected_part_count") or 0) for rep in reports)
     missing_required_total = sum(int(p.get("missing_required_count") or 0) for p in pieces)
 
-    completeness_rows = [
-        {
-            "label": p.get("piece_title_guess") or p.get("piece_id"),
-            "value": _score_pct(p.get("completeness_score")) or 0,
-            "display": f"{_score_pct(p.get('completeness_score')) or 0:.0f}%",
-            "variant": _tier_variant(p.get("completeness_tier")),
-        }
-        for p in pieces
-    ]
     top_missing_rows = [
         {"label": _titlecase(s.get("section")), "value": s.get("missing_piece_count") or 0}
         for s in (summary.get("top_missing_sections") or [])
@@ -672,15 +663,18 @@ def build_phases(
                 {"label": "Complete", "value": completeness.get("complete") or 0},
                 {"label": "High severity", "value": severity.get("high") or 0},
             ],
-            "charts": [{"title": "Completeness by piece", "rows": completeness_rows}],
             "table": {
                 "caption": "Piece completeness",
                 "entity": "piece",
+                "sortKey": "missing_required_count",
+                "dir": "desc",
                 "columns": [
+                    {"key": "catalog_number", "label": "Catalog #"},
                     {"key": "title", "label": "Piece", "link": "piece"},
-                    {"key": "completeness_score", "label": "Score", "num": True, "display": "pct"},
-                    {"key": "completeness_tier", "label": "Tier"},
-                    {"key": "missing_required_count", "label": "Missing", "num": True},
+                    {"key": "expected_part_count", "label": "Expected", "num": True},
+                    {"key": "present_part_count", "label": "Have", "num": True},
+                    {"key": "missing_required_count", "label": "Missing required", "num": True, "bar": True, "barOf": "expected_part_count", "variant": "warning"},
+                    {"key": "completeness_score", "label": "Complete", "num": True, "display": "pct"},
                 ],
                 "source": "pieces",
             },
