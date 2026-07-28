@@ -31,11 +31,11 @@ def _lexicon_and_compiled():
     return lexicon, classifier.compile_aliases(lexicon)
 
 
-def _classify(inv, doc=None, page1=None):
+def _classify(inv, doc=None, page1=None, ocr_text=None):
     lexicon, compiled = _lexicon_and_compiled()
     section_map = classifier.build_section_map(lexicon)
     return classifier.classify_document(
-        inv, doc, page1, lexicon, compiled, section_map, "run1"
+        inv, doc, page1, lexicon, compiled, section_map, "run1", ocr_text=ocr_text
     )
 
 
@@ -191,7 +191,61 @@ def test_clef_and_transposition_and_index():
     assert classifier.extract_part_index(classifier.normalize("Cornet 3")) == 3
 
 
-def test_detect_score():
+def test_extract_part_index_reads_ordinals():
+    # Printed ordinals ("1st", "2nd") must resolve to a chair number, not just plain digits.
+    assert classifier.extract_part_index(classifier.normalize("Oboe 1st")) == 1
+    assert classifier.extract_part_index(classifier.normalize("2nd Clarinet")) == 2
+    assert classifier.extract_part_index(classifier.normalize("Trombone 3rd")) == 3
+
+
+def test_combined_chairs_from_leading_ordinals():
+    _, compiled = _lexicon_and_compiled()
+    assert classifier.combined_chairs(
+        classifier.normalize("1st & 2nd Oboes"), "oboe", compiled
+    ) == [1, 2]
+    # Numbers may also follow the instrument ("Oboe 1 & 2", "Cornet 1-2").
+    assert classifier.combined_chairs(
+        classifier.normalize("Oboe 1 & 2"), "oboe", compiled
+    ) == [1, 2]
+
+
+def test_combined_chairs_tolerates_ocr_ist_corruption():
+    # OCR routinely renders the leading "1" of "1st" as the letter "i" -> "ist".
+    _, compiled = _lexicon_and_compiled()
+    ocr = classifier.normalize("HENRY MANCINI  ist & 2nd Oboes  A MEDLEY")
+    assert classifier.combined_chairs(ocr, "oboe", compiled) == [1, 2]
+
+
+def test_classify_recovers_combined_chairs_from_ocr():
+    # Filename says only the plural "Oboes" (no chair number), but the scanned page's OCR prints
+    # "1st & 2nd Oboes" -- the part must expand into both chairs so Script 04 covers each slot.
+    inv = {
+        "pdf_path": "P/005 Mancini Medley Oboes.pdf",
+        "pdf_filename": "005 Mancini Medley Oboes.pdf",
+        "piece_folder": "005 Mancini Medley",
+        "piece_id": "abc",
+        "file_fingerprint": "fp1",
+    }
+    rec = _classify(inv, ocr_text="HENRY MANCINI ist & 2nd Oboes A MEDLEY")
+    canonicals = {(f["canonical"], f["part_index"]) for f in rec["instruments"]}
+    assert canonicals == {("oboe", 1), ("oboe", 2)}
+    assert rec["evidence_source"] == "combined"
+    assert "Oboe 1" in rec["predicted_part"] and "Oboe 2" in rec["predicted_part"]
+
+
+def test_classify_unnumbered_single_part_without_combined_label_unchanged():
+    # A plain unnumbered part whose OCR does not name multiple chairs must stay a single facet.
+    inv = {
+        "pdf_path": "P/005 Mancini Medley Oboes.pdf",
+        "pdf_filename": "005 Mancini Medley Oboes.pdf",
+        "piece_folder": "005 Mancini Medley",
+        "piece_id": "abc",
+        "file_fingerprint": "fp1",
+    }
+    rec = _classify(inv, ocr_text="HENRY MANCINI Oboe A MEDLEY")
+    assert [(f["canonical"], f["part_index"]) for f in rec["instruments"]] == [
+        ("oboe", None)
+    ]
     lexicon, _ = _lexicon_and_compiled()
     assert classifier.detect_score(classifier.normalize("Full Score"), lexicon) == "full"
     assert classifier.detect_score(classifier.normalize("Conductor"), lexicon) == "conductor"

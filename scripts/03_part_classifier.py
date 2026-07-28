@@ -648,10 +648,67 @@ def extract_transposition(text_norm: str, lexicon: dict[str, Any]) -> str | None
 
 
 def extract_part_index(text_norm: str) -> int | None:
-    found = re.findall(r"(?<![a-z0-9])(\d{1,2})(?![a-z0-9])", text_norm)
+    # Accept plain digits ("2") and printed ordinals ("1st", "2nd", "3rd", "4th"); the ordinal
+    # suffix rides on the digit rather than tripping the trailing word-boundary guard.
+    found = re.findall(r"(?<![a-z0-9])(\d{1,2})(?:st|nd|rd|th)?(?![a-z0-9])", text_norm)
     if found:
         return int(found[0])
     return None
+
+
+# A single physical part frequently serves two chairs and prints a combined label -- numbers either
+# preceding the instrument ("1st & 2nd Oboes") or following it ("Oboe 1 & 2", "Cornet 1-2"). OCR
+# routinely misreads the leading "1" of "1st" as the letter "i"/"l" ("ist"/"lst"), so those spellings
+# are accepted as chair 1.
+_ORD_TOKEN = r"(?:\d{1,2}(?:st|nd|rd|th)?|[il]st)"
+_CHAIR_RUN = rf"{_ORD_TOKEN}(?:\s*(?:&|\+|/|,|and|-)\s*{_ORD_TOKEN})*"
+_CHAIRS_BEFORE_RE = re.compile(rf"({_CHAIR_RUN})\s*$")
+_CHAIRS_AFTER_RE = re.compile(rf"^\s*({_CHAIR_RUN})")
+
+
+def _ordinal_values(run: str) -> list[int]:
+    """Ordered chair numbers parsed from a number/ordinal run ("1st & 2nd" -> ``[1, 2]``)."""
+    values: list[int] = []
+    for match in re.finditer(_ORD_TOKEN, run):
+        digits = re.match(r"\d{1,2}", match.group(0))
+        values.append(int(digits.group(0)) if digits else 1)  # "ist"/"lst" -> chair 1
+    return values
+
+
+def combined_chairs(
+    text_norm: str, canonical: str, compiled: list[tuple[str, str]]
+) -> list[int]:
+    """Chair numbers printed with ``canonical``'s own label in ``text_norm``.
+
+    Detects a combined multi-chair part label -- numbers immediately preceding the instrument
+    ("1st & 2nd Oboes") or immediately following it ("Oboe 1 & 2") -- scoped to the earliest
+    occurrence of that instrument's name so unrelated page numbers are never captured. Returns an
+    ordered, de-duplicated chair list, or ``[]`` when the label carries no (or only one) chair.
+    """
+    span: tuple[int, int] | None = None
+    for canon, alias in compiled:
+        if canon != canonical or len(alias) < 3:
+            continue
+        match = re.search(
+            r"(?<![a-z0-9])" + re.escape(alias) + r"(?![a-z0-9])", text_norm
+        )
+        if match is not None and (span is None or match.start() < span[0]):
+            span = (match.start(), match.end())
+    if span is None:
+        return []
+    values: list[int] = []
+    before = _CHAIRS_BEFORE_RE.search(text_norm[: span[0]])
+    if before:
+        values = _ordinal_values(before.group(1))
+    if not values:
+        after = _CHAIRS_AFTER_RE.match(text_norm[span[1] :])
+        if after:
+            values = _ordinal_values(after.group(1))
+    ordered: list[int] = []
+    for value in values:
+        if value not in ordered:
+            ordered.append(value)
+    return ordered
 
 
 def compose_label(
@@ -730,6 +787,7 @@ def classify_document(
     compiled: list[tuple[str, str]],
     section_map: dict[str, str],
     run_id: str,
+    ocr_text: str | None = None,
 ) -> dict[str, Any]:
     pdf_filename = inv_record.get("pdf_filename", "")
     piece_folder = inv_record.get("piece_folder", "")
@@ -739,6 +797,9 @@ def classify_document(
 
     score_type = detect_score(seg_norm, lexicon)
     upper_left_norm, full_norm = gather_text_signals(doc_record, page1_zones)
+    # Raw first-page OCR text (scanned parts) is the only place a combined "1st & 2nd Oboes" label
+    # survives; born-digital labels arrive via full_norm above.
+    ocr_norm = strip_cues(normalize(strip_music_glyphs(ocr_text or "")))
 
     clef = extract_clef(seg_norm, lexicon)
     transposition = extract_transposition(seg_norm, lexicon)
@@ -877,6 +938,32 @@ def classify_document(
         else:
             confidence = 0.0
             evidence = "none"
+
+    # Combined multi-chair recovery: when the label resolved to a single unnumbered instrument (e.g.
+    # the plural filename "Oboes") but the printed page names multiple chairs of that same
+    # instrument, expand it into one facet per chair so Script 04 coverage can satisfy every
+    # numbered slot. This only ever adds chair numbers to an already-identified instrument -- it
+    # never changes the instrument's identity -- so it is safe against cue/reference false matches.
+    if not is_score and len(instruments) == 1 and instruments[0]["part_index"] is None:
+        base = instruments[0]
+        for source in (ocr_norm, full_norm):
+            if not source:
+                continue
+            chairs = combined_chairs(source, base["canonical"], compiled)
+            if len(chairs) >= 2:
+                instruments = [
+                    {
+                        "canonical": base["canonical"],
+                        "part_index": chair,
+                        "family": base["family"],
+                        "section": base["section"],
+                    }
+                    for chair in chairs
+                ]
+                text_match = True
+                if evidence in ("filename", "none", "text"):
+                    evidence = "combined"
+                break
 
     first = instruments[0] if instruments else None
     if is_score:
@@ -1464,6 +1551,10 @@ def main(
     pages: Path = typer.Option(
         Path("data/pages.jsonl"), help="Script 02 per-page features (optional)"
     ),
+    extracted: Path = typer.Option(
+        Path("data/extracted_text.jsonl"),
+        help="Script 02 per-page extracted/OCR text (optional; for combined-part recovery)",
+    ),
     rules: Path = typer.Option(
         Path("config/regex_rules.yaml"), help="Instrument lexicon YAML (optional)"
     ),
@@ -1528,6 +1619,12 @@ def main(
     for rec in read_jsonl(pages.resolve()):
         if rec.get("page_num") == 1 and "pdf_path" in rec:
             page1_map.setdefault(rec["pdf_path"], rec)
+    # First-page OCR text, used only to recover chair numbers for a combined multi-chair label
+    # ("1st & 2nd Oboes") whose filename carries no number.
+    ocr_text_map: dict[str, str] = {}
+    for rec in read_jsonl(extracted.resolve()):
+        if rec.get("page_num") == 1 and rec.get("pdf_path") and rec.get("ocr_text"):
+            ocr_text_map.setdefault(rec["pdf_path"], str(rec["ocr_text"]))
     if not doc_map:
         logger.warning("No Script 02 documents found; classifying filename-only.")
 
@@ -1569,6 +1666,7 @@ def main(
             record = classify_document(
                 inv, doc_map.get(pdf_path), page1_map.get(pdf_path),
                 lexicon, compiled, section_map, run_id,
+                ocr_text=ocr_text_map.get(pdf_path),
             )
         except Exception as exc:
             logger.exception("Unexpected classification error on %s", pdf_path)
