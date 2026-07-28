@@ -705,9 +705,15 @@ def build_phases(
             "table": {
                 "caption": "Review queue",
                 "entity": "piece",
+                "sortKey": "missing_required_count",
+                "dir": "desc",
                 "columns": [
+                    {"key": "catalog_number", "label": "Catalog #"},
                     {"key": "title", "label": "Piece", "link": "piece"},
                     {"key": "severity", "label": "Severity", "badge": "severity"},
+                    {"key": "expected_part_count", "label": "Expected", "num": True},
+                    {"key": "present_part_count", "label": "Have", "num": True},
+                    {"key": "missing_required_count", "label": "Missing required", "num": True, "bar": True, "barOf": "expected_part_count", "variant": "warning"},
                     {"key": "completeness_score", "label": "Completeness", "num": True, "display": "pct"},
                 ],
                 "source": "pieces",
