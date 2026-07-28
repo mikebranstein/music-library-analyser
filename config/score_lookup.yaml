@@ -18,6 +18,10 @@ model: ""
 # lookups are being cut off. Also overridable at runtime with --timeout.
 timeout_seconds: 600
 
+# Emit a "still processing" heartbeat to the log every N seconds during a lookup so a long,
+# silent CLI call does not look frozen. Set to 0 to disable.
+heartbeat_seconds: 30
+
 # Identity-match confidence below which a returned match is downgraded to a conservative
 # fallback (evidence is still recorded, but expected parts are not asserted).
 confidence_threshold: 0.5

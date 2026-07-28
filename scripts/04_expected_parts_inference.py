@@ -150,6 +150,9 @@ DEFAULT_LOOKUP_CONFIG: dict[str, Any] = {
     "command": "copilot",
     "model": "",
     "timeout_seconds": 600,
+    # Emit a "still processing" heartbeat to the log every N seconds during a lookup so a long,
+    # silent CLI call does not look frozen. Set to 0 to disable.
+    "heartbeat_seconds": 30,
     "confidence_threshold": 0.5,
     "allowed_domains": [],
     "prompt_template_path": "config/llm_prompts/lookup_instrumentation.txt",
@@ -483,6 +486,30 @@ def run_copilot_lookup(prompt: str, config: dict[str, Any]) -> dict[str, Any]:
     watchdog = threading.Timer(timeout, _kill_on_timeout)
     watchdog.start()
 
+    # Heartbeat: a daemon thread that logs elapsed time on an interval so a long, silent lookup
+    # does not look frozen. It runs in parallel with the blocking stdout read below and is stopped
+    # the instant the call completes. ``Event.wait`` sleeps in interruptible chunks, so completion
+    # never has to wait out a full interval.
+    heartbeat_interval = float(config.get("heartbeat_seconds", 30) or 0)
+    stop_heartbeat = threading.Event()
+
+    def _heartbeat() -> None:
+        while not stop_heartbeat.wait(heartbeat_interval):
+            waited = time.perf_counter() - start
+            logger.info(
+                "%sstill processing... Copilot CLI running for %.0fs (limit %.0fs).",
+                prefix,
+                waited,
+                timeout,
+            )
+
+    heartbeat_thread: threading.Thread | None = None
+    if heartbeat_interval > 0:
+        heartbeat_thread = threading.Thread(
+            target=_heartbeat, name="copilot-heartbeat", daemon=True
+        )
+        heartbeat_thread.start()
+
     captured: list[str] = []
     try:
         assert proc.stdout is not None
@@ -496,6 +523,9 @@ def run_copilot_lookup(prompt: str, config: dict[str, Any]) -> dict[str, Any]:
         proc.wait()
     finally:
         watchdog.cancel()
+        stop_heartbeat.set()
+        if heartbeat_thread is not None:
+            heartbeat_thread.join(timeout=1.0)
 
     elapsed = time.perf_counter() - start
     stdout = "".join(captured)
