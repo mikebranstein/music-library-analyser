@@ -480,7 +480,7 @@ dialog.settings::backdrop {
   margin: var(--space-2) 0 var(--space-3);
   color: var(--text-secondary);
   font-size: 0.92rem;
-  max-width: 70ch;
+  max-width: none;
 }
 .source-list {
   margin: var(--space-1) 0 var(--space-2);

@@ -60,7 +60,7 @@
     // Overview spans the wide left column (metadata + score); Completeness is a
     // narrow panel on the right.
     var meta = p.metadata || {};
-    var row = el("div", { class: "grid grid--overview", style: "margin-top:var(--space-4)" });
+    var row = el("div", { class: "grid grid--overview", style: "margin-top:var(--space-4); margin-bottom:var(--space-5)" });
 
     var overview = el("div", { class: "card" }, [el("div", { class: "card__label", text: "Overview" })]);
     if (meta.summary) {
