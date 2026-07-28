@@ -997,7 +997,7 @@ _VISION_PROMPT_PATH = (
 )
 VISION_RESULT_START = "<<<VISION_JSON>>>"
 VISION_RESULT_END = "<<<END_VISION_JSON>>>"
-VISION_PROMPT_VERSION = "1"  # bump to invalidate cached vision results when the prompt changes
+VISION_PROMPT_VERSION = "2"  # bump to invalidate cached vision results when the prompt changes
 VISION_NOTATION_VALUES = {"printed_original", "handwritten", "mixed_or_uncertain"}
 VISION_LEGIBILITY_VALUES = {"good", "fair", "poor"}
 
