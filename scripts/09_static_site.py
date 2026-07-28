@@ -651,7 +651,7 @@ def build_phases(
             "summary": _phase_summary(n_docs, "documents", "Scan quality scored; legibility issues flagged.", t_extract),
             "stats": [
                 {"label": "Good", "value": quality.get("good") or 0},
-                {"label": "Review", "value": quality.get("review") or 0},
+                {"label": "Fair", "value": quality.get("fair") or 0},
                 {"label": "Poor", "value": quality.get("poor") or 0},
             ],
             "charts": [
@@ -659,7 +659,7 @@ def build_phases(
                     "title": "Quality bands",
                     "rows": [
                         {"label": "Good", "value": quality.get("good") or 0, "variant": "success"},
-                        {"label": "Review", "value": quality.get("review") or 0, "variant": "warning"},
+                        {"label": "Fair", "value": quality.get("fair") or 0, "variant": "warning"},
                         {"label": "Poor", "value": quality.get("poor") or 0, "variant": "error"},
                     ],
                 }
@@ -893,6 +893,13 @@ def main(
     ),
     mode: str = typer.Option(
         "full", help="Accepted for pipeline uniformity; the site data is always fully rebuilt"
+    ),
+    only_piece: int = typer.Option(
+        None,
+        help=(
+            "Accepted for pipeline uniformity; the site data always covers every piece report on "
+            "disk (the targeted piece is already updated by Script 06)."
+        ),
     ),
     log_level: str = typer.Option("INFO", help="DEBUG, INFO, WARNING, ERROR"),
 ) -> None:

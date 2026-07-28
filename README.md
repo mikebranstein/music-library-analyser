@@ -71,7 +71,7 @@ Primary outputs:
 - Emit `data/expected_parts.jsonl` (schema 2.1) and a summary report (`data/expected_parts_report.md`). The per-piece instrumentation report is split by default (`--split-instrumentation`) into one file per piece under `data/expected_instrumentation/`, written as each piece finishes, with `data/expected_instrumentation.md` as a linking index; `--no-split-instrumentation` writes a single combined file. `--mode incremental` caches per-piece results by fingerprint to avoid re-spending AI credits or re-OCR
 
 5. `05_quality_checks.py`
-- Score per-document scan quality (0-100) into a `quality_band` (`good` / `review` / `poor`, plus `unknown` when a document has no scoreable pages) by thresholding the objective per-page metrics Script 02 already computed (resolution, skew, contrast, blur, OCR confidence, blankness/noise) — pages are never re-rendered, and a missing (null) metric never raises an issue
+- Score per-document scan quality (0-100) into a `quality_band` (`good` / `fair` / `poor`, plus `unknown` when a document has no scoreable pages) by thresholding the objective per-page metrics Script 02 already computed (resolution, skew, contrast, blur, OCR confidence, blankness/noise) — pages are never re-rendered, and a missing (null) metric never raises an issue
 - Detect per-page issues (`low_resolution`, `excessive_skew`, `low_contrast`, `heavy_blur`, `ocr_illegible`, `blank_page`, `noise_page`), roll them into a document score weighted by affected-page fraction, and record `top_issues`, `worst_page`, and `needs_review`
 - Classify notation source (`printed_original`, `handwritten`, `mixed_or_uncertain`) with a 0-1 confidence and evidence from searchable-text fraction, OCR confidence, and alphanumeric ratio
 - Adjudicate the optional Script 02 vision signal (`--use-vision`, default on when the fields are present): a confident vision verdict overrides `notation_source_type` and caps `quality_band` (handwritten is never `good`; poor legibility is forced to `poor`), because deterministic metrics cannot separate handwritten manuscript from a readable printed photocopy. Adds `handwritten_notation` / `low_legibility` issue codes and echoes `vision_*` fields onto the record
@@ -212,7 +212,7 @@ All inferred expected parts should preserve:
 Each document record (`data/quality_metrics.jsonl`, schema 1.1) includes:
 
 - `quality_score` (0-100 float, or `null` when no pages were scoreable)
-- `quality_band` (`good`, `review`, `poor`, or `unknown`)
+- `quality_band` (`good`, `fair`, `poor`, or `unknown`)
 - `needs_review`, `page_issue_count`, `issue_summary`, `top_issues`, `worst_page`,
   `page_findings`
 - `notation_source_type` (`printed_original`, `handwritten`, `mixed_or_uncertain`)

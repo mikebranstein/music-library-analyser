@@ -576,6 +576,13 @@ def main(
         "full",
         help="Accepted for pipeline uniformity; the collection aggregate is always fully recomputed",
     ),
+    only_piece: int = typer.Option(
+        None,
+        help=(
+            "Accepted for pipeline uniformity; the collection aggregate always covers every piece "
+            "report on disk (the targeted piece is already updated by Script 06)."
+        ),
+    ),
     log_level: str = typer.Option("INFO", help="DEBUG, INFO, WARNING, ERROR"),
 ) -> None:
     """Aggregate the per-piece reports into a collection summary (Markdown + JSON + CSV)."""

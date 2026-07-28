@@ -167,6 +167,54 @@ def file_fingerprint(rel_path: str, size: int, mtime: float) -> str:
     return sha256_text(basis)
 
 
+# --- Targeted single-piece reprocessing (`--only-piece`) -------------------------------------
+# The pipeline groups PDFs into pieces by their top-level library folder (Script 01), whose name
+# conventionally starts with the catalogue number (e.g. "368 Czardas"). The `--only-piece <int>`
+# flag lets an operator force-recompute exactly one piece by that catalogue number while every
+# other piece's prior records are preserved verbatim. These helpers give every script one shared,
+# tested definition of "which piece does this record belong to" and "what should I do with it".
+
+_CATALOG_PREFIX_RE = re.compile(r"\s*0*(\d{1,5})")
+
+
+def catalog_int(value: str | int | None) -> int | None:
+    """Return the leading catalogue number from a piece folder name or catalogue string.
+
+    ``"368 Czardas" -> 368``, ``"368" -> 368``, ``"007 Bond" -> 7``, ``"Untitled" -> None``.
+    Accepts an ``int`` (returned as-is) so callers can pass either a ``piece_folder`` or a parsed
+    ``catalog_number`` field interchangeably.
+    """
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    match = _CATALOG_PREFIX_RE.match(str(value))
+    return int(match.group(1)) if match else None
+
+
+def only_piece_decision(
+    piece_key: str | int | None,
+    only_piece: int | None,
+    has_prior: bool,
+) -> str:
+    """Decide how a record should be handled under ``--only-piece`` scoping.
+
+    Returns one of:
+
+    - ``"normal"``  -- no scoping is active (or an untouched piece has no prior record); the
+      script's usual full/incremental logic applies.
+    - ``"process"`` -- this record belongs to the targeted catalogue number; force a recompute
+      (bypass fingerprint reuse) so the operator always gets fresh results for the piece.
+    - ``"reuse"``   -- this record belongs to a different piece that already has a prior record;
+      preserve that prior record verbatim so scoping never drops or re-spends work on other pieces.
+    """
+    if only_piece is None:
+        return "normal"
+    if catalog_int(piece_key) == only_piece:
+        return "process"
+    return "reuse" if has_prior else "normal"
+
+
 def _atomic_replace(tmp_path: Path, path: Path) -> None:
     """Replace ``path`` with ``tmp_path``, retrying transient Windows lock errors.
 

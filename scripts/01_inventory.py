@@ -21,6 +21,7 @@ from scripts._common import (
     load_checkpoint,
     make_checkpoint_path,
     normalize_rel_path,
+    only_piece_decision,
     read_jsonl,
     setup_logging,
     sha256_text,
@@ -304,6 +305,13 @@ def main(
     library_root: Path = typer.Option(..., exists=True, file_okay=False, dir_okay=True),
     output: Path = typer.Option(Path("data/raw_inventory.jsonl")),
     mode: str = typer.Option("full", help="Processing mode: full or incremental"),
+    only_piece: int = typer.Option(
+        None,
+        help=(
+            "Catalogue number of a single piece to force-recompute; every other piece's prior "
+            "record is preserved verbatim."
+        ),
+    ),
     log_level: str = typer.Option("INFO", help="DEBUG, INFO, WARNING, ERROR"),
 ) -> None:
     """Discover PDFs and write an inventory JSONL with metadata and health flags."""
@@ -382,7 +390,15 @@ def main(
             continue
 
         prior_record = previous_records_map.get(entry.rel_path)
-        if mode == "incremental" and should_reuse_record(prior_record, current_fingerprint):
+        decision = only_piece_decision(entry.piece_folder, only_piece, prior_record is not None)
+        if decision == "reuse":
+            rebuilt_records.append(prior_record)
+            reused_count += 1
+            _flush_progress()
+            continue
+        if decision != "process" and (
+            mode == "incremental" and should_reuse_record(prior_record, current_fingerprint)
+        ):
             rebuilt_records.append(prior_record)
             reused_count += 1
             _flush_progress()

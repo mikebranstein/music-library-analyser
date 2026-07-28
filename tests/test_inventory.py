@@ -195,3 +195,46 @@ def test_inventory_resumes_from_partial_output(tmp_path: Path) -> None:
         "Piece B/Oboe 1.pdf",
     }
 
+
+def test_only_piece_recomputes_target_and_preserves_others(tmp_path: Path) -> None:
+    """--only-piece force-recomputes the targeted catalogue and leaves other pieces untouched."""
+    inventory = load_inventory_module()
+
+    library_root = tmp_path / "library"
+    make_one_page_pdf(library_root / "368 Czardas" / "Solo Clarinet.pdf")
+    make_one_page_pdf(library_root / "500 Waltz" / "Flute 1.pdf")
+
+    output_path = tmp_path / "data" / "raw_inventory.jsonl"
+    first = runner.invoke(
+        inventory.app,
+        ["--library-root", str(library_root), "--output", str(output_path), "--mode", "full"],
+    )
+    assert first.exit_code == 0, first.stdout
+
+    # Tag every prior record with a sentinel so we can tell reuse (kept) from recompute (dropped).
+    records = read_jsonl(output_path)
+    for rec in records:
+        rec["_sentinel"] = True
+    inventory.atomic_write_jsonl(output_path, records)
+
+    scoped = runner.invoke(
+        inventory.app,
+        [
+            "--library-root",
+            str(library_root),
+            "--output",
+            str(output_path),
+            "--mode",
+            "full",
+            "--only-piece",
+            "368",
+        ],
+    )
+    assert scoped.exit_code == 0, scoped.stdout
+
+    by_path = {r["pdf_path"]: r for r in read_jsonl(output_path)}
+    # The targeted piece was recomputed from scratch, so the sentinel is gone.
+    assert "_sentinel" not in by_path["368 Czardas/Solo Clarinet.pdf"]
+    # The untouched piece was preserved verbatim, sentinel and all.
+    assert by_path["500 Waltz/Flute 1.pdf"].get("_sentinel") is True
+

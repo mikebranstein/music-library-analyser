@@ -83,6 +83,7 @@ from scripts._common import (
     make_checkpoint_path,
     md_cell,
     new_record_envelope,
+    only_piece_decision,
     pct,
     piece_sort_key,
     read_jsonl,
@@ -2116,6 +2117,13 @@ def main(
         200, help="Max rows in the per-piece detail table of the report"
     ),
     mode: str = typer.Option("full", help="Processing mode: full or incremental"),
+    only_piece: int = typer.Option(
+        None,
+        help=(
+            "Catalogue number of a single piece to force-recompute (re-runs its lookup/OCR); "
+            "every other piece's prior record is preserved verbatim."
+        ),
+    ),
     lookup_enabled: bool = typer.Option(
         True, "--lookup/--no-lookup", help="Enable online score lookup (Stage B)"
     ),
@@ -2384,12 +2392,18 @@ def main(
         catalog = piece.get("catalog_number") or "?"
 
         prior = previous_records.get(piece_id)
-        if (
+        decision = only_piece_decision(
+            piece.get("catalog_number") or piece.get("piece_folder"),
+            only_piece,
+            prior is not None,
+        )
+        normal_reuse = (
             mode == "incremental"
             and prior is not None
             and prior.get("record_version") == RECORD_VERSION
             and prior_fingerprints.get(piece_id) == fingerprint
-        ):
+        )
+        if decision == "reuse" or (decision == "normal" and normal_reuse):
             rebuilt.append(prior)
             reused += 1
             persisted_fingerprints[piece_id] = fingerprint

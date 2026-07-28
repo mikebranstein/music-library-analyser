@@ -451,6 +451,13 @@ def main(
         "full",
         help="Accepted for pipeline uniformity; the review pack is always fully recomputed",
     ),
+    only_piece: int = typer.Option(
+        None,
+        help=(
+            "Accepted for pipeline uniformity; the review pack always covers every piece report "
+            "on disk (the targeted piece is already updated by Script 06)."
+        ),
+    ),
     log_level: str = typer.Option("INFO", help="DEBUG, INFO, WARNING, ERROR"),
 ) -> None:
     """Build the prioritized manual-review pack (Markdown + JSON + CSV) from the per-piece reports."""

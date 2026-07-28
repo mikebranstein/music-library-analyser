@@ -38,6 +38,7 @@ from scripts._common import (
     make_checkpoint_path,
     md_cell,
     new_record_envelope,
+    only_piece_decision,
     pct,
     read_jsonl,
     run_with_progress,
@@ -857,6 +858,13 @@ def main(
         200, help="Max rows in the per-document detail table of the report"
     ),
     mode: str = typer.Option("full", help="Processing mode: full or incremental"),
+    only_piece: int = typer.Option(
+        None,
+        help=(
+            "Catalogue number of a single piece to force-recompute; every other piece's prior "
+            "quality record is preserved verbatim."
+        ),
+    ),
     use_vision: bool = typer.Option(
         True, "--use-vision/--no-vision",
         help="Honor the Script 02 vision signal (vision_* fields on documents.jsonl): override "
@@ -935,12 +943,15 @@ def main(
         fingerprints[pdf_path] = fingerprint
 
         prior = previous_records.get(pdf_path)
-        if (
+        piece_key = (doc_meta_by_pdf.get(pdf_path) or {}).get("piece_folder")
+        decision = only_piece_decision(piece_key, only_piece, prior is not None)
+        normal_reuse = (
             mode == "incremental"
             and prior is not None
             and prior.get("record_version") == RECORD_VERSION
             and prior_fingerprints.get(pdf_path) == fingerprint
-        ):
+        )
+        if decision == "reuse" or (decision == "normal" and normal_reuse):
             rebuilt.append(prior)
             reused += 1
             logger.info("[%d/%d] Reusing cached quality record: %s", seen, total_docs, pdf_path)

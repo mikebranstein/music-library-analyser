@@ -38,6 +38,7 @@ from scripts._common import (
     make_checkpoint_path,
     md_cell,
     new_record_envelope,
+    only_piece_decision,
     piece_sort_key,
     read_jsonl,
     run_with_progress,
@@ -703,6 +704,13 @@ def main(
         True, "--thumbnails/--no-thumbnails", help="Include page-1 thumbnail links per document"
     ),
     mode: str = typer.Option("full", help="Processing mode: full or incremental"),
+    only_piece: int = typer.Option(
+        None,
+        help=(
+            "Catalogue number of a single piece to force-recompute; every other piece's prior "
+            "report is preserved verbatim."
+        ),
+    ),
     concurrency: int = typer.Option(
         1, "--concurrency", "-j",
         help="Pieces to render in parallel (report rendering is CPU-light)",
@@ -754,7 +762,11 @@ def main(
     prior_fingerprints = checkpoint.get("fingerprints", {}) if mode == "incremental" else {}
     previous_records = {
         rec["piece_id"]: rec
-        for rec in (_read_json_dir(output_dir) if mode == "incremental" else [])
+        for rec in (
+            _read_json_dir(output_dir)
+            if (mode == "incremental" or only_piece is not None)
+            else []
+        )
         if rec.get("piece_id")
     }
 
@@ -808,12 +820,20 @@ def main(
         fingerprints[piece_id] = fingerprint
 
         prior = previous_records.get(piece_id)
-        if (
+        obs = observed_by_piece.get(piece_id) or {}
+        exp = expected_by_piece.get(piece_id) or {}
+        piece_key = (
+            obs.get("catalog_number") or obs.get("piece_folder")
+            or exp.get("catalog_number") or exp.get("piece_folder")
+        )
+        decision = only_piece_decision(piece_key, only_piece, prior is not None)
+        normal_reuse = (
             mode == "incremental"
             and prior is not None
             and prior.get("record_version") == RECORD_VERSION
             and prior_fingerprints.get(piece_id) == fingerprint
-        ):
+        )
+        if decision == "reuse" or (decision == "normal" and normal_reuse):
             _persist(piece_id, prior)
             reused += 1
             logger.info("[%d/%d] Reusing cached report: %s", seen, total, piece_id)

@@ -36,6 +36,7 @@ from scripts._common import (
     load_checkpoint,
     make_checkpoint_path,
     md_cell,
+    only_piece_decision,
     pct,
     read_jsonl,
     setup_logging,
@@ -1482,6 +1483,13 @@ def main(
         200, help="Max rows in the per-document detail table of the report"
     ),
     mode: str = typer.Option("full", help="Processing mode: full or incremental"),
+    only_piece: int = typer.Option(
+        None,
+        help=(
+            "Catalogue number of a single piece to force-recompute; every other piece's prior "
+            "prediction records are preserved verbatim."
+        ),
+    ),
     use_llm: bool = typer.Option(
         False, "--use-llm/--no-llm", help="Enable the (unwired) LLM fallback hook"
     ),
@@ -1544,7 +1552,14 @@ def main(
 
         current_fingerprint = inv.get("file_fingerprint")
         prior = previous_records_map.get(pdf_path)
-        if mode == "incremental" and should_reuse_record(prior, current_fingerprint):
+        decision = only_piece_decision(inv.get("piece_folder"), only_piece, prior is not None)
+        if decision == "reuse":
+            rebuilt.append(prior)
+            reused_count += 1
+            continue
+        if decision != "process" and (
+            mode == "incremental" and should_reuse_record(prior, current_fingerprint)
+        ):
             rebuilt.append(prior)
             reused_count += 1
             continue

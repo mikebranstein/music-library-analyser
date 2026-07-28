@@ -64,6 +64,7 @@ from scripts._common import (
     load_instrument_taxonomy,
     make_checkpoint_path,
     normalize_rel_path,
+    only_piece_decision,
     pct,
     read_json,
     read_jsonl,
@@ -2167,6 +2168,13 @@ def main(
     ),
     cache_dir: Path = typer.Option(Path("cache"), help="Base cache directory"),
     mode: str = typer.Option("full", help="Processing mode: full or incremental"),
+    only_piece: int = typer.Option(
+        None,
+        help=(
+            "Catalogue number of a single piece to force-recompute; every other piece's prior "
+            "records (text/pages/documents) are preserved verbatim."
+        ),
+    ),
     render_dpi: int = typer.Option(150, help="Thumbnail render DPI"),
     enable_rendering: bool = typer.Option(
         True, "--enable-rendering/--no-rendering", help="Toggle page rendering + features"
@@ -2372,7 +2380,7 @@ def main(
     prior_text_by_path: dict[str, list[dict[str, Any]]] = {}
     prior_pages_by_path: dict[str, list[dict[str, Any]]] = {}
     prior_documents_by_path: dict[str, dict[str, Any]] = {}
-    if mode == "incremental":
+    if mode == "incremental" or only_piece is not None:
         for rec in read_jsonl(output_text):
             prior_text_by_path.setdefault(rec.get("pdf_path", ""), []).append(rec)
         for rec in read_jsonl(output_pages):
@@ -2475,12 +2483,19 @@ def main(
 
         label = f"[{idx}/{total_items}] {item.pdf_path}"
 
-        if (
-            mode == "incremental"
-            and item.file_fingerprint
-            and prior_fingerprints.get(item.pdf_path) == item.file_fingerprint
-            and item.pdf_path in prior_text_by_path
-        ):
+        decision = only_piece_decision(
+            item.piece_folder, only_piece, item.pdf_path in prior_text_by_path
+        )
+        reuse_ok = item.pdf_path in prior_text_by_path and (
+            decision == "reuse"
+            or (
+                decision == "normal"
+                and mode == "incremental"
+                and item.file_fingerprint
+                and prior_fingerprints.get(item.pdf_path) == item.file_fingerprint
+            )
+        )
+        if reuse_ok:
             text_records.extend(prior_text_by_path[item.pdf_path])
             page_records.extend(prior_pages_by_path.get(item.pdf_path, []))
             if item.pdf_path in prior_documents_by_path:
