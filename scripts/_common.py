@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
@@ -174,6 +175,34 @@ def file_fingerprint(rel_path: str, size: int, mtime: float) -> str:
     return sha256_text(basis)
 
 
+def _atomic_replace(tmp_path: Path, path: Path) -> None:
+    """Replace ``path`` with ``tmp_path``, retrying transient Windows lock errors.
+
+    On Windows ``os.replace`` can raise ``PermissionError`` (WinError 5) or an
+    ``OSError`` (WinError 32) when the destination is momentarily held open by
+    another process (antivirus, the Windows Search indexer, or a file-sync client
+    such as OneDrive). These locks are typically released within milliseconds, so
+    we retry a few times with a short backoff before giving up.
+    """
+    delays = (0.1, 0.25, 0.5, 1.0, 2.0)
+    for attempt, delay in enumerate(delays):
+        try:
+            os.replace(tmp_path, path)
+            return
+        except PermissionError:
+            logging.warning(
+                "Atomic replace of %s blocked (attempt %d/%d); retrying in %.2fs. "
+                "Close any program holding the file open (editor, antivirus, file sync).",
+                path,
+                attempt + 1,
+                len(delays) + 1,
+                delay,
+            )
+            time.sleep(delay)
+    # Final attempt: let the exception propagate if it still fails.
+    os.replace(tmp_path, path)
+
+
 def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
@@ -181,7 +210,7 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
         with tmp_path.open("w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
             f.write("\n")
-        os.replace(tmp_path, path)
+        _atomic_replace(tmp_path, path)
     except Exception:
         if tmp_path.exists():
             try:
@@ -198,7 +227,7 @@ def atomic_write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
         with tmp_path.open("w", encoding="utf-8", newline="\n") as f:
             for record in records:
                 f.write(json.dumps(record, ensure_ascii=True) + "\n")
-        os.replace(tmp_path, path)
+        _atomic_replace(tmp_path, path)
     except Exception:
         if tmp_path.exists():
             try:
@@ -214,7 +243,7 @@ def atomic_write_text(path: Path, text: str) -> None:
     try:
         with tmp_path.open("w", encoding="utf-8", newline="\n") as f:
             f.write(text)
-        os.replace(tmp_path, path)
+        _atomic_replace(tmp_path, path)
     except Exception:
         if tmp_path.exists():
             try:
