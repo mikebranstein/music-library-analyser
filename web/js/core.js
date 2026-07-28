@@ -124,7 +124,23 @@
         "never raises an issue from a missing (null) metric &mdash; absence of a measurement is not evidence of a defect.</p>" +
         "<p><strong>The problem it solves.</strong> It separates &ldquo;we could not read this well&rdquo; from &ldquo;a part " +
         "is actually missing.&rdquo; Quality, legibility, and handwriting are informational (good / fair / poor, plus a " +
-        "handwritten flag): they help a librarian judge a scan, but they never on their own mark a piece incomplete.</p>",
+        "handwritten flag): they help a librarian judge a scan, but they never on their own mark a piece incomplete.</p>" +
+        "<p><strong>What the bands mean.</strong> Every document earns a 0&ndash;100 quality score from its per-page " +
+        "measurements (resolution, skew, contrast, blur, OCR confidence, blankness/noise); the score maps to one band:</p>" +
+        "<ul>" +
+        "<li><strong>Good &mdash; score 80&ndash;100.</strong> <em>Technically:</em> pages clear the strict thresholds on " +
+        "every metric &mdash; high resolution, near-zero skew, strong contrast, low blur, confident OCR. <em>In plain terms:</em> " +
+        "a clean, sharp scan you can read and play from as-is; no attention needed.</li>" +
+        "<li><strong>Fair &mdash; score 50&ndash;79.</strong> <em>Technically:</em> one or more metrics fall into the middle " +
+        "range &mdash; some blur, a slight tilt, softer contrast, marginal resolution, or a little page noise &mdash; without " +
+        "any single metric failing outright. <em>In plain terms:</em> readable but visibly imperfect; usable in a pinch, worth " +
+        "re-scanning when convenient.</li>" +
+        "<li><strong>Poor &mdash; score below 50.</strong> <em>Technically:</em> at least one metric fails badly (heavy blur, " +
+        "strong skew, faint/low contrast, illegible OCR) or several are weak at once. <em>In plain terms:</em> hard to read; " +
+        "re-scan or replace the source before relying on it.</li>" +
+        "</ul>" +
+        "<p>A document with no scoreable pages (e.g. all blank) is marked <strong>unknown</strong> rather than judged, and " +
+        "handwriting is recorded as a separate flag &mdash; a neat hand-copied part can still be &ldquo;good&rdquo;.</p>",
     },
     {
       n: 6, slug: "phase-06-pieces", title: "Piece Reports",
