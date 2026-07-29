@@ -216,6 +216,76 @@ def test_combined_chairs_tolerates_ocr_ist_corruption():
     assert classifier.combined_chairs(ocr, "oboe", compiled) == [1, 2]
 
 
+def test_combined_chairs_expands_numeric_range():
+    # A hyphen between two chair numbers is an INCLUSIVE range, not a list separator: "2-3" is a
+    # joint 2nd/3rd part (MacArthur Park's "2nd & 3rd Flutes"), and "1-4" spans all four chairs.
+    _, compiled = _lexicon_and_compiled()
+    assert classifier.combined_chairs(
+        classifier.normalize("Flute 2 - 3"), "flute", compiled
+    ) == [2, 3]
+    assert classifier.combined_chairs(
+        classifier.normalize("Cornet 1-2"), "cornet", compiled
+    ) == [1, 2]
+    assert classifier.combined_chairs(
+        classifier.normalize("Horns 1-4"), "horn", compiled
+    ) == [1, 2, 3, 4]
+    # Range words behave like the dash; list separators keep only the listed chairs.
+    assert classifier.combined_chairs(
+        classifier.normalize("Flute 2 to 4"), "flute", compiled
+    ) == [2, 3, 4]
+    assert classifier.combined_chairs(
+        classifier.normalize("Flute 1, 2"), "flute", compiled
+    ) == [1, 2]
+
+
+def test_normalize_preserves_only_numeric_range_hyphen():
+    # The chair-range hyphen survives normalization; every other dash still collapses to a space so
+    # word separators and hyphenated instrument names are unaffected.
+    assert classifier.normalize("Flute 2 - 3") == "flute 2-3"
+    assert classifier.normalize("Cornet 1-2") == "cornet 1-2"
+    assert classifier.normalize("Contra-Bass Clarinet") == "contra bass clarinet"
+    assert classifier.normalize("Basses - Tuba") == "basses tuba"
+
+
+def test_build_instrument_facets_expands_single_instrument_range():
+    lexicon, compiled = _lexicon_and_compiled()
+    section_map = classifier.build_section_map(lexicon)
+    facets, _ = classifier.build_instrument_facets(
+        classifier.normalize("Flute 2 - 3"), compiled, section_map, lexicon
+    )
+    assert [(f["canonical"], f["part_index"]) for f in facets] == [
+        ("flute", 2),
+        ("flute", 3),
+    ]
+
+
+def test_build_instrument_facets_expands_listed_chairs():
+    lexicon, compiled = _lexicon_and_compiled()
+    section_map = classifier.build_section_map(lexicon)
+    facets, _ = classifier.build_instrument_facets(
+        classifier.normalize("Flute 1, 2"), compiled, section_map, lexicon
+    )
+    assert [(f["canonical"], f["part_index"]) for f in facets] == [
+        ("flute", 1),
+        ("flute", 2),
+    ]
+
+
+def test_build_instrument_facets_no_spurious_chairs_for_hyphenated_names():
+    # A hyphen inside an instrument name or between two named instruments must never be read as a
+    # chair range.
+    lexicon, compiled = _lexicon_and_compiled()
+    section_map = classifier.build_section_map(lexicon)
+    for label in ("Contra-Bass Clarinet", "Basses - Tuba"):
+        facets, _ = classifier.build_instrument_facets(
+            classifier.normalize(label), compiled, section_map, lexicon
+        )
+        assert all(f["part_index"] in (None, 1) for f in facets), label
+        # No range expansion: at most one facet per named instrument, never a 2-3 style pair.
+        indices = [f["part_index"] for f in facets]
+        assert indices == list(dict.fromkeys(indices)), label
+
+
 def test_classify_recovers_combined_chairs_from_ocr():
     # Filename says only the plural "Oboes" (no chair number), but the scanned page's OCR prints
     # "1st & 2nd Oboes" -- the part must expand into both chairs so Script 04 covers each slot.

@@ -219,6 +219,32 @@ def test_build_cli_args_allow_specific_urls_and_model():
     assert "--model" in args and args[args.index("--model") + 1] == "gpt-x"
 
 
+def test_resolve_cli_command_prefers_real_binary_over_batch_shim(monkeypatch):
+    # On Windows shutil.which resolves `copilot` to a .bat shim run through cmd.exe, whose ~8191-char
+    # command-line limit truncates large prompts ("The command line is too long"). The resolver must
+    # re-resolve past the shim's directory to the real executable (CreateProcess allows ~32767).
+    shim = r"C:\shim\copilot.BAT"
+    real = r"C:\real\copilot.EXE"
+
+    def fake_which(name, path=None):
+        if path is None:
+            return shim  # default PATH resolution finds the batch shim first
+        # With the shim directory removed from PATH, the real binary is found.
+        return real if r"C:\shim" not in path else shim
+
+    monkeypatch.setattr(expected.shutil, "which", fake_which)
+    monkeypatch.setenv("PATH", r"C:\shim;C:\real")
+    assert expected._resolve_cli_command("copilot") == real
+
+
+def test_resolve_cli_command_passes_through_non_shim(monkeypatch):
+    # A directly-resolved executable (or a missing binary) is returned unchanged.
+    monkeypatch.setattr(expected.shutil, "which", lambda name, path=None: r"C:\bin\copilot.exe")
+    assert expected._resolve_cli_command("copilot") == r"C:\bin\copilot.exe"
+    monkeypatch.setattr(expected.shutil, "which", lambda name, path=None: None)
+    assert expected._resolve_cli_command("copilot") == "copilot"
+
+
 # --- Response parsing ------------------------------------------------------------------------
 
 
@@ -598,6 +624,48 @@ def test_reconcile_clef_editions_no_completeness_inflation():
     present = {(e["canonical_instrument"], e["part_index"]): e["present"] for e in expected_parts}
     assert present[("euphonium", 1)] is True
     assert present[("euphonium", 2)] is False
+    assert unexpected == []
+
+
+def test_collapse_clef_editions_unmerges_when_demand_exceeds_copies():
+    # Two co-equal null-index slots (e.g. Baritone B.C. and Baritone T.C. in MacArthur Park) print
+    # as two clef editions of the SAME facet set. With demand 2 they must stay as two instances so
+    # each fills its own slot instead of collapsing into one and reporting the other missing.
+    observed = [
+        {**_observed("baritone_horn", None), "clef": "bass"},
+        {**_observed("baritone_horn", None), "clef": "treble"},
+    ]
+    key = expected._facet_set_key(observed[0])
+    collapsed = expected.collapse_clef_editions(observed, {key: 2})
+    assert len(collapsed) == 2
+    assert sorted(c["observed_clefs"][0] for c in collapsed) == ["BC", "TC"]
+
+
+def test_collapse_clef_editions_still_merges_at_unit_demand():
+    # A single expected slot means the BC/TC pair is genuinely one part in two editions -> merge.
+    observed = [
+        {**_observed("baritone_horn", None), "clef": "bass"},
+        {**_observed("baritone_horn", None), "clef": "treble"},
+    ]
+    key = expected._facet_set_key(observed[0])
+    collapsed = expected.collapse_clef_editions(observed, {key: 1})
+    assert len(collapsed) == 1
+    assert collapsed[0]["observed_clefs"] == ["BC", "TC"]
+
+
+def test_reconcile_two_baritone_slots_filled_by_bc_and_tc_editions():
+    # Regression (MacArthur Park): the score lists two co-equal baritone parts (B.C. and T.C.). Both
+    # observed clef editions are present, so BOTH slots must be marked present -- neither missing.
+    slots = [
+        {"canonical": "baritone_horn", "part_index": None, "label": "Baritone B.C.", "required": True},
+        {"canonical": "baritone_horn", "part_index": None, "label": "Baritone T.C.", "required": True},
+    ]
+    observed = [
+        {**_observed("baritone_horn", None), "clef": "bass"},
+        {**_observed("baritone_horn", None), "clef": "treble"},
+    ]
+    expected_parts, unexpected = expected.reconcile_parts(slots, observed)
+    assert all(e["present"] for e in expected_parts)
     assert unexpected == []
 
 

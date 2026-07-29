@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -382,9 +383,35 @@ def render_prompt(template: str, query: dict[str, str]) -> str:
 # --- Copilot CLI invocation ------------------------------------------------------------------
 
 
+def _resolve_cli_command(configured: str) -> str:
+    """Resolve the copilot executable, preferring the real binary over a cmd.exe batch shim.
+
+    On Windows ``shutil.which('copilot')`` resolves to a ``.bat`` shim whose directory sits early on
+    ``PATH``. Launching a ``.bat`` runs it through ``cmd.exe``, whose command line is capped at
+    ~8191 characters, so a large prompt (with embedded score/OCR text) fails outright with
+    "The command line is too long". Re-resolving with the shim's own directory removed from ``PATH``
+    finds the real executable -- exactly what the shim's bootstrapper does internally -- which is
+    then launched directly via ``CreateProcess`` (limit ~32767) and comfortably fits these prompts.
+    Falls back to the shim (or the configured name) when no alternative is found, so behaviour is
+    unchanged wherever the batch limit is not a problem.
+    """
+    resolved = shutil.which(configured)
+    if not resolved:
+        return configured
+    if not resolved.lower().endswith((".bat", ".cmd")):
+        return resolved
+    shim_dir = os.path.normcase(os.path.dirname(resolved).rstrip("\\/"))
+    remaining = [
+        d
+        for d in os.environ.get("PATH", "").split(os.pathsep)
+        if d and os.path.normcase(d.rstrip("\\/")) != shim_dir
+    ]
+    return shutil.which(configured, path=os.pathsep.join(remaining)) or resolved
+
+
 def build_cli_args(config: dict[str, Any], prompt: str) -> list[str]:
     """Build the ``copilot`` argument vector for a headless lookup."""
-    command = shutil.which(config.get("command", "copilot")) or config.get("command", "copilot")
+    command = _resolve_cli_command(config.get("command", "copilot"))
     args = [
         command,
         "-p", prompt,
@@ -1285,6 +1312,7 @@ def _facet_set_key(obs: dict[str, Any]) -> tuple[tuple[Any, Any], ...]:
 
 def collapse_clef_editions(
     observed_parts: list[dict[str, Any]],
+    slot_demand: dict[tuple[tuple[Any, Any], ...], int] | None = None,
 ) -> list[dict[str, Any]]:
     """Merge observed parts that are the same musical part in different clef editions.
 
@@ -1302,6 +1330,12 @@ def collapse_clef_editions(
     same clef appears more than once in a group (genuinely separate copies, not editions) the extra
     copies are kept as separate observed instances so they still consume their own slots. Insertion
     order is preserved for deterministic downstream matching.
+
+    ``slot_demand`` maps a facet-set key to how many expected slots share that exact
+    ``(canonical, part_index)`` identity. When the score enumerates more co-equal slots for a part
+    than we hold same-clef copies, the clef editions are *not* merged: each is a distinct physical
+    part able to fill its own slot (e.g. a Baritone printed in both B.C. and T.C. against two
+    separate baritone chairs). Absent (or unit) demand, the historical merge behaviour is unchanged.
     """
     groups: dict[tuple[tuple[Any, Any], ...], list[dict[str, Any]]] = {}
     order: list[tuple[tuple[Any, Any], ...]] = []
@@ -1325,6 +1359,19 @@ def collapse_clef_editions(
             by_clef[clef].append(entry)
 
         instances = max(len(bucket) for bucket in by_clef.values())
+        demand = slot_demand.get(key, 1) if slot_demand else 1
+        if instances < demand and len(entries) > instances:
+            # The score lists more co-equal slots for this exact part than we have same-clef copies,
+            # yet we hold multiple clef editions. Each edition is its own physical part able to fill
+            # a distinct slot, so surface them individually (up to demand) rather than merging.
+            for entry in entries[:demand]:
+                clef = entry.get("clef")
+                display = _CLEF_DISPLAY.get(clef, clef) if clef else None
+                merged = dict(entry)
+                merged["count"] = int(entry.get("count", 1) or 1)
+                merged["observed_clefs"] = [display] if display else []
+                collapsed.append(merged)
+            continue
         for i in range(instances):
             base: dict[str, Any] | None = None
             total = 0
@@ -1407,10 +1454,28 @@ def reconcile_parts(
             alias_to_slot[alias] = slot_canonical
 
     expected_idx_by_instr: dict[str, list[int]] = defaultdict(list)
+    slots_by_key: dict[tuple[Any, Any], int] = defaultdict(int)
     for i, slot in enumerate(template_parts):
         expected_idx_by_instr[slot["canonical"]].append(i)
+        slots_by_key[(slot["canonical"], slot.get("part_index"))] += 1
 
-    collapsed = collapse_clef_editions(observed_parts)
+    # How many expected slots share a part's exact identity, so a clef-edition pair only stays split
+    # when the score genuinely enumerates that many co-equal chairs (keyed by observed facet set).
+    slot_demand: dict[tuple[tuple[Any, Any], ...], int] = {}
+    for obs in observed_parts:
+        fkey = _facet_set_key(obs)
+        if fkey in slot_demand:
+            continue
+        demand = 0
+        for facet in obs.get("instruments", []):
+            canon = facet.get("canonical")
+            if canon is None:
+                continue
+            target = alias_to_slot.get(canon, canon)
+            demand = max(demand, slots_by_key.get((target, facet.get("part_index")), 0))
+        slot_demand[fkey] = demand
+
+    collapsed = collapse_clef_editions(observed_parts, slot_demand)
     # Flatten every observed part into one instance per instrument facet, tagged with the owning
     # observed-part id so we can tell whether a part anchored at least one slot.
     instances_by_instr: dict[str, list[tuple[int, dict[str, Any]]]] = defaultdict(list)

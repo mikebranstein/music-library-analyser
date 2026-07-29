@@ -398,7 +398,13 @@ def parse_piece_identity(
 
 def normalize(text: str) -> str:
     lowered = (text or "").lower()
-    lowered = re.sub(r"[-_]", " ", lowered)
+    # Preserve a dash that joins two numbers (a chair range like "2-3" / "1 - 4") so the chair
+    # parser can expand it; every OTHER dash/underscore (word separators, "Basses - Tuba",
+    # "Contra-Bass") collapses to a space exactly as before. The range dash is parked on a private
+    # sentinel first so the blanket dash->space pass cannot clobber it, then restored tight.
+    lowered = re.sub(r"(?<=\d)\s*[-\u2012\u2013\u2014\u2015]\s*(?=\d)", "\x00", lowered)
+    lowered = re.sub(r"[-_\u2012\u2013\u2014\u2015]", " ", lowered)
+    lowered = lowered.replace("\x00", "-")
     lowered = re.sub(r"\s+", " ", lowered)
     return lowered.strip()
 
@@ -528,10 +534,13 @@ def build_instrument_facets(
 
     Returns ``(facets, primary_alternates)``. Each facet is
     ``{"canonical", "part_index", "family", "section"}``. A single-instrument label yields one
-    facet (identical to the old behavior). A combined label yields one facet per named instrument.
-    A sub-segment that carries only an index (e.g. the ``2`` in ``Horn 1 & 2``) extends the most
-    recent instrument as an additional chair. ``primary_alternates`` are the ambiguity alternates of
-    the first matched instrument (kept for the record's ``alternates`` field).
+    facet. A combined label (instruments joined by ``&``/``/``/``and``/``doubling`` etc.) yields one
+    facet per named instrument. A single instrument printed with a multi-chair label -- a list
+    ("Flute 1, 2"), an ``&`` run ("Horn 1 & 2"), or an inclusive range ("Flute 2-3", "Horns 1-4") --
+    is expanded into one facet per chair so downstream coverage can satisfy every numbered slot. A
+    sub-segment carrying only chair numbers (e.g. the ``2`` in ``Horn 1 & 2``) extends the most
+    recent instrument. ``primary_alternates`` are the ambiguity alternates of the first matched
+    instrument (kept for the record's ``alternates`` field).
     """
     sub_segments = [s for s in _COMBINED_SPLIT_RE.split(seg_norm) if s.strip()]
     if not sub_segments:
@@ -541,22 +550,11 @@ def build_instrument_facets(
     seen: set[tuple[str, int | None]] = set()
     primary_alternates: list[dict[str, Any]] = []
     last_canonical: str | None = None
-    for sub in sub_segments:
-        canonical, _alias, alternates = match_instrument(sub, compiled)
-        idx = extract_part_index(sub)
-        if canonical is None:
-            # A bare index extends the previous instrument (e.g. "Horn 1 & 2" -> horn 1, horn 2).
-            if idx is not None and last_canonical is not None:
-                canonical = last_canonical
-            else:
-                continue
-        else:
-            last_canonical = canonical
-            if not primary_alternates:
-                primary_alternates = alternates
+
+    def _add(canonical: str, idx: int | None) -> None:
         key = (canonical, idx)
         if key in seen:
-            continue
+            return
         seen.add(key)
         family = lexicon["families"].get(canonical, "other")
         facets.append({
@@ -565,6 +563,28 @@ def build_instrument_facets(
             "family": family,
             "section": section_for(canonical, family, section_map),
         })
+
+    for sub in sub_segments:
+        canonical, _alias, alternates = match_instrument(sub, compiled)
+        if canonical is None:
+            # A bare chair token/run extends the previous instrument ("Horn 1 & 2" -> the "2";
+            # "Flutes 1 & 2-3" -> the "2-3" tail).
+            chairs = _leading_or_trailing_chairs(sub)
+            if chairs and last_canonical is not None:
+                for chair in chairs:
+                    _add(last_canonical, chair)
+            continue
+        last_canonical = canonical
+        if not primary_alternates:
+            primary_alternates = alternates
+        # One instrument may print several chairs on a single part ("Flute 1, 2", "Flute 2-3").
+        # Detection is scoped to this instrument's own name so unrelated numbers are never captured.
+        chairs = combined_chairs(sub, canonical, compiled)
+        if len(chairs) >= 2:
+            for chair in chairs:
+                _add(canonical, chair)
+        else:
+            _add(canonical, extract_part_index(sub))
     return facets, primary_alternates
 
 
@@ -692,20 +712,56 @@ def extract_part_index(text_norm: str) -> int | None:
 # A single physical part frequently serves two chairs and prints a combined label -- numbers either
 # preceding the instrument ("1st & 2nd Oboes") or following it ("Oboe 1 & 2", "Cornet 1-2"). OCR
 # routinely misreads the leading "1" of "1st" as the letter "i"/"l" ("ist"/"lst"), so those spellings
-# are accepted as chair 1.
+# are accepted as chair 1. Connectors cover lists ("1, 2", "1 & 2") AND ranges ("1-4", "2 to 4").
 _ORD_TOKEN = r"(?:\d{1,2}(?:st|nd|rd|th)?|[il]st)"
-_CHAIR_RUN = rf"{_ORD_TOKEN}(?:\s*(?:&|\+|/|,|and|-)\s*{_ORD_TOKEN})*"
+_CHAIR_CONNECTOR = r"(?:&|\+|/|,|\band\b|\bthrough\b|\bthru\b|\bto\b|-)"
+_CHAIR_RUN = rf"{_ORD_TOKEN}(?:\s*{_CHAIR_CONNECTOR}\s*{_ORD_TOKEN})*"
 _CHAIRS_BEFORE_RE = re.compile(rf"({_CHAIR_RUN})\s*$")
 _CHAIRS_AFTER_RE = re.compile(rf"^\s*({_CHAIR_RUN})")
+# A connector that denotes an INCLUSIVE range ("2-4" -> 2,3,4) rather than a list ("2 & 4" -> 2,4).
+_RANGE_CONNECTOR_RE = re.compile(r"^(?:-|to|thru|through)$", re.IGNORECASE)
+_CHAIR_TOKEN_SPLIT_RE = re.compile(rf"\s*({_CHAIR_CONNECTOR})\s*", re.IGNORECASE)
 
 
-def _ordinal_values(run: str) -> list[int]:
-    """Ordered chair numbers parsed from a number/ordinal run ("1st & 2nd" -> ``[1, 2]``)."""
+def _chair_token_value(token: str) -> int | None:
+    """Chair number for a single ordinal token ("2nd" -> 2, "ist"/"lst" -> 1), else ``None``."""
+    token = token.strip()
+    digits = re.match(r"\d{1,2}", token)
+    if digits:
+        return int(digits.group(0))
+    return 1 if re.match(r"[il]st", token, re.IGNORECASE) else None
+
+
+def _expand_chair_run(run: str) -> list[int]:
+    """Ordered, de-duplicated chairs from a number/ordinal run.
+
+    Lists keep their listed values ("1st & 2nd" -> ``[1, 2]``, "1, 2" -> ``[1, 2]``); a range
+    connector fills the span inclusively ("1-4" -> ``[1, 2, 3, 4]``, "2 to 4" -> ``[2, 3, 4]``).
+    """
+    parts = _CHAIR_TOKEN_SPLIT_RE.split(run)
     values: list[int] = []
-    for match in re.finditer(_ORD_TOKEN, run):
-        digits = re.match(r"\d{1,2}", match.group(0))
-        values.append(int(digits.group(0)) if digits else 1)  # "ist"/"lst" -> chair 1
+    prev: int | None = None
+    for i, token in enumerate(parts):
+        if i % 2 == 1:
+            continue  # captured connector, handled alongside the following token
+        value = _chair_token_value(token)
+        if value is None:
+            continue
+        connector = parts[i - 1].strip() if i >= 2 else None
+        if prev is not None and connector and _RANGE_CONNECTOR_RE.match(connector) and value > prev:
+            for chair in range(prev + 1, value + 1):
+                if chair not in values:
+                    values.append(chair)
+        elif value not in values:
+            values.append(value)
+        prev = value
     return values
+
+
+def _leading_or_trailing_chairs(text_norm: str) -> list[int]:
+    """Expand a chair run anchored at the start or end of ``text_norm`` (e.g. a bare "2-3" tail)."""
+    match = _CHAIRS_AFTER_RE.match(text_norm) or _CHAIRS_BEFORE_RE.search(text_norm)
+    return _expand_chair_run(match.group(1)) if match else []
 
 
 def combined_chairs(
@@ -732,16 +788,12 @@ def combined_chairs(
     values: list[int] = []
     before = _CHAIRS_BEFORE_RE.search(text_norm[: span[0]])
     if before:
-        values = _ordinal_values(before.group(1))
+        values = _expand_chair_run(before.group(1))
     if not values:
         after = _CHAIRS_AFTER_RE.match(text_norm[span[1] :])
         if after:
-            values = _ordinal_values(after.group(1))
-    ordered: list[int] = []
-    for value in values:
-        if value not in ordered:
-            ordered.append(value)
-    return ordered
+            values = _expand_chair_run(after.group(1))
+    return values
 
 
 def compose_label(
