@@ -19,6 +19,7 @@ families:
   eb_clarinet: woodwind
   clarinet: woodwind
   alto_clarinet: woodwind
+  contra_alto_clarinet: woodwind
   bass_clarinet: woodwind
   contrabass_clarinet: woodwind
   soprano_sax: woodwind
@@ -105,8 +106,9 @@ instruments:
   eb_clarinet: ["eb clarinet", "eb clarinets", "e flat clarinet", "clarinet in eb", "clarinet in e flat", "clarinet eb"]
   clarinet: ["bb clarinet", "bb clarinets", "b flat clarinet", "clarinets", "clarinet", "clar", "cl"]
   alto_clarinet: ["alto clarinet in e flat", "alto clarinet in eb", "alto clarinet", "alto clarinets", "eb alto clarinet", "clarinet eb alto", "clarinet alto"]
+  contra_alto_clarinet: ["contra alto clarinet", "contra-alto clarinet", "contralto clarinet", "eb contra alto clarinet", "e flat contra alto clarinet", "contra alto clarinets", "contralto clarinets"]
   bass_clarinet: ["bass clarinet", "bass clarinets", "b cl", "bass cl"]
-  contrabass_clarinet: ["contrabass clarinet", "contra bass clarinet", "contra alto clarinet", "contralto clarinet"]
+  contrabass_clarinet: ["contrabass clarinet", "contra bass clarinet", "contrabass clarinets", "contra bass clarinets", "bb contrabass clarinet", "b flat contrabass clarinet"]
   soprano_sax: ["soprano saxophone", "soprano saxes", "soprano sax", "sax soprano", "sop sax"]
   alto_sax: ["alto saxophone", "alto saxes", "alto sax", "sax alto", "eb alto sax", "e flat alto saxophone", "alto"]
   tenor_sax: ["tenor saxophone", "tenor saxes", "tenor sax", "sax tenor", "bb tenor sax"]
@@ -211,7 +213,7 @@ separators: ["-", "_"]
 sections:
   flutes: ["piccolo", "flute", "alto_flute", "bass_flute"]
   double_reeds: ["oboe", "english_horn", "bassoon", "contrabassoon"]
-  clarinets: ["eb_clarinet", "clarinet", "alto_clarinet", "bass_clarinet", "contrabass_clarinet"]
+  clarinets: ["eb_clarinet", "clarinet", "alto_clarinet", "contra_alto_clarinet", "bass_clarinet", "contrabass_clarinet"]
   saxophones: ["sopranino_sax", "soprano_sax", "alto_sax", "tenor_sax", "baritone_sax", "bass_sax"]
   cornets_trumpets: ["soprano_cornet", "cornet", "trumpet", "flugelhorn"]
   horns: ["horn", "tenor_horn", "mellophone"]
