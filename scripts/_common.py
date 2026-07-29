@@ -362,6 +362,44 @@ def normalize_instrument_name(text: str) -> str:
     return lowered.strip()
 
 
+# Standardized, human-facing instrument names for report tables. Every piece labels the same
+# instrument identically (a "cognised" Title Case name) regardless of the raw per-score text, so
+# ``flute`` reads as ``Flute`` whether the score printed "Fls." or "Flute I". Only canonicals whose
+# Title Case form would be wrong need an override here; everything else derives from the snake_case
+# key via ``instrument_display_name``.
+INSTRUMENT_DISPLAY_OVERRIDES: dict[str, str] = {
+    "eb_clarinet": "E-flat Clarinet",
+    "contra_alto_clarinet": "Contra-alto Clarinet",
+    "soprano_sax": "Soprano Saxophone",
+    "alto_sax": "Alto Saxophone",
+    "tenor_sax": "Tenor Saxophone",
+    "baritone_sax": "Baritone Saxophone",
+    "bass_sax": "Bass Saxophone",
+    "sopranino_sax": "Sopranino Saxophone",
+    "horn": "Horn in F",
+    "tom_toms": "Tom-toms",
+    "tam_tam": "Tam-tam",
+}
+
+
+def instrument_display_name(canonical: str | None) -> str:
+    """Return the standardized human-facing name for a canonical instrument key.
+
+    Report tables use this so the same instrument reads identically across every piece (for
+    example ``flute`` -> ``Flute``), independent of the raw per-score label. Unlisted canonicals
+    fall back to converting the snake_case key to Title Case.
+    """
+    if not canonical:
+        return ""
+    key = str(canonical).strip().lower()
+    override = INSTRUMENT_DISPLAY_OVERRIDES.get(key)
+    if override:
+        return override
+    words = _INSTRUMENT_SEPARATORS_RE.sub(" ", key)
+    words = _INSTRUMENT_WHITESPACE_RE.sub(" ", words).strip()
+    return words.title()
+
+
 def load_instrument_taxonomy(rules_path: Path) -> dict[str, Any]:
     """Load the shared canonical instrument taxonomy from the YAML lexicon.
 

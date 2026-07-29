@@ -79,6 +79,7 @@ from scripts._common import (
     atomic_write_text,
     build_checkpoint,
     canonicalize_instrument,
+    instrument_display_name,
     load_checkpoint,
     load_instrument_taxonomy,
     make_checkpoint_path,
@@ -2388,7 +2389,7 @@ def render_piece_instrumentation_body(rec: dict[str, Any]) -> list[str]:
 
     expected_parts = rec.get("expected_parts") or []
     if expected_parts:
-        out.append("| # | Instrument | Label | Section | Required | Observed |")
+        out.append("| # | Instrument | Score Label | Section | Required | Observed |")
         out.append("| --- | --- | --- | --- | --- | --- |")
         for part in expected_parts:
             idx = part.get("part_index")
@@ -2400,7 +2401,7 @@ def render_piece_instrumentation_body(rec: dict[str, Any]) -> list[str]:
             else:
                 observed = "MISSING"
             out.append(
-                f"| {idx_cell} | {md_cell(part.get('canonical_instrument'))} "
+                f"| {idx_cell} | {md_cell(instrument_display_name(part.get('canonical_instrument')))} "
                 f"| {md_cell(part.get('label'))} | {md_cell(part.get('section'))} "
                 f"| {required} | {observed} |"
             )

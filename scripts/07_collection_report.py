@@ -33,6 +33,7 @@ from scripts._common import (
     Severity,
     atomic_write_json,
     atomic_write_text,
+    instrument_display_name,
     md_cell,
     new_record_envelope,
     pct,
@@ -477,7 +478,7 @@ def render_summary(rec: dict[str, Any], piece_reports_dirname: str) -> str:
         out.append("| --- | --- | ---: |")
         for row in missing:
             out.append(
-                f"| {md_cell(row.get('canonical_instrument'))} "
+                f"| {md_cell(instrument_display_name(row.get('canonical_instrument')))} "
                 f"| {md_cell(row.get('section'))} | {row.get('missing_piece_count')} |"
             )
     else:

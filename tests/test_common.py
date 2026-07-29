@@ -5,6 +5,7 @@ from pathlib import Path
 from scripts._common import (
     canonicalize_instrument,
     has_readable_text,
+    instrument_display_name,
     load_instrument_taxonomy,
     normalize_instrument_name,
     read_jsonl,
@@ -62,6 +63,27 @@ def test_normalize_instrument_name_collapses_separators() -> None:
     assert normalize_instrument_name("  French   Horn ") == "french horn"
     assert normalize_instrument_name("bass-clarinet") == "bass clarinet"
     assert normalize_instrument_name("") == ""
+
+
+def test_instrument_display_name_titlecases_snake_case_fallback() -> None:
+    assert instrument_display_name("flute") == "Flute"
+    assert instrument_display_name("baritone_horn") == "Baritone Horn"
+    assert instrument_display_name("mallet_percussion") == "Mallet Percussion"
+    assert instrument_display_name("string_bass") == "String Bass"
+
+
+def test_instrument_display_name_applies_overrides() -> None:
+    assert instrument_display_name("eb_clarinet") == "E-flat Clarinet"
+    assert instrument_display_name("contra_alto_clarinet") == "Contra-alto Clarinet"
+    assert instrument_display_name("alto_sax") == "Alto Saxophone"
+    assert instrument_display_name("horn") == "Horn in F"
+    assert instrument_display_name("tom_toms") == "Tom-toms"
+
+
+def test_instrument_display_name_handles_blank_and_case() -> None:
+    assert instrument_display_name(None) == ""
+    assert instrument_display_name("") == ""
+    assert instrument_display_name("  Baritone_Horn ") == "Baritone Horn"
 
 
 def test_load_instrument_taxonomy_from_yaml() -> None:
