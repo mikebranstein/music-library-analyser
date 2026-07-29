@@ -164,12 +164,15 @@ DEFAULT_LOOKUP_CONFIG: dict[str, Any] = {
     "max_score_pages": 2,
     "min_score_text_chars": 200,
     "reocr_dpi": 300,
-    # Stage A quality gates. Abridged editions (condensed/short/conductor scores) collapse parts
-    # onto shared staves and do not reliably enumerate the full instrumentation, so they are not
-    # trusted as a local authority source; and a score whose mean OCR confidence over the read
-    # pages is below the floor is treated as unreadable. Excluded or low-confidence pieces fall
-    # through to the online lookup instead of producing an unreliable local contract.
-    "local_score_types_excluded": ["condensed", "short", "conductor"],
+    # Stage A quality gates. Every local score type (full, conductor, condensed, short) is used as
+    # an instrumentation source: even an abridged edition almost always prints the full
+    # instrumentation list in its front matter, and a full score is the most authoritative source
+    # of all. Score type only governs whether a conductor score appears in the *displayed* full
+    # instrumentation elsewhere -- a separate concern from discovering instrumentation here -- so
+    # nothing is excluded by default. The knob stays available for callers that want to suppress a
+    # type. A score whose mean OCR confidence over the read pages is below the floor is still
+    # treated as unreadable and falls through to the online lookup.
+    "local_score_types_excluded": [],
     "min_score_ocr_confidence": 60,
     # Remote image OCR (Stage C).
     "image_ocr_enabled": True,
@@ -771,12 +774,14 @@ def find_best_score_doc(
 
 
 def _score_type_usable(score_type: Any, config: dict[str, Any]) -> bool:
-    """True when a local score's type is allowed as a Stage A authority source.
+    """True when a local score's type is allowed as a Stage A instrumentation source.
 
-    Abridged editions (by default condensed/short/conductor scores) collapse multiple parts onto
-    shared staves and do not reliably enumerate the full instrumentation, so they are excluded and
-    the piece falls through to the online lookup. The excluded set is configurable via
-    ``local_score_types_excluded``; an empty/absent list allows every type.
+    Every score type is usable by default: even a condensed or conductor score almost always prints
+    the full instrumentation list in its front matter, and a full score is the most authoritative
+    source of all. (Whether a conductor score appears in the *displayed* full instrumentation is a
+    separate, downstream concern -- not this discovery gate.) The excluded set stays configurable
+    via ``local_score_types_excluded`` for callers that want to suppress a type; an empty/absent
+    list (the default) allows every type.
     """
     excluded = {
         str(t).strip().lower() for t in (config.get("local_score_types_excluded") or ())

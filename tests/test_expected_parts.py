@@ -931,14 +931,24 @@ def test_infer_piece_stage_a_thin_text_falls_through_to_lookup():
     assert rec["ocr_source"] is None
 
 
-def test_score_type_usable_excludes_abridged_editions():
+def test_score_type_usable_allows_all_types_by_default():
+    # Every score type feeds instrumentation discovery by default: even an abridged conductor or
+    # condensed edition prints the full instrumentation in its front matter. (Excluding conductor
+    # scores from the *displayed* instrumentation is a separate, downstream concern.)
     config = dict(expected.DEFAULT_LOOKUP_CONFIG)
+    assert expected._score_type_usable("full", config) is True
+    assert expected._score_type_usable("conductor", config) is True
+    assert expected._score_type_usable("condensed", config) is True
+    assert expected._score_type_usable("short", config) is True
+    # A missing/blank type defaults to "full" (usable).
+    assert expected._score_type_usable(None, config) is True
+
+
+def test_score_type_usable_honours_explicit_exclusion():
+    config = {"local_score_types_excluded": ["condensed", "short", "conductor"]}
     assert expected._score_type_usable("full", config) is True
     assert expected._score_type_usable("conductor", config) is False
     assert expected._score_type_usable("condensed", config) is False
-    assert expected._score_type_usable("short", config) is False
-    # A missing/blank type defaults to "full" (usable).
-    assert expected._score_type_usable(None, config) is True
 
 
 def test_score_type_usable_empty_exclusion_allows_all():
