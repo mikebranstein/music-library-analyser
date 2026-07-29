@@ -222,6 +222,15 @@ sections:
   voices: ["voice"]
   percussion: ["timpani", "mallet_percussion", "snare_drum", "bass_drum", "cymbals", "castanets", "tambourine", "percussion", "drum_set", "triangle", "woodblock", "temple_blocks", "claves", "maracas", "cowbell", "guiro", "vibraslap", "tom_toms", "bongos", "congas", "timbales", "tenor_drum", "field_drum", "sleigh_bells", "wind_chimes", "mark_tree", "tam_tam", "ratchet", "slapstick", "crotales", "finger_cymbals", "anvil", "brake_drum"]
 
+# groups of instruments treated as interchangeable when reconciling expected instrumentation
+# against the parts we hold. A part written for any member of a group covers the chair of the
+# others, so an observed member satisfies an expected slot for any other member (e.g. a baritone
+# part fills a euphonium slot and vice versa). This bridging is DISABLED for a group whenever the
+# score explicitly calls for more than one member as separate parts -- in that case each expected
+# slot must be filled by its own instrument and no cross-matching is allowed.
+interchangeable_instruments:
+  - ["euphonium", "baritone_horn"]
+
 # legacy keys retained for backward compatibility with earlier drafts
 part_patterns: {}
 filename_normalization:

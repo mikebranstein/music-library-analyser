@@ -416,6 +416,72 @@ def test_reconcile_fully_unmatched_combined_part_is_unexpected():
     assert canonicals == {"oboe", "english_horn"}
 
 
+# --- Euphonium / baritone interchangeability -------------------------------------------------
+
+_EUPH_BARI_GROUPS = [["euphonium", "baritone_horn"]]
+
+
+def test_build_equivalents_bridges_single_member():
+    # Score lists only euphonium -> a baritone may fill it (and vice versa).
+    slots = [{"canonical": "euphonium", "part_index": None, "label": "Euphonium", "required": True}]
+    eq = expected.build_equivalents(slots, _EUPH_BARI_GROUPS)
+    assert eq == {"euphonium": ["baritone_horn"]}
+
+    slots = [{"canonical": "baritone_horn", "part_index": None, "label": "Baritone", "required": True}]
+    eq = expected.build_equivalents(slots, _EUPH_BARI_GROUPS)
+    assert eq == {"baritone_horn": ["euphonium"]}
+
+
+def test_build_equivalents_disabled_when_both_called_for():
+    # Score lists BOTH as separate parts -> no bridging; each slot needs its own instrument.
+    slots = [
+        {"canonical": "euphonium", "part_index": None, "label": "Euphonium", "required": True},
+        {"canonical": "baritone_horn", "part_index": None, "label": "Baritone", "required": True},
+    ]
+    assert expected.build_equivalents(slots, _EUPH_BARI_GROUPS) == {}
+
+
+def test_reconcile_baritone_satisfies_euphonium_slot():
+    slots = [{"canonical": "euphonium", "part_index": None, "label": "Euphonium", "required": True}]
+    observed = [_observed("baritone_horn", None)]
+    eq = expected.build_equivalents(slots, _EUPH_BARI_GROUPS)
+    expected_parts, unexpected = expected.reconcile_parts(slots, observed, eq)
+    assert expected_parts[0]["present"] is True
+    assert unexpected == []
+
+
+def test_reconcile_euphonium_satisfies_baritone_slot():
+    slots = [{"canonical": "baritone_horn", "part_index": None, "label": "Baritone", "required": True}]
+    observed = [_observed("euphonium", None)]
+    eq = expected.build_equivalents(slots, _EUPH_BARI_GROUPS)
+    expected_parts, unexpected = expected.reconcile_parts(slots, observed, eq)
+    assert expected_parts[0]["present"] is True
+    assert unexpected == []
+
+
+def test_reconcile_separate_euph_and_bari_slots_are_not_cross_filled():
+    # Score calls for both; library holds two euphoniums and no baritone -> baritone still missing.
+    slots = [
+        {"canonical": "euphonium", "part_index": None, "label": "Euphonium", "required": True},
+        {"canonical": "baritone_horn", "part_index": None, "label": "Baritone", "required": True},
+    ]
+    observed = [_observed("euphonium", None), _observed("euphonium", None)]
+    eq = expected.build_equivalents(slots, _EUPH_BARI_GROUPS)
+    expected_parts, _unexpected = expected.reconcile_parts(slots, observed, eq)
+    present = {e["canonical_instrument"]: e["present"] for e in expected_parts}
+    assert present["euphonium"] is True
+    assert present["baritone_horn"] is False
+
+
+def test_reconcile_no_bridging_without_groups():
+    # Without an equivalents map a baritone does NOT fill a euphonium slot (baseline behaviour).
+    slots = [{"canonical": "euphonium", "part_index": None, "label": "Euphonium", "required": True}]
+    observed = [_observed("baritone_horn", None)]
+    expected_parts, unexpected = expected.reconcile_parts(slots, observed)
+    assert expected_parts[0]["present"] is False
+    assert len(unexpected) == 1
+
+
 def test_collapse_clef_editions_merges_bc_and_tc():
     observed = [
         {**_observed("euphonium", 1), "clef": "bass"},
@@ -616,6 +682,45 @@ def test_infer_piece_missing_required_flags_review():
     assert rec["missing_required_count"] == 1
     assert "Euph" in rec["missing_required_parts"]
     assert rec["needs_review"] is True
+
+
+def test_infer_piece_baritone_fills_euphonium_via_config():
+    # End-to-end through infer_piece using the real regex_rules.yaml: the score calls for a
+    # euphonium, the library holds a baritone, and they are interchangeable -> nothing missing.
+    piece = _piece(observed=[_observed("cornet", 1), _observed("baritone_horn", 1)])
+    parts = [
+        {"canonical_instrument": "cornet", "part_index": 1, "label": "Cornet 1", "required": True},
+        {"canonical_instrument": "euphonium", "part_index": 1, "label": "Euphonium", "required": True},
+    ]
+    rec = expected.infer_piece(
+        piece, None, "run1",
+        config=dict(expected.DEFAULT_LOOKUP_CONFIG),
+        prompt_template="{title_guess}",
+        lookup_enabled=True,
+        lookup_fn=lambda p, c: _score_result(parts),
+    )
+    assert rec["missing_required_count"] == 0
+    assert rec["missing_required_parts"] == []
+    assert rec["unexpected_part_count"] == 0
+
+
+def test_infer_piece_separate_euph_and_bari_still_flags_missing():
+    # The score calls for euphonium AND baritone as separate parts; the library holds only a
+    # euphonium, so the baritone is genuinely missing (no cross-matching when both are required).
+    piece = _piece(observed=[_observed("euphonium", 1)])
+    parts = [
+        {"canonical_instrument": "euphonium", "part_index": 1, "label": "Euphonium", "required": True},
+        {"canonical_instrument": "baritone_horn", "part_index": 1, "label": "Baritone", "required": True},
+    ]
+    rec = expected.infer_piece(
+        piece, None, "run1",
+        config=dict(expected.DEFAULT_LOOKUP_CONFIG),
+        prompt_template="{title_guess}",
+        lookup_enabled=True,
+        lookup_fn=lambda p, c: _score_result(parts),
+    )
+    assert rec["missing_required_count"] == 1
+    assert "Baritone" in rec["missing_required_parts"]
 
 
 def test_infer_piece_unexpected_part_is_warning_not_review():

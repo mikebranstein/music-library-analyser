@@ -128,10 +128,10 @@ SCORE_TYPE_PREFERENCE = {"full": 0, "conductor": 1, "condensed": 2, "short": 3}
 # Shared instrument taxonomy (canonical tokens + section map), loaded once from the same YAML
 # lexicon Script 03 uses so LLM-derived expected parts canonicalize identically to observed parts.
 _RULES_PATH = Path(__file__).resolve().parent.parent / "config" / "regex_rules.yaml"
-_INSTRUMENT_TAXONOMY: dict[str, dict[str, str]] | None = None
+_INSTRUMENT_TAXONOMY: dict[str, Any] | None = None
 
 
-def _instrument_taxonomy() -> dict[str, dict[str, str]]:
+def _instrument_taxonomy() -> dict[str, Any]:
     """Return the cached instrument taxonomy (alias->canonical and canonical->section maps)."""
     global _INSTRUMENT_TAXONOMY
     if _INSTRUMENT_TAXONOMY is None:
@@ -1164,6 +1164,37 @@ def collapse_clef_editions(
     return collapsed
 
 
+def build_equivalents(
+    slots: list[dict[str, Any]],
+    groups: list[list[str]] | None = None,
+) -> dict[str, list[str]]:
+    """Map each expected slot canonical to the observed canonicals that may also satisfy it.
+
+    ``groups`` lists sets of interchangeable instruments (from the taxonomy's
+    ``interchangeable_instruments`` config). Within each group, a part written for one member covers
+    the chair of the others, so we let an observed member satisfy an expected slot for any other
+    member -- e.g. an expected ``euphonium`` slot is filled by an observed ``baritone_horn`` and vice
+    versa. This bridging is DISABLED for a group the moment the score lists more than one of its
+    members as separate expected slots: then each slot must be filled by its own instrument (no
+    cross-matching), so a genuinely missing member is still reported. Returns a ``{slot_canonical:
+    [other_canonicals]}`` map suitable for ``reconcile_parts``.
+    """
+    if not groups:
+        return {}
+    expected_canonicals = {slot["canonical"] for slot in slots}
+    equivalents: dict[str, list[str]] = {}
+    for group in groups:
+        members_in_score = [m for m in group if m in expected_canonicals]
+        # Only bridge when the score calls for exactly one member of the group.
+        if len(members_in_score) != 1:
+            continue
+        slot_canonical = members_in_score[0]
+        others = [m for m in group if m != slot_canonical]
+        if others:
+            equivalents[slot_canonical] = others
+    return equivalents
+
+
 def reconcile_parts(
     template_parts: list[dict[str, Any]],
     observed_parts: list[dict[str, Any]],
@@ -1460,7 +1491,8 @@ def build_matched_record(
     ``local_score_path`` record which path produced the contract.
     """
     slots = normalize_expected_parts(result.get("expected_parts"))
-    expected, unexpected = reconcile_parts(slots, piece.get("observed_parts", []))
+    equivalents = build_equivalents(slots, _instrument_taxonomy().get("interchangeable_groups"))
+    expected, unexpected = reconcile_parts(slots, piece.get("observed_parts", []), equivalents)
 
     has_score = bool(piece.get("has_score"))
     score_expected = bool(result.get("score_expected"))

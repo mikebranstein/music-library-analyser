@@ -362,18 +362,25 @@ def normalize_instrument_name(text: str) -> str:
     return lowered.strip()
 
 
-def load_instrument_taxonomy(rules_path: Path) -> dict[str, dict[str, str]]:
+def load_instrument_taxonomy(rules_path: Path) -> dict[str, Any]:
     """Load the shared canonical instrument taxonomy from the YAML lexicon.
 
     Returns ``{"alias_to_canonical": {normalized_name: canonical}, "canonical_to_section":
-    {canonical: section}}`` built from the ``instruments`` and ``sections`` blocks of ``rules_path``
-    (the same file Script 03 uses). Every canonical key maps to itself, and each alias maps to its
-    canonical. Degrades to empty maps when PyYAML or the file is unavailable so callers no-op
-    gracefully rather than failing.
+    {canonical: section}, "interchangeable_groups": [[canonical, ...], ...]}`` built from the
+    ``instruments``, ``sections`` and ``interchangeable_instruments`` blocks of ``rules_path`` (the
+    same file Script 03 uses). Every canonical key maps to itself, and each alias maps to its
+    canonical. ``interchangeable_groups`` lists sets of instruments that may substitute for one
+    another during expected-parts reconciliation. Degrades to empty maps when PyYAML or the file is
+    unavailable so callers no-op gracefully rather than failing.
     """
     alias_to_canonical: dict[str, str] = {}
     canonical_to_section: dict[str, str] = {}
-    empty = {"alias_to_canonical": alias_to_canonical, "canonical_to_section": canonical_to_section}
+    interchangeable_groups: list[list[str]] = []
+    empty: dict[str, Any] = {
+        "alias_to_canonical": alias_to_canonical,
+        "canonical_to_section": canonical_to_section,
+        "interchangeable_groups": interchangeable_groups,
+    }
     try:
         import yaml  # type: ignore
     except ImportError:
@@ -404,7 +411,19 @@ def load_instrument_taxonomy(rules_path: Path) -> dict[str, dict[str, str]]:
             if isinstance(canonicals, list):
                 for canonical in canonicals:
                     canonical_to_section[str(canonical).strip().lower()] = str(section)
-    return {"alias_to_canonical": alias_to_canonical, "canonical_to_section": canonical_to_section}
+    groups = data.get("interchangeable_instruments")
+    if isinstance(groups, list):
+        for group in groups:
+            if not isinstance(group, list):
+                continue
+            members = [str(m).strip().lower() for m in group if str(m).strip()]
+            if len(members) >= 2:
+                interchangeable_groups.append(members)
+    return {
+        "alias_to_canonical": alias_to_canonical,
+        "canonical_to_section": canonical_to_section,
+        "interchangeable_groups": interchangeable_groups,
+    }
 
 
 def canonicalize_instrument(value: str, alias_to_canonical: dict[str, str]) -> str:

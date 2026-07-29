@@ -76,9 +76,19 @@ def test_load_instrument_taxonomy_from_yaml() -> None:
     assert section_map["alto_sax"] == "saxophones"
 
 
+def test_load_instrument_taxonomy_interchangeable_groups() -> None:
+    taxonomy = load_instrument_taxonomy(_RULES_PATH)
+    groups = taxonomy["interchangeable_groups"]
+    assert any(set(g) == {"euphonium", "baritone_horn"} for g in groups)
+
+
 def test_load_instrument_taxonomy_missing_file_is_empty(tmp_path: Path) -> None:
     taxonomy = load_instrument_taxonomy(tmp_path / "nope.yaml")
-    assert taxonomy == {"alias_to_canonical": {}, "canonical_to_section": {}}
+    assert taxonomy == {
+        "alias_to_canonical": {},
+        "canonical_to_section": {},
+        "interchangeable_groups": [],
+    }
 
 
 def test_canonicalize_instrument_maps_synonyms_to_taxonomy() -> None:
