@@ -206,8 +206,15 @@ Use lowercase snake\_case `canonical_instrument` names, such as:
 * `euphonium`
 * `baritone_horn`
 * `tuba`
-* `percussion`
 * `timpani`
+* `mallet_percussion` (xylophone, glockenspiel/orchestra bells, vibraphone, marimba, chimes)
+* `snare_drum`
+* `bass_drum`
+* `cymbals`
+* `castanets`
+* `tambourine`
+* `triangle`
+* `percussion` (only when the part is genuinely unspecified)
 * `keyboard`
 * `string_bass`
 
@@ -215,8 +222,17 @@ Set `part_index` to the printed part number when the edition numbers or ranks pa
 
 * `1` = first, solo, principal, or top numbered part when that is the printed designation.
 * Use `2`, `3`, etc. for printed second/third parts.
-* Use `null` for unnumbered named parts such as `Piccolo`, `Bass Clarinet`, `Bass Trombone`, `Timpani`, or `Percussion`.
-* For combined printed labels such as `Cornet 1/2`, create separate entries only if the source clearly treats them as separate printed parts; otherwise preserve the printed label in one entry and use the most appropriate `part_index`.
+* Use `null` for unnumbered named parts such as `Piccolo`, `Bass Clarinet`, `Bass Trombone`, `Timpani`, or `Snare Drum`.
+* **Split multi-rank labels into one entry per numbered part.** When a printed label bundles several
+  ranks — for example `Cornet 1/2/3`, `B-flat Trumpet I-II-III`, `Alto Sax I-II`, `Horn in F I-II-III-IV`,
+  or `Trombone 1 & 2` — create a separate entry for each rank with a sequential `part_index`
+  (`1`, `2`, `3`, ...) and a specific `label` (e.g. `Trumpet 1`, `Trumpet 2`, `Trumpet 3`). Do not
+  keep the ranks bundled in one entry.
+* **Enumerate named percussion.** When the source lists multiple named percussion instruments —
+  whether on separate lines or grouped under a single `Percussion` heading (for example
+  `Percussion, including: Bass Drum, Castanets, Snare Drum, Tambourine, Xylophone`) — emit one entry
+  per named percussion instrument, each with its own specific `canonical_instrument` and printed
+  `label`. Do not fold them into a single generic `percussion` entry.
 * For split/divisi within a single printed part, do not create extra entries unless separate printed parts are listed.
 * For doublings, use the primary printed part as `canonical_instrument` and describe the doubling in `label` or `notes` if needed.
 

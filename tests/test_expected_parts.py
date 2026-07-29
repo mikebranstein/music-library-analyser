@@ -339,6 +339,65 @@ def test_infer_piece_condensed_score_not_reported_missing():
     assert rec["needs_review"] is False
 
 
+# --- Percussion backfill (Lever 2) -----------------------------------------------------------
+
+
+def test_backfill_percussion_enumerates_named_instruments():
+    # A summary collapsed several named percussion into one generic "percussion" line, but the raw
+    # source text lists them under an Instrumentation heading. The backfill enumerates each.
+    contract = {
+        "match_found": True,
+        "expected_parts": [
+            {"canonical_instrument": "flute", "part_index": 1, "label": "Flute 1"},
+            {"canonical_instrument": "percussion", "part_index": None, "label": "Percussion"},
+        ],
+    }
+    source = (
+        "== Instrumentation ==\n"
+        "Flute\n"
+        "Percussion, including: Bass Drum, Castanets, Snare Drum, Tambourine, Xylophone\n"
+        "== Program Notes ==\n"
+        "A lively dance featuring a solo violin (not a real part).\n"
+    )
+    out = expected.backfill_percussion_from_text(contract, source)
+    canonicals = [p["canonical_instrument"] for p in out["expected_parts"]]
+    # The generic percussion line is dropped; each named percussion instrument is enumerated.
+    assert "percussion" not in canonicals
+    assert "flute" in canonicals
+    for expected_canonical in ("bass_drum", "castanets", "snare_drum", "tambourine",
+                               "mallet_percussion"):
+        assert expected_canonical in canonicals
+    # Program-note prose outside the Instrumentation section is not scanned.
+    assert "strings" not in canonicals
+
+
+def test_backfill_percussion_noop_without_instrumentation_section():
+    contract = {
+        "match_found": True,
+        "expected_parts": [
+            {"canonical_instrument": "percussion", "part_index": None, "label": "Percussion"},
+        ],
+    }
+    # No Instrumentation heading -> mentions in prose must not trigger a backfill.
+    source = "A cheerful piece with a prominent xylophone and snare drum throughout."
+    out = expected.backfill_percussion_from_text(contract, source)
+    assert [p["canonical_instrument"] for p in out["expected_parts"]] == ["percussion"]
+
+
+def test_backfill_percussion_skips_already_enumerated():
+    contract = {
+        "match_found": True,
+        "expected_parts": [
+            {"canonical_instrument": "snare_drum", "part_index": None, "label": "Snare Drum"},
+            {"canonical_instrument": "bass_drum", "part_index": None, "label": "Bass Drum"},
+        ],
+    }
+    source = "== Instrumentation ==\nSnare Drum\nBass Drum\n"
+    out = expected.backfill_percussion_from_text(contract, source)
+    # Nothing new to add and no generic percussion line to drop -> unchanged parts.
+    assert [p["canonical_instrument"] for p in out["expected_parts"]] == ["snare_drum", "bass_drum"]
+
+
 # --- Reconciliation --------------------------------------------------------------------------
 
 

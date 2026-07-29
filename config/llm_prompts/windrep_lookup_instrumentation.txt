@@ -39,6 +39,21 @@ If you cannot find a matching WindRep work page, or the page does not list instr
 * Use a lowercase snake_case `canonical_instrument`, a `part_index` (or null), the printed `label`,
   a lowercase snake_case `section` (for example: `woodwinds`, `clarinets`, `saxophones`,
   `trumpets`, `horns`, `low_brass`, `percussion`, `strings`), and a `required` flag.
+* For percussion, use a specific canonical per named instrument rather than the generic
+  `percussion`: `timpani`, `mallet_percussion` (xylophone, glockenspiel/orchestra bells,
+  vibraphone, marimba, chimes), `snare_drum`, `bass_drum`, `cymbals`, `castanets`, `tambourine`,
+  `triangle`, `woodblock`, `drum_set`, `tam_tam`, and similar. Reserve the generic `percussion`
+  only for a percussion part the page genuinely leaves unspecified.
+* **Split multi-rank labels into one entry per numbered part.** When a printed label bundles several
+  ranks — for example `Cornet 1/2/3`, `B-flat Trumpet I-II-III`, `Alto Sax I-II`, or
+  `Horn in F I-II-III-IV` — emit a separate entry for each rank with a sequential `part_index`
+  (`1`, `2`, `3`, ...) and a specific `label` (e.g. `Trumpet 1`, `Trumpet 2`, `Trumpet 3`). Do not
+  keep the ranks bundled in one entry.
+* **Enumerate named percussion.** When the page lists multiple named percussion instruments —
+  whether on separate lines or grouped under a single `Percussion` heading (for example
+  `Percussion, including: Bass Drum, Castanets, Snare Drum, Tambourine, Xylophone`) — emit one entry
+  per named percussion instrument, each with its own specific `canonical_instrument` and printed
+  `label`. Do not fold them into a single generic `percussion` entry.
 * Set `required` false for parts explicitly marked optional, ad lib, substitute, alternative,
   cue-only, flexible, or doubling-only; otherwise true for core parts.
 * Preserve the page's printed part names in `label`.
@@ -95,6 +110,27 @@ types exactly as shown.
       "part_index": 1,
       "label": "Flute 1",
       "section": "woodwinds",
+      "required": true
+    },
+    {
+      "canonical_instrument": "trumpet",
+      "part_index": 1,
+      "label": "Trumpet 1",
+      "section": "trumpets",
+      "required": true
+    },
+    {
+      "canonical_instrument": "trumpet",
+      "part_index": 2,
+      "label": "Trumpet 2",
+      "section": "trumpets",
+      "required": true
+    },
+    {
+      "canonical_instrument": "mallet_percussion",
+      "part_index": null,
+      "label": "Xylophone",
+      "section": "percussion",
       "required": true
     }
   ],

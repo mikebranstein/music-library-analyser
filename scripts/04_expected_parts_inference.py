@@ -996,6 +996,116 @@ def derive_contract_from_text(
     return result if isinstance(result, dict) else None
 
 
+# --- Deterministic percussion backfill (Lever 2) ---------------------------------------------
+# A summary stage sometimes collapses several named percussion instruments into a single generic
+# "percussion" line (e.g. a WindRep "Percussion, including: Bass Drum, Castanets, Snare Drum,
+# Tambourine, Xylophone" block). When the raw source text carries an explicit instrumentation
+# section that names those instruments, enumerate them deterministically so the richer breakdown is
+# not discarded by whichever summarize stage wins -- no extra LLM call required.
+
+_INSTRUMENTATION_HEADING_RE = re.compile(
+    r"==+\s*(?:instrumentation|scoring|besetzung)\s*==+", re.IGNORECASE
+)
+_INSTRUMENTATION_PLAIN_RE = re.compile(
+    r"^[ \t]*(?:instrumentation|scoring|besetzung)[ \t]*:?[ \t]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _instrumentation_region(text: str) -> str | None:
+    """Return the instrumentation section of a source text, or None when none is present.
+
+    Only an explicitly labelled instrumentation/scoring/Besetzung section is returned, so the
+    percussion backfill never scans program-note prose (which may mention instruments in passing).
+    Handles both MediaWiki-style ``== Instrumentation ==`` headings (WindRep) and a plain
+    ``Instrumentation`` heading line.
+    """
+    if not text:
+        return None
+    m = _INSTRUMENTATION_HEADING_RE.search(text)
+    if m:
+        start = m.end()
+        nxt = re.search(r"\n==+[^=]", text[start:])
+        end = start + nxt.start() if nxt else len(text)
+        return text[start:end]
+    m = _INSTRUMENTATION_PLAIN_RE.search(text)
+    if m:
+        return text[m.end():]
+    return None
+
+
+def _percussion_alias_index() -> list[tuple[str, str]]:
+    """Return ``(alias, canonical)`` pairs for percussion-section instruments, longest alias first.
+
+    Longer aliases are matched first so a specific phrase (``orchestra bells``) is preferred over a
+    shorter substring. Aliases are normalized to spaced lowercase, matching ``regex_rules.yaml``.
+    """
+    taxonomy = _instrument_taxonomy()
+    alias_to_canonical: dict[str, str] = taxonomy["alias_to_canonical"]
+    section_map: dict[str, str] = taxonomy["canonical_to_section"]
+    pairs = [
+        (alias, canonical)
+        for alias, canonical in alias_to_canonical.items()
+        if section_map.get(canonical) == "percussion"
+    ]
+    pairs.sort(key=lambda p: len(p[0]), reverse=True)
+    return pairs
+
+
+def backfill_percussion_from_text(
+    contract: dict[str, Any] | None,
+    source_text: str,
+) -> dict[str, Any] | None:
+    """Enumerate named percussion a summary collapsed into one generic ``percussion`` line.
+
+    Deterministic, LLM-free safety net for the summarize stages (local score, WindRep direct fetch,
+    remote image OCR). When ``source_text`` has an explicit instrumentation section naming specific
+    percussion instruments (snare drum, bass drum, xylophone, ...), each one not already present in
+    the contract's ``expected_parts`` is appended as its own entry, and a lone generic ``percussion``
+    entry is dropped once at least one specific percussion instrument is added. Returns the contract
+    unchanged when there is no instrumentation section or nothing new to add.
+    """
+    if not isinstance(contract, dict):
+        return contract
+    parts = contract.get("expected_parts")
+    if not isinstance(parts, list):
+        return contract
+    region = _instrumentation_region(source_text)
+    if not region:
+        return contract
+    taxonomy = _instrument_taxonomy()
+    alias_to_canonical = taxonomy["alias_to_canonical"]
+    section_map = taxonomy["canonical_to_section"]
+
+    def _canon(entry: dict[str, Any]) -> str:
+        raw = entry.get("canonical_instrument") or entry.get("canonical")
+        return canonicalize_instrument(raw, alias_to_canonical) if isinstance(raw, str) else ""
+
+    present = {_canon(e) for e in parts if isinstance(e, dict)}
+
+    found: dict[str, str] = {}
+    for alias, canonical in _percussion_alias_index():
+        if canonical == "percussion" or canonical in present or canonical in found:
+            continue
+        if re.search(rf"\b{re.escape(alias)}\b", region, re.IGNORECASE):
+            found[canonical] = alias.title()
+    if not found:
+        return contract
+
+    kept = [e for e in parts if not (isinstance(e, dict) and _canon(e) == "percussion")]
+    for canonical, label in found.items():
+        kept.append({
+            "canonical_instrument": canonical,
+            "part_index": None,
+            "label": label,
+            "section": section_map.get(canonical, "percussion"),
+            "required": True,
+        })
+    updated = dict(contract)
+    updated["expected_parts"] = kept
+    return updated
+
+
 # --- Expected-part normalization + reconciliation --------------------------------------------
 
 
@@ -1589,6 +1699,7 @@ def _try_contract_from_text(
     )
     if not contract or not contract.get("match_found") or not contract.get("expected_parts"):
         return None
+    contract = backfill_percussion_from_text(contract, score_text)
     confidence = float(contract.get("identity_match_confidence") or 0.0)
     threshold = float(config.get("confidence_threshold", 0.5) or 0.0)
     if confidence < threshold:

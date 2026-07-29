@@ -56,11 +56,27 @@ If the text is too short, too noisy, cropped, or does not clearly show instrumen
 * Report one entry per named printed part, not per player.
 * Use lowercase snake_case `canonical_instrument` names (e.g. `flute`, `oboe`, `bassoon`,
   `clarinet`, `alto_saxophone`, `tenor_saxophone`, `baritone_saxophone`, `trumpet`, `cornet`,
-  `horn`, `trombone`, `bass_trombone`, `euphonium`, `baritone_horn`, `tuba`, `percussion`,
-  `timpani`, `keyboard`, `string_bass`).
+  `horn`, `trombone`, `bass_trombone`, `euphonium`, `baritone_horn`, `tuba`, `keyboard`,
+  `string_bass`).
+  For percussion, use a specific canonical per named instrument rather than the generic
+  `percussion`: `timpani`, `mallet_percussion` (xylophone, glockenspiel/orchestra bells,
+  vibraphone, marimba, chimes/tubular bells), `snare_drum`, `bass_drum`, `cymbals`, `castanets`,
+  `tambourine`, `triangle`, `woodblock`, `drum_set`, `tam_tam`, and similar. Reserve the generic
+  `percussion` only for a percussion part the source genuinely leaves unspecified.
 * Preserve the printed label in `label`.
+* **Split multi-rank labels into one entry per numbered part.** When a single printed label bundles
+  several ranks — e.g. `Trumpet I-II-III`, `Cornet 1/2/3`, `Alto Sax I-II`, `Horn in F I-II-III-IV`,
+  `Trombone 1 & 2` — emit a separate `expected_parts` entry for each rank with a sequential
+  `part_index` (`1`, `2`, `3`, ...). Give each split entry a specific `label` (e.g. `Trumpet 1`,
+  `Trumpet 2`, `Trumpet 3`). Do not leave the ranks bundled in one entry.
+* **Enumerate named percussion.** When the source lists multiple named percussion instruments —
+  whether on separate lines or grouped under a single `Percussion` heading (for example
+  `Percussion, including: Bass Drum, Castanets, Snare Drum, Tambourine, Xylophone`) — emit one
+  `expected_parts` entry per named percussion instrument, each with its own specific
+  `canonical_instrument` and printed `label`. Do not fold them into a single generic `percussion`
+  entry.
 * Set `part_index` to the printed part number (`1`, `2`, ...) when the score numbers or ranks the
-  part; use `null` for unnumbered named parts (e.g. `Piccolo`, `Timpani`, `Percussion`).
+  part; use `null` for unnumbered named parts (e.g. `Piccolo`, `Timpani`, `Snare Drum`).
 * Set `required` to `true` for core printed parts, `false` for parts explicitly marked optional,
   ad lib, substitute, or cue-only.
 * Use a sensible lowercase snake_case `section` (e.g. `woodwinds`, `clarinets`, `saxophones`,
@@ -97,7 +113,17 @@ types exactly as shown.
     "publisher": null, "catalog_number": null, "year": null, "summary": null}},
   "expected_parts": [
     {{"canonical_instrument": "clarinet", "part_index": 1, "label": "1st Clarinet",
-      "section": "clarinets", "required": true}}
+      "section": "clarinets", "required": true}},
+    {{"canonical_instrument": "trumpet", "part_index": 1, "label": "Trumpet 1",
+      "section": "trumpets", "required": true}},
+    {{"canonical_instrument": "trumpet", "part_index": 2, "label": "Trumpet 2",
+      "section": "trumpets", "required": true}},
+    {{"canonical_instrument": "trumpet", "part_index": 3, "label": "Trumpet 3",
+      "section": "trumpets", "required": true}},
+    {{"canonical_instrument": "mallet_percussion", "part_index": null, "label": "Xylophone",
+      "section": "percussion", "required": true}},
+    {{"canonical_instrument": "snare_drum", "part_index": null, "label": "Snare Drum",
+      "section": "percussion", "required": true}}
   ],
   "evidence_sources": [],
   "notes": "which labels were legible, OCR limitations, or why no instrumentation could be read"}}

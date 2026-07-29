@@ -52,7 +52,7 @@ def _report(piece_id: str = "p1", **overrides: Any) -> dict:
             {"label": "Harp", "canonical_instrument": "harp", "section": "strings", "required": False, "present": False},
         ],
         "observed_parts": [
-            {"predicted_part": "Flute", "instruments": [{"canonical_instrument": "flute", "section": "woodwind"}]},
+            {"predicted_part": "Flute", "instruments": [{"canonical": "flute", "part_index": None, "section": "woodwind"}]},
         ],
         "has_score": True,
         "score_missing": False,
@@ -214,6 +214,51 @@ def test_build_pieces_includes_instrumentation_and_score():
             "pdf_path": "001/score.pdf",
             "score_type": "full_score",
         }
+    ]
+
+
+def test_instrumentation_links_each_rank_to_its_own_document():
+    """Multi-rank parts (Trumpet 1/2/3) each link to their own file, not a shared bundle."""
+    report = {
+        "piece_id": "p2",
+        "expected_parts": [
+            {"label": "Trumpet 1", "canonical_instrument": "trumpet", "part_index": 1,
+             "section": "cornets_trumpets", "required": True, "present": True},
+            {"label": "Trumpet 2", "canonical_instrument": "trumpet", "part_index": 2,
+             "section": "cornets_trumpets", "required": True, "present": True},
+            {"label": "Trumpet 3", "canonical_instrument": "trumpet", "part_index": 3,
+             "section": "cornets_trumpets", "required": True, "present": True},
+            {"label": "Xylophone", "canonical_instrument": "mallet_percussion", "part_index": None,
+             "section": "percussion", "required": True, "present": True},
+        ],
+        "observed_parts": [
+            {"predicted_part": "Trumpet 1", "instruments": [{"canonical": "trumpet", "part_index": 1, "section": "cornets_trumpets"}]},
+            {"predicted_part": "Trumpet 2", "instruments": [{"canonical": "trumpet", "part_index": 2, "section": "cornets_trumpets"}]},
+            {"predicted_part": "Trumpet 3", "instruments": [{"canonical": "trumpet", "part_index": 3, "section": "cornets_trumpets"}]},
+            {"predicted_part": "Xylophone", "instruments": [{"canonical": "mallet_percussion", "part_index": None, "section": "percussion"}]},
+        ],
+        "documents": [
+            {"pdf_path": "041/trumpet1.pdf", "pdf_filename": "trumpet1.pdf", "predicted_part": "Trumpet 1", "is_score": False},
+            {"pdf_path": "041/trumpet2.pdf", "pdf_filename": "trumpet2.pdf", "predicted_part": "Trumpet 2", "is_score": False},
+            {"pdf_path": "041/trumpet3.pdf", "pdf_filename": "trumpet3.pdf", "predicted_part": "Trumpet 3", "is_score": False},
+            {"pdf_path": "041/xylophone.pdf", "pdf_filename": "xylophone.pdf", "predicted_part": "Xylophone", "is_score": False},
+        ],
+    }
+    grid = ss._instrumentation(report)
+    by_label = {part["label"]: part for part in grid}
+    # Each numbered trumpet line links only to its own rank's file.
+    assert by_label["Trumpet 1"]["documents"] == [
+        {"doc_id": ss.synth_doc_id("041/trumpet1.pdf"), "filename": "trumpet1.pdf"}
+    ]
+    assert by_label["Trumpet 2"]["documents"] == [
+        {"doc_id": ss.synth_doc_id("041/trumpet2.pdf"), "filename": "trumpet2.pdf"}
+    ]
+    assert by_label["Trumpet 3"]["documents"] == [
+        {"doc_id": ss.synth_doc_id("041/trumpet3.pdf"), "filename": "trumpet3.pdf"}
+    ]
+    # An unnumbered named-percussion line links to its matching document.
+    assert by_label["Xylophone"]["documents"] == [
+        {"doc_id": ss.synth_doc_id("041/xylophone.pdf"), "filename": "xylophone.pdf"}
     ]
 
 
