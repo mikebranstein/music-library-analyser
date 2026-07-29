@@ -143,6 +143,9 @@ def _instrument_taxonomy() -> dict[str, Any]:
 RESULT_START = "<<<SCORE_JSON>>>"
 RESULT_END = "<<<END_SCORE_JSON>>>"
 
+# Cap on the assembled multi-pass score OCR text handed to the score-OCR summarize prompt.
+SCORE_OCR_MAX_PROMPT_CHARS = 16000
+
 # --- Built-in lookup config (YAML overrides/extends it) --------------------------------------
 
 DEFAULT_LOOKUP_CONFIG: dict[str, Any] = {
@@ -158,9 +161,13 @@ DEFAULT_LOOKUP_CONFIG: dict[str, Any] = {
     "prompt_template_path": "config/llm_prompts/lookup_instrumentation.txt",
     "stream_output": True,
     "extra_args": [],
-    # Local score OCR (Stage A).
+    # Local score OCR (Stage A). When the leading pages were OCR'd, Script 02's multi-pass OCR
+    # candidates are reused and all passes are handed to the LLM (via the score-OCR prompt) to
+    # reconcile, instead of trusting a single word-count-weighted pass or re-OCRing from scratch.
     "local_score_enabled": True,
     "summarize_prompt_template_path": "config/llm_prompts/summarize_score_instrumentation.txt",
+    "summarize_score_ocr_prompt_template_path":
+        "config/llm_prompts/summarize_score_ocr_instrumentation.txt",
     "max_score_pages": 2,
     "min_score_text_chars": 200,
     "reocr_dpi": 300,
@@ -170,10 +177,11 @@ DEFAULT_LOOKUP_CONFIG: dict[str, Any] = {
     # of all. Score type only governs whether a conductor score appears in the *displayed* full
     # instrumentation elsewhere -- a separate concern from discovering instrumentation here -- so
     # nothing is excluded by default. The knob stays available for callers that want to suppress a
-    # type. A score whose mean OCR confidence over the read pages is below the floor is still
-    # treated as unreadable and falls through to the online lookup.
+    # type. A scanned score is skipped only when even its *best* OCR pass over the read pages is
+    # below this floor (mean confidence, 0..1 scale); such pages are treated as unreadable and fall
+    # through to the online lookup.
     "local_score_types_excluded": [],
-    "min_score_ocr_confidence": 60,
+    "min_score_ocr_confidence": 0.4,
     # Remote image OCR (Stage C).
     "image_ocr_enabled": True,
     # WindRep stage (runs between local score OCR and the general online lookup). Always tried;
@@ -832,6 +840,66 @@ def mean_score_ocr_confidence(
     if not confidences:
         return None
     return sum(confidences) / len(confidences)
+
+
+def best_score_ocr_confidence(
+    pdf_path: str, text_by_pdf: dict[str, list[dict[str, Any]]], max_pages: int
+) -> float | None:
+    """Highest single OCR-pass confidence across the leading OCR pages of a score (0..1), or None.
+
+    Reads every multi-pass OCR candidate's confidence (falling back to the page-level
+    ``ocr_confidence`` when a page has no candidates) and returns the maximum -- the best legible
+    pass available for the LLM to reconcile. This avoids hiding a clean low-PSM/high-DPI pass behind
+    the word-count-weighted pass that the page-level scalar happened to select. Returns None when no
+    leading page came from OCR (embedded pages have reliable text and no OCR confidence).
+    """
+    pages = text_by_pdf.get(pdf_path) or []
+    ordered = sorted(pages, key=lambda r: r.get("page_num", 0))[: max(1, max_pages)]
+    best: list[float] = []
+    for rec in ordered:
+        if rec.get("text_source") != "ocr":
+            continue
+        pass_confs = [
+            float(c["confidence"])
+            for c in (rec.get("ocr_candidates") or [])
+            if isinstance(c.get("confidence"), (int, float))
+        ]
+        if pass_confs:
+            best.append(max(pass_confs))
+        elif isinstance(rec.get("ocr_confidence"), (int, float)):
+            best.append(float(rec["ocr_confidence"]))
+    if not best:
+        return None
+    return max(best)
+
+
+def gather_score_ocr_candidates_text(
+    pdf_path: str, text_by_pdf: dict[str, list[dict[str, Any]]], max_pages: int
+) -> str:
+    """Assemble the multi-pass OCR candidates for a score's leading pages into one labelled blob.
+
+    Mirrors Script 02's part-level consolidation: every OCR pass (dpi/psm/confidence) is shown so
+    the LLM can reconcile the noisy passes rather than trusting the single word-count-weighted pass
+    that populated ``ocr_text``. Any detected header text is prepended per page. Returns "" when no
+    leading page carries OCR candidates (the caller then uses the embedded/single-pass text path).
+    """
+    pages = text_by_pdf.get(pdf_path) or []
+    ordered = sorted(pages, key=lambda r: r.get("page_num", 0))[: max(1, max_pages)]
+    chunks: list[str] = []
+    for rec in ordered:
+        candidates = rec.get("ocr_candidates") or []
+        if not candidates:
+            continue
+        headers = rec.get("header_text_candidates") or []
+        chunks.append(f"--- Page {rec.get('page_num')} ---")
+        if headers:
+            chunks.append("[header] " + " ".join(str(h) for h in headers))
+        for c in candidates:
+            chunks.append(
+                f"[dpi={c.get('dpi')} psm={c.get('psm')} conf={c.get('confidence')}] "
+                f"{c.get('text', '')}"
+            )
+    return "\n".join(chunks).strip()[:SCORE_OCR_MAX_PROMPT_CHARS]
 
 
 def reocr_score_pages(
@@ -1729,6 +1797,7 @@ def infer_piece(
     lookup_fn: Callable[[str, dict[str, Any]], dict[str, Any]],
     summarize_fn: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
     summarize_template: str = "",
+    score_ocr_summarize_template: str = "",
     score_text_provider: Callable[[dict[str, Any]], tuple[str | None, dict[str, Any] | None]]
     | None = None,
     image_fetch_fn: Callable[[str, Path, int], Path | None] | None = None,
@@ -1756,13 +1825,22 @@ def infer_piece(
         score_text, score_doc = score_text_provider(piece)
         if score_text:
             score_path = (score_doc or {}).get("pdf_path") if score_doc else None
+            # Reconcile noisy multi-pass OCR with the dedicated score-OCR prompt; clean embedded
+            # text uses the standard summarize prompt.
+            is_multipass_ocr = bool((score_doc or {}).get("score_text_is_multipass_ocr"))
+            stage_a_template = (
+                score_ocr_summarize_template
+                if (is_multipass_ocr and score_ocr_summarize_template)
+                else summarize_template
+            )
             logger.info(
-                "[%s] Stage A: found local score %s (%d chars of text); summarizing into a "
+                "[%s] Stage A: found local score %s (%d chars of %s text); summarizing into a "
                 "contract", piece_id, score_path or "?", len(score_text),
+                "multi-pass OCR" if is_multipass_ocr else "score",
             )
             record = _try_contract_from_text(
                 piece, doc, run_id, score_text,
-                config=config, summarize_fn=summarize, summarize_template=summarize_template,
+                config=config, summarize_fn=summarize, summarize_template=stage_a_template,
                 detection_method=METHOD_LOCAL_SCORE, ocr_source="local_score",
                 local_score_path=score_path,
             )
@@ -1990,6 +2068,7 @@ def config_fingerprint(
     image_ocr_enabled: bool = True,
     windrep_enabled: bool = True,
     windrep_prompt_template: str = "",
+    score_ocr_summarize_template: str = "",
 ) -> str:
     """Fingerprint of the inference-affecting configuration (invalidates stale reuse)."""
     basis = "|".join([
@@ -2008,6 +2087,7 @@ def config_fingerprint(
         ",".join(str(d) for d in (config.get("windrep_wayback_domains") or ())),
         sha256_text(prompt_template),
         sha256_text(summarize_template),
+        sha256_text(score_ocr_summarize_template),
         sha256_text(windrep_prompt_template),
     ])
     return sha256_text(basis)
@@ -2136,6 +2216,8 @@ def build_report(records: list[dict[str, Any]], meta: dict[str, Any]) -> str:
     out.append(f"| Prompt source | {meta['prompt_source']} |")
     if meta.get("summarize_source"):
         out.append(f"| Summarize prompt source | {meta['summarize_source']} |")
+    if meta.get("score_ocr_summarize_source"):
+        out.append(f"| Score-OCR prompt source | {meta['score_ocr_summarize_source']} |")
     out.append(f"| Local score OCR | {'enabled' if meta.get('local_score_enabled') else 'disabled'} |")
     out.append(f"| Lookup | {'enabled' if meta['lookup_enabled'] else 'disabled'} |")
     out.append(f"| Image OCR | {'enabled' if meta.get('image_ocr_enabled') else 'disabled'} |")
@@ -2478,6 +2560,13 @@ def main(
     summarize_path = Path(config.get("summarize_prompt_template_path", "")).resolve()
     summarize_template, summarize_source = load_summarize_template(summarize_path)
 
+    score_ocr_summarize_path = Path(
+        config.get("summarize_score_ocr_prompt_template_path", "")
+    ).resolve()
+    score_ocr_summarize_template, score_ocr_summarize_source = load_summarize_template(
+        score_ocr_summarize_path
+    )
+
     windrep_prompt_template = ""
     if windrep_enabled:
         windrep_path = Path(config.get("windrep_prompt_template_path", "")).resolve()
@@ -2536,7 +2625,13 @@ def main(
     def _score_text_provider(
         piece: dict[str, Any],
     ) -> tuple[str | None, dict[str, Any] | None]:
-        """Return (score_text, score_doc) for a piece, reusing Script 02 text; re-OCR if thin."""
+        """Return (score_text, score_doc) for a piece, reusing Script 02 text.
+
+        When the leading pages were OCR'd, every multi-pass OCR candidate Script 02 already computed
+        is handed to the LLM (flagged so Stage A uses the dedicated score-OCR prompt to reconcile
+        the noisy passes) -- gated only when even the best pass is unreadably low. Otherwise the
+        embedded/single-pass text is used, re-OCRing from scratch when it is thin.
+        """
         pid = piece.get("piece_id")
         best = find_best_score_doc(str(pid or ""), score_docs_by_piece)
         if not best:
@@ -2545,14 +2640,25 @@ def main(
         pdf_path = str(best.get("pdf_path") or "")
         logger.info("[%s] Selected local score %s (score_type=%s)",
                     pid, pdf_path, best.get("score_type") or "?")
-        mean_conf = mean_score_ocr_confidence(pdf_path, text_by_pdf, max_score_pages)
-        if mean_conf is not None and mean_conf < min_score_ocr_conf:
+
+        # Preferred path: reuse Script 02's multi-pass OCR candidates and let the LLM reconcile.
+        multipass = gather_score_ocr_candidates_text(pdf_path, text_by_pdf, max_score_pages)
+        if multipass:
+            best_conf = best_score_ocr_confidence(pdf_path, text_by_pdf, max_score_pages)
+            if best_conf is not None and best_conf < min_score_ocr_conf:
+                logger.info(
+                    "[%s] Local score OCR quality too low (best pass confidence %.2f < %.2f); "
+                    "skipping local score and using online sources",
+                    pid, best_conf, min_score_ocr_conf,
+                )
+                return None, best
             logger.info(
-                "[%s] Local score OCR quality too low (mean confidence %.1f < %.1f); skipping "
-                "local score and using online sources",
-                pid, mean_conf, min_score_ocr_conf,
+                "[%s] Reusing %d chars of multi-pass score OCR from Script 02 (best pass %.2f)",
+                pid, len(multipass), best_conf if best_conf is not None else -1.0,
             )
-            return None, best
+            return multipass, {**best, "score_text_is_multipass_ocr": True}
+
+        # Fallback: embedded text (born-digital score) or legacy data without OCR candidates.
         text = get_extracted_score_text(pdf_path, text_by_pdf, max_score_pages)
         if len(text.strip()) < max(1, min_score_text):
             abs_path = (lib_root / pdf_path) if lib_root else Path(pdf_path)
@@ -2573,6 +2679,7 @@ def main(
         config, prompt_template, lookup_enabled,
         summarize_template, local_score_enabled, image_ocr_enabled,
         windrep_enabled, windrep_prompt_template,
+        score_ocr_summarize_template,
     )
 
     ckpt_path = make_checkpoint_path(output, CHECKPOINT_FILENAME)
@@ -2713,6 +2820,7 @@ def main(
                 lookup_fn=run_copilot_lookup,
                 summarize_fn=run_copilot_lookup,
                 summarize_template=summarize_template,
+                score_ocr_summarize_template=score_ocr_summarize_template,
                 score_text_provider=_score_text_provider if local_score_enabled else None,
                 image_fetch_fn=download_image if image_ocr_enabled else None,
                 image_ocr_fn=ocr_image_file if image_ocr_enabled else None,
@@ -2755,6 +2863,7 @@ def main(
             "config_source": config_source,
             "prompt_source": prompt_source,
             "summarize_source": summarize_source,
+            "score_ocr_summarize_source": score_ocr_summarize_source,
             "lookup_enabled": lookup_enabled,
             "local_score_enabled": local_score_enabled,
             "image_ocr_enabled": image_ocr_enabled,

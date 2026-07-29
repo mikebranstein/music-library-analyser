@@ -980,6 +980,143 @@ def test_mean_score_ocr_confidence_none_for_embedded_only():
     assert expected.mean_score_ocr_confidence("band/p1/score.pdf", text_by_pdf, 2) is None
 
 
+def test_best_score_ocr_confidence_uses_best_pass_not_scalar():
+    text_by_pdf = {
+        "band/p1/score.pdf": [
+            {
+                "page_num": 1,
+                "text_source": "ocr",
+                "ocr_confidence": 0.55,  # word-count-weighted scalar hides the clean pass
+                "ocr_candidates": [
+                    {"dpi": 300, "psm": 3, "confidence": 0.82, "word_count": 154, "text": "a"},
+                    {"dpi": 300, "psm": 6, "confidence": 0.55, "word_count": 387, "text": "b"},
+                ],
+            },
+            {
+                "page_num": 2,
+                "text_source": "ocr",
+                "ocr_confidence": 0.35,
+                "ocr_candidates": [
+                    {"dpi": 300, "psm": 3, "confidence": 0.47, "word_count": 278, "text": "c"},
+                ],
+            },
+        ]
+    }
+    # Max across every pass on the leading pages: max(0.82, 0.55, 0.47) == 0.82.
+    assert expected.best_score_ocr_confidence("band/p1/score.pdf", text_by_pdf, 2) == 0.82
+
+
+def test_best_score_ocr_confidence_falls_back_to_scalar_without_candidates():
+    text_by_pdf = {
+        "band/p1/score.pdf": [
+            {"page_num": 1, "text_source": "ocr", "ocr_confidence": 0.4, "ocr_candidates": []},
+        ]
+    }
+    assert expected.best_score_ocr_confidence("band/p1/score.pdf", text_by_pdf, 2) == 0.4
+
+
+def test_best_score_ocr_confidence_none_for_embedded_only():
+    text_by_pdf = {
+        "band/p1/score.pdf": [{"page_num": 1, "text_source": "embedded"}],
+    }
+    assert expected.best_score_ocr_confidence("band/p1/score.pdf", text_by_pdf, 2) is None
+
+
+def test_gather_score_ocr_candidates_text_labels_every_pass():
+    text_by_pdf = {
+        "band/p1/score.pdf": [
+            {
+                "page_num": 1,
+                "text_source": "ocr",
+                "header_text_candidates": ["MacArthur Park"],
+                "ocr_candidates": [
+                    {"dpi": 300, "psm": 3, "confidence": 0.82, "text": "Flute Oboe Clarinet"},
+                    {"dpi": 600, "psm": 3, "confidence": 0.78, "text": "Flute Oboe Ciarinet"},
+                ],
+            },
+            {"page_num": 3, "text_source": "ocr", "ocr_candidates": []},  # skipped (no data)
+        ]
+    }
+    blob = expected.gather_score_ocr_candidates_text("band/p1/score.pdf", text_by_pdf, 2)
+    assert "--- Page 1 ---" in blob
+    assert "[header] MacArthur Park" in blob
+    assert "[dpi=300 psm=3 conf=0.82] Flute Oboe Clarinet" in blob
+    assert "[dpi=600 psm=3 conf=0.78] Flute Oboe Ciarinet" in blob
+
+
+def test_gather_score_ocr_candidates_text_empty_without_candidates():
+    text_by_pdf = {
+        "band/p1/score.pdf": [{"page_num": 1, "text_source": "embedded", "embedded_text": "x"}],
+    }
+    assert expected.gather_score_ocr_candidates_text("band/p1/score.pdf", text_by_pdf, 2) == ""
+
+
+def test_infer_piece_stage_a_multipass_uses_score_ocr_prompt():
+    piece = _piece(observed=[_observed("flute", 1)])
+    parts = [
+        {"canonical_instrument": "flute", "part_index": 1, "label": "Flute 1", "required": True},
+    ]
+    used_templates: list[str] = []
+
+    def summarize(prompt: str, config: dict[str, Any]) -> dict[str, Any]:
+        used_templates.append("OCR" if prompt.startswith("OCR::") else "STD")
+        return _score_result(parts)
+
+    def score_provider(p: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
+        # Flagged as multi-pass OCR, so Stage A must use the dedicated score-OCR prompt.
+        return _LONG_SCORE_TEXT, {
+            "pdf_path": "band/p1/full_score.pdf",
+            "score_type": "conductor",
+            "score_text_is_multipass_ocr": True,
+        }
+
+    rec = expected.infer_piece(
+        piece, None, "run1",
+        config=dict(expected.DEFAULT_LOOKUP_CONFIG),
+        prompt_template="{title_guess}",
+        lookup_enabled=True,
+        lookup_fn=lambda p, c: (_ for _ in ()).throw(
+            AssertionError("online lookup must not run when local score OCR succeeds")
+        ),
+        summarize_fn=summarize,
+        summarize_template="STD::{score_text}",
+        score_ocr_summarize_template="OCR::{score_text}",
+        score_text_provider=score_provider,
+    )
+    assert used_templates == ["OCR"]
+    assert rec["detection_method"] == "local_score_ocr"
+    assert rec["ocr_source"] == "local_score"
+
+
+def test_infer_piece_stage_a_embedded_uses_standard_prompt():
+    piece = _piece(observed=[_observed("flute", 1)])
+    parts = [
+        {"canonical_instrument": "flute", "part_index": 1, "label": "Flute 1", "required": True},
+    ]
+    used_templates: list[str] = []
+
+    def summarize(prompt: str, config: dict[str, Any]) -> dict[str, Any]:
+        used_templates.append("OCR" if prompt.startswith("OCR::") else "STD")
+        return _score_result(parts)
+
+    def score_provider(p: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
+        # No multi-pass flag (born-digital score) -> standard summarize prompt.
+        return _LONG_SCORE_TEXT, {"pdf_path": "band/p1/full_score.pdf", "score_type": "full"}
+
+    expected.infer_piece(
+        piece, None, "run1",
+        config=dict(expected.DEFAULT_LOOKUP_CONFIG),
+        prompt_template="{title_guess}",
+        lookup_enabled=True,
+        lookup_fn=lambda p, c: _score_result(parts),
+        summarize_fn=summarize,
+        summarize_template="STD::{score_text}",
+        score_ocr_summarize_template="OCR::{score_text}",
+        score_text_provider=score_provider,
+    )
+    assert used_templates == ["STD"]
+
+
 
 def test_infer_piece_stage_a_no_score_defers_to_lookup():
     piece = _piece(observed=[_observed("cornet", 1)])

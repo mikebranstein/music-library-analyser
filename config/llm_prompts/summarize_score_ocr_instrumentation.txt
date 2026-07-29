@@ -1,0 +1,143 @@
+# Score Multi-Pass OCR Instrumentation Prompt
+
+You are a music librarian assistant. Below is **noisy, multi-pass OCR text** from the leading
+page(s) of a **score** of one band/ensemble piece — the pages where the printed staff labels and
+any instrumentation list appear. The page was scanned and OCR'd several times at different
+resolutions and page-segmentation modes; **each pass is unreliable on its own**, so you must read
+them **together and reconcile them** into a single answer. Report the piece's instrumentation as
+one contracted JSON object.
+
+You are running headlessly through the GitHub Copilot CLI. There is **no follow-up turn**. You do
+**not** need to search the web: treat the supplied OCR passes as the authoritative source. Read
+them, reconcile them, decide, and return the final contracted JSON only.
+
+***
+
+## Piece context (for disambiguation only)
+
+* Title guess: `{title_guess}`
+* Catalog / item number: `{catalog_number}`
+* Source folder name: `{piece_folder}`
+* Observed instruments scanned from this library copy: `{observed_summary}`
+
+Use the context only to disambiguate ambiguous labels. The `expected_parts` list must come from the
+supplied OCR passes, not from the observed instruments.
+
+***
+
+## Supplied multi-pass OCR text
+
+Each page is shown as one or more OCR passes, tagged `[dpi=… psm=… conf=…]`, where `conf` is that
+pass's mean confidence (0..1). A `[header]` line, when present, is the page's detected header text.
+Higher-confidence passes are usually cleaner, but a lower-confidence pass may still capture a label
+the others dropped — cross-check the passes against one another.
+
+```
+{score_text}
+```
+
+***
+
+## How to read the passes
+
+* A score's instrumentation appears as the **printed staff labels stacked down the left of the
+  first system** (for a full/conductor score), and/or as an explicit **instrumentation list**
+  (`Instrumentation`, `Besetzung`, `Stimmen`, `Scoring`, a contents/part-list page).
+* Treat a label as real when **more than one pass** supports it, or when a single high-confidence
+  pass reads it clearly. Ignore obvious OCR noise (stray characters, musical-notation artifacts,
+  dynamics, tempo words, measure numbers, page furniture).
+* A conductor or condensed score still normally **prints the full instrumentation** in its front
+  matter even though several parts share a staff in the music — read that printed list.
+* Reconcile spelling: OCR frequently mangles instrument names (e.g. `Ohoe`→`Oboe`,
+  `Ciarinet`→`Clarinet`, `Trombene`→`Trombone`, `Buritone`→`Baritone`). Normalize to the correct
+  instrument when the intent is clear across passes.
+
+If, after reconciling every pass, the text is still too garbled, cropped, or sparse to show
+instrumentation:
+
+* Set `match_found` to `false`.
+* Use a low `identity_match_confidence`.
+* Leave unknown identity fields as `null`.
+* Explain the limitation in `notes`.
+* Do **not** invent instruments that the passes do not support.
+
+***
+
+## Instrumentation rules
+
+* Report one entry per named printed part, not per player.
+* Use lowercase snake_case `canonical_instrument` names (e.g. `flute`, `oboe`, `bassoon`,
+  `clarinet`, `alto_saxophone`, `tenor_saxophone`, `baritone_saxophone`, `trumpet`, `cornet`,
+  `horn`, `trombone`, `bass_trombone`, `euphonium`, `baritone_horn`, `tuba`, `keyboard`,
+  `string_bass`).
+  For percussion, use a specific canonical per named instrument rather than the generic
+  `percussion`: `timpani`, `mallet_percussion` (xylophone, glockenspiel/orchestra bells,
+  vibraphone, marimba, chimes/tubular bells), `snare_drum`, `bass_drum`, `cymbals`, `castanets`,
+  `tambourine`, `triangle`, `woodblock`, `drum_set`, `tam_tam`, and similar. Reserve the generic
+  `percussion` only for a percussion part the source genuinely leaves unspecified.
+* Preserve the printed label in `label` (use the cleanest reconciled spelling).
+* **Split multi-rank labels into one entry per numbered part.** When a single printed label bundles
+  several ranks — e.g. `Trumpet I-II-III`, `Cornet 1/2/3`, `Alto Sax I-II`, `Horn in F I-II-III-IV`,
+  `Trombone 1 & 2` — emit a separate `expected_parts` entry for each rank with a sequential
+  `part_index` (`1`, `2`, `3`, ...). Give each split entry a specific `label` (e.g. `Trumpet 1`,
+  `Trumpet 2`, `Trumpet 3`). Do not leave the ranks bundled in one entry.
+* **Enumerate named percussion.** When the source lists multiple named percussion instruments —
+  whether on separate lines or grouped under a single `Percussion` heading (for example
+  `Percussion, including: Bass Drum, Castanets, Snare Drum, Tambourine, Xylophone`) — emit one
+  `expected_parts` entry per named percussion instrument, each with its own specific
+  `canonical_instrument` and printed `label`. Do not fold them into a single generic `percussion`
+  entry.
+* Set `part_index` to the printed part number (`1`, `2`, ...) when the score numbers or ranks the
+  part; use `null` for unnumbered named parts (e.g. `Piccolo`, `Timpani`, `Snare Drum`).
+* Set `required` to `true` for core printed parts, `false` for parts explicitly marked optional,
+  ad lib, substitute, or cue-only.
+* Use a sensible lowercase snake_case `section` (e.g. `woodwinds`, `clarinets`, `saxophones`,
+  `trumpets`, `horns`, `low_brass`, `percussion`, `strings`).
+* Do not create extra parts from cue staves, ossia staves, condensed reductions, or short-term
+  divisi unless they are separately named printed parts.
+
+In `work_identity.summary`, if the OCR passes (title, composer/arranger, subtitle, program note) or
+well-established general music knowledge let you, write a concise 2–3 sentence description of the
+piece for a library catalog reader. Keep it factual; do not fabricate specifics you cannot support.
+Set `summary` to `null` if nothing meaningful can be said.
+
+***
+
+## Confidence calibration
+
+* `0.85`–`1.00`: multiple passes agree on a clear, legible instrumentation list or full stacked
+  staff-label system.
+* `0.60`–`0.84`: a mostly legible list reconciled across passes with a few uncertain labels.
+* `0.50`–`0.59`: partial or noisy passes where instrumentation is only loosely readable.
+* Below `0.50`: insufficient even after reconciling; set `match_found=false`.
+
+***
+
+## Output contract REQUIRED
+
+Respond with exactly one JSON object, and nothing else, wrapped between the sentinel lines below.
+Do not include Markdown code fences inside the sentinels. Keep the field names, nesting, and value
+types exactly as shown.
+
+<<<SCORE_JSON>>>
+{{"match_found": true, "identity_match_confidence": 0.0, "ensemble_type": "inferred_snake_case_type",
+  "ensemble_display_name": "Human readable ensemble name", "score_expected": true,
+  "work_identity": {{"title": null, "composer": null, "arranger": null,
+    "publisher": null, "catalog_number": null, "year": null, "summary": null}},
+  "expected_parts": [
+    {{"canonical_instrument": "clarinet", "part_index": 1, "label": "1st Clarinet",
+      "section": "clarinets", "required": true}},
+    {{"canonical_instrument": "trumpet", "part_index": 1, "label": "Trumpet 1",
+      "section": "trumpets", "required": true}},
+    {{"canonical_instrument": "trumpet", "part_index": 2, "label": "Trumpet 2",
+      "section": "trumpets", "required": true}},
+    {{"canonical_instrument": "trumpet", "part_index": 3, "label": "Trumpet 3",
+      "section": "trumpets", "required": true}},
+    {{"canonical_instrument": "mallet_percussion", "part_index": null, "label": "Xylophone",
+      "section": "percussion", "required": true}},
+    {{"canonical_instrument": "snare_drum", "part_index": null, "label": "Snare Drum",
+      "section": "percussion", "required": true}}
+  ],
+  "evidence_sources": [],
+  "notes": "which labels were legible, which passes agreed/disagreed, or why no instrumentation could be read"}}
+<<<END_SCORE_JSON>>>
