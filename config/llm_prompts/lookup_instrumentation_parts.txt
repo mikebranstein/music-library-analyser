@@ -18,6 +18,7 @@ best-supported result available so far. Do **not** fabricate missing details.
 * Catalog / item number: `{catalog_number}`
 * Source folder name: `{piece_folder}`
 * Resolved work identity: `{work_identity}`
+* Identity candidates (composer/arranger/publisher/year): `{identity_candidates}`
 * Ensemble type: `{ensemble_type}`
 * Source URLs already found in phase 1: `{source_urls}`
 

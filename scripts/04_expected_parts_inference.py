@@ -248,6 +248,7 @@ DEFAULT_INSTRUMENTATION_TEMPLATE = (
     "- Title guess: {title_guess}\n"
     "- Catalog / item number: {catalog_number}\n"
     "- Resolved work identity: {work_identity}\n"
+    "- Identity candidates (composer/arranger/publisher/year): {identity_candidates}\n"
     "- Ensemble type: {ensemble_type}\n"
     "- Source URLs already found: {source_urls}\n\n"
     "Report one entry per named printed part with a lowercase snake_case canonical_instrument, a\n"
@@ -406,14 +407,16 @@ def build_lookup_query(piece: dict[str, Any], doc: dict[str, Any] | None) -> dic
 
 
 def build_instrumentation_query(
-    identity_result: dict[str, Any], piece: dict[str, Any]
+    identity_result: dict[str, Any], piece: dict[str, Any], doc: dict[str, Any] | None = None
 ) -> dict[str, str]:
     """Assemble the phase-2 (instrumentation) prompt fields from a resolved identity.
 
     Deliberately carries NO library-holdings information (`observed_summary`): the second pass sees
     only the edition identity and the source/image URLs found in phase 1, so the returned
     instrumentation reflects the published edition and can never be seeded by the parts this library
-    holds.
+    holds. The document's ``identity_candidates`` (composer/arranger/publisher/year scraped from the
+    score) ARE passed through as a disambiguation fallback -- they are work-identity metadata, not
+    holdings -- so phase 2 still knows the composer/arranger even if phase 1 did not resolve them.
     """
     identity = identity_result.get("work_identity")
     identity = identity if isinstance(identity, dict) else {}
@@ -423,11 +426,15 @@ def build_instrumentation_query(
         for s in (sources if isinstance(sources, list) else [])
         if isinstance(s, dict) and str(s.get("url") or "").strip()
     ]
+    candidates: dict[str, Any] = {}
+    if doc and isinstance(doc.get("identity_candidates"), dict):
+        candidates = doc["identity_candidates"]
     return {
         "title_guess": str(piece.get("piece_title_guess") or "unknown"),
         "catalog_number": str(piece.get("catalog_number") or "unknown"),
         "piece_folder": str(piece.get("piece_folder") or "unknown"),
         "work_identity": json.dumps(identity, ensure_ascii=False) if identity else "unknown",
+        "identity_candidates": json.dumps(candidates, ensure_ascii=False) if candidates else "none",
         "ensemble_type": str(identity_result.get("ensemble_type") or "unknown"),
         "source_urls": json.dumps(urls, ensure_ascii=False) if urls else "none",
     }
@@ -2117,16 +2124,18 @@ def fetch_clean_instrumentation(
     instrumentation_template: str,
     *,
     piece_id: Any = None,
+    doc: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Phase 2 of an external lookup: fetch the identified edition's instrumentation cleanly.
 
     The second pass is seeded ONLY with the identity resolved in phase 1 (work identity, ensemble,
-    source URLs) -- never with library holdings -- so ``expected_parts`` reflect the published
-    edition and can never be echoed back from the parts this library happens to own. Returns a
-    merged result (phase-1 identity + phase-2 parts, with evidence combined) ready for
-    ``build_matched_record``, or None when the clean pass yields no parts.
+    source URLs) plus the document's work-identity candidates (composer/arranger/publisher/year) --
+    never with library holdings -- so ``expected_parts`` reflect the published edition and can never
+    be echoed back from the parts this library happens to own. Returns a merged result (phase-1
+    identity + phase-2 parts, with evidence combined) ready for ``build_matched_record``, or None
+    when the clean pass yields no parts.
     """
-    query = build_instrumentation_query(identity_result, piece)
+    query = build_instrumentation_query(identity_result, piece, doc)
     prompt = render_prompt(instrumentation_template, query)
     try:
         parts_result = lookup_fn(prompt, {**config, "piece_id": piece_id})
@@ -2280,7 +2289,7 @@ def infer_piece(
                 if windrep_conf >= threshold:
                     clean = fetch_clean_instrumentation(
                         windrep_result, piece, windrep_config, lookup_fn, instr_template,
-                        piece_id=piece_id,
+                        piece_id=piece_id, doc=doc,
                     )
                     if clean is not None:
                         logger.info(
@@ -2330,7 +2339,7 @@ def infer_piece(
     if confidence >= threshold:
         # Phase 2: fetch the identified edition's instrumentation WITHOUT library-holdings context.
         clean = fetch_clean_instrumentation(
-            result, piece, config, lookup_fn, instr_template, piece_id=piece_id
+            result, piece, config, lookup_fn, instr_template, piece_id=piece_id, doc=doc
         )
         if clean is not None:
             logger.info("[%s] Stage B matched an edition; instrumentation from clean phase-2 "

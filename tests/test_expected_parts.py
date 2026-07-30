@@ -207,6 +207,20 @@ def test_build_instrumentation_query_excludes_holdings():
     assert "Found Title" in query["work_identity"]
 
 
+def test_build_instrumentation_query_passes_identity_candidates_not_holdings():
+    """Phase 2 gets composer/arranger candidates as a fallback, but still no library holdings."""
+    piece = _piece(observed=[_observed("cornet", 1), _observed("euphonium", 1)])
+    identity = _score_result([], confidence=0.9)
+    doc = {"identity_candidates": {"composer": "Henry Mancini", "arranger": "Jane Doe"}}
+    query = expected.build_instrumentation_query(identity, piece, doc)
+    assert "Henry Mancini" in query["identity_candidates"]
+    assert "Jane Doe" in query["identity_candidates"]
+    # Holdings never leak in even when candidates are supplied.
+    assert "euphonium" not in json.dumps(query).lower()
+    # Absent a doc the field degrades to "none".
+    assert expected.build_instrumentation_query(identity, piece)["identity_candidates"] == "none"
+
+
 def test_fetch_clean_instrumentation_two_phase_merges_identity_and_parts():
     """Phase 2 fetches parts with a holdings-free prompt and merges them onto phase-1 identity."""
     piece = _piece(observed=[_observed("cornet", 1), _observed("euphonium", 1)])
