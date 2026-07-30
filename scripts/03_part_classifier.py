@@ -921,6 +921,21 @@ def classify_document(
 
         llm_canon = llm_instruments(doc_record, lexicon)
         vis_canon, vis_chairs = vision_facets(doc_record, lexicon)
+        # On a single scanned part the OCR->LLM consolidation's characteristic failure is *adding*
+        # an instrument hallucinated from noisy full-page OCR (e.g. "Flutes" -> flute + piccolo),
+        # whereas the vision pass reads the actual printed label. When the two disagree only by the
+        # LLM naming extra instruments vision did not see, on a small (part-sized, not score-sized)
+        # set, and the vision read is at least as confident, trust vision instead of the LLM below.
+        llm_conf = doc_record.get("ocr_llm_confidence") if doc_record else None
+        vis_conf = doc_record.get("vision_confidence") if doc_record else None
+        prefer_vision = (
+            bool(vis_canon)
+            and set(vis_canon) < set(llm_canon)
+            and len(llm_canon) <= 3
+            and isinstance(vis_conf, (int, float))
+            and isinstance(llm_conf, (int, float))
+            and vis_conf >= llm_conf
+        )
         # The printed part name sits in the upper-left corner and is read earliest-match-first so the
         # label wins over any surviving reference. The full page text is a weaker signal, used only
         # to confirm the filename or recover a same-section footer/credit instrument.
@@ -950,7 +965,7 @@ def classify_document(
         ):
             content_canon = None
 
-        if llm_canon:
+        if llm_canon and not prefer_vision:
             # (1) The document-level OCR->LLM consolidation is the strongest in-file signal. It is
             # authoritative for instrument identity and may expand one physical part into several
             # instruments (e.g. a "Percussion" book -> snare/bass/castanets).

@@ -355,6 +355,56 @@ def test_classify_uses_vision_part_read_for_chairs():
     assert "Flute 1" in rec["predicted_part"] and "Flute 2" in rec["predicted_part"]
 
 
+def test_classify_prefers_vision_over_llm_over_add_on_confidence():
+    # The plural "Flutes" file: OCR->LLM hallucinated an extra piccolo from noisy OCR (low conf),
+    # while the vision pass read "1st & 2nd C Flutes" off the image (high conf). The higher-confidence
+    # vision read must win, expanding into both flute chairs and dropping the spurious piccolo.
+    inv = {
+        "pdf_path": "P/005 Mancini Medley Flutes.pdf",
+        "pdf_filename": "005 Mancini Medley Flutes.pdf",
+        "piece_folder": "005 Mancini Medley",
+        "piece_id": "abc",
+        "file_fingerprint": "fp1",
+    }
+    doc = {
+        "ocr_llm_status": "success",
+        "ocr_llm_instruments": ["flute", "piccolo"],
+        "ocr_llm_confidence": 0.7,
+        "vision_status": "success",
+        "vision_instruments": ["flute"],
+        "vision_part_numbers": [1, 2],
+        "vision_part_label": "1st & 2nd C Flutes",
+        "vision_confidence": 0.95,
+    }
+    rec = _classify(inv, doc=doc)
+    canonicals = {(f["canonical"], f["part_index"]) for f in rec["instruments"]}
+    assert canonicals == {("flute", 1), ("flute", 2)}
+    assert not any(f["canonical"] == "piccolo" for f in rec["instruments"])
+
+
+def test_classify_keeps_llm_when_more_confident_than_vision():
+    # When the LLM's extra instrument is at least as confident as the vision read, the LLM stays
+    # authoritative (its multi-instrument expansion is trusted), so vision does not override it.
+    inv = {
+        "pdf_path": "P/005 Mancini Medley Flutes.pdf",
+        "pdf_filename": "005 Mancini Medley Flutes.pdf",
+        "piece_folder": "005 Mancini Medley",
+        "piece_id": "abc",
+        "file_fingerprint": "fp1",
+    }
+    doc = {
+        "ocr_llm_status": "success",
+        "ocr_llm_instruments": ["flute", "piccolo"],
+        "ocr_llm_confidence": 0.95,
+        "vision_status": "success",
+        "vision_instruments": ["flute"],
+        "vision_part_numbers": [1, 2],
+        "vision_confidence": 0.9,
+    }
+    rec = _classify(inv, doc=doc)
+    assert any(f["canonical"] == "piccolo" for f in rec["instruments"])
+
+
 def test_classify_vision_ignored_without_success():
     # A failed vision result must not alter the filename-based classification.
     inv = {
