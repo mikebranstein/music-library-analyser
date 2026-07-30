@@ -682,6 +682,40 @@ def test_collapse_transposition_editions_split_across_groups():
     assert {c["transposition"] for c in collapsed} == {"F", "Eb"}
 
 
+def test_collapse_transposition_editions_merge_and_annotate_single_group():
+    # One horn group (Horn in F I-IV): the Eb edition is a transposition alternate of the F part, so
+    # it collapses into one chair set and the editions held are recorded, not counted as extra parts.
+    observed = [
+        {**_observed_combined([("horn", 1), ("horn", 2)]), "clef": None, "transposition": "F"},
+        {**_observed_combined([("horn", 1), ("horn", 2)]), "clef": None, "transposition": "Eb"},
+    ]
+    key = expected._facet_set_key(observed[0])
+    collapsed = expected.collapse_clef_editions(observed, {key: 1})
+    assert len(collapsed) == 1
+    assert collapsed[0]["observed_transpositions"] == ["E\u266d", "F"]
+
+
+def test_reconcile_transposition_alternate_annotates_not_inflates():
+    # Regression (Mancini Medley): the score lists Horn in F I-IV only; the library holds the F and
+    # Eb editions of chairs 1&2. The Eb is an alternate of the F, so only I & II are present (III/IV
+    # missing) and the held editions surface on the filled slots -- no phantom chairs, no surplus.
+    slots = [
+        {"canonical": "horn", "part_index": i, "label": f"Horn in F {i}", "required": True}
+        for i in (1, 2, 3, 4)
+    ]
+    observed = [
+        {**_observed_combined([("horn", 1), ("horn", 2)]), "clef": None, "transposition": "F"},
+        {**_observed_combined([("horn", 1), ("horn", 2)]), "clef": None, "transposition": "Eb"},
+    ]
+    expected_parts, unexpected = expected.reconcile_parts(slots, observed)
+    present = {e["part_index"]: e["present"] for e in expected_parts}
+    assert present[1] and present[2]
+    assert not present[3] and not present[4]
+    assert unexpected == []
+    filled = [e for e in expected_parts if e["present"]]
+    assert all(e["observed_transpositions"] == ["E\u266d", "F"] for e in filled)
+
+
 def test_collapse_same_transposition_copies_stay_separate():
     # Two copies of the same key are two physical parts, not editions of one -> keep both, exactly
     # as same-clef copies are kept. Adding transposition to the bucket key must not change this.

@@ -1303,6 +1303,17 @@ def _unexpected_label(entry: dict[str, Any]) -> str:
 # Display abbreviations for the clef editions a part may be published in.
 _CLEF_DISPLAY: dict[str, str] = {"bass": "BC", "treble": "TC"}
 
+# Prettified transposition editions (e.g. an F horn also held as its E-flat alternate).
+_TRANSPOSITION_DISPLAY: dict[str, str] = {
+    "Bb": "B\u266d", "Eb": "E\u266d", "Ab": "A\u266d", "Db": "D\u266d", "Gb": "G\u266d",
+}
+
+
+def _transposition_display(value: Any) -> str | None:
+    if not value:
+        return None
+    return _TRANSPOSITION_DISPLAY.get(value, str(value))
+
 
 def _facet_set_key(obs: dict[str, Any]) -> tuple[tuple[Any, Any], ...]:
     """Order-independent identity of the instrument set a part represents."""
@@ -1371,15 +1382,18 @@ def collapse_clef_editions(
             for entry in entries[:demand]:
                 clef = entry.get("clef")
                 display = _CLEF_DISPLAY.get(clef, clef) if clef else None
+                trans = _transposition_display(entry.get("transposition"))
                 merged = dict(entry)
                 merged["count"] = int(entry.get("count", 1) or 1)
                 merged["observed_clefs"] = [display] if display else []
+                merged["observed_transpositions"] = [trans] if trans else []
                 collapsed.append(merged)
             continue
         for i in range(instances):
             base: dict[str, Any] | None = None
             total = 0
             clefs: list[str] = []
+            transps: list[str] = []
             for edition in clef_order:
                 bucket = by_clef[edition]
                 if i >= len(bucket):
@@ -1392,9 +1406,13 @@ def collapse_clef_editions(
                 display = _CLEF_DISPLAY.get(clef, clef) if clef else None
                 if display and display not in clefs:
                     clefs.append(display)
+                trans = _transposition_display(entry.get("transposition"))
+                if trans and trans not in transps:
+                    transps.append(trans)
             merged = dict(base) if base is not None else {}
             merged["count"] = total
             merged["observed_clefs"] = sorted(clefs)
+            merged["observed_transpositions"] = sorted(transps)
             collapsed.append(merged)
     return collapsed
 
@@ -1550,6 +1568,7 @@ def reconcile_parts(
             "required": bool(slot.get("required")),
             "present": i in present_ids,
             "observed_clefs": list(obs.get("observed_clefs", [])) if obs else [],
+            "observed_transpositions": list(obs.get("observed_transpositions", [])) if obs else [],
         })
     return expected, unexpected
 
@@ -2400,8 +2419,8 @@ def render_piece_instrumentation_body(rec: dict[str, Any]) -> list[str]:
             idx_cell = "-" if idx is None else str(idx)
             required = "required" if part.get("required") else "optional"
             if part.get("present"):
-                clefs = part.get("observed_clefs") or []
-                observed = f"yes ({', '.join(clefs)})" if clefs else "yes"
+                editions = (part.get("observed_clefs") or []) + (part.get("observed_transpositions") or [])
+                observed = f"yes ({', '.join(editions)})" if editions else "yes"
             else:
                 observed = "MISSING"
             out.append(
