@@ -247,6 +247,48 @@ def _instrumentation(report: dict[str, Any] | None) -> list[dict[str, Any]]:
     return parts
 
 
+def _unlisted(report: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Project held parts that are NOT in the authoritative instrumentation ("Present (unlisted)").
+
+    These come from reconcile's ``unexpected_parts`` -- library holdings that the resolved edition's
+    instrumentation does not list (e.g. a surplus part). They are informational only and are
+    deliberately kept OUT of the completeness math; the site shows them as their own rows so the
+    instrumentation grid stays a faithful mirror of the published edition while still surfacing
+    everything the library actually owns.
+    """
+    if not report:
+        return []
+    rows: list[dict[str, Any]] = []
+    for entry in report.get("unexpected_parts") or []:
+        instruments = entry.get("instruments") or []
+        canonical = instruments[0].get("canonical") if instruments else None
+        part_index = instruments[0].get("part_index") if instruments else None
+        rows.append(
+            {
+                "label": _unexpected_display_label(entry),
+                "canonical_instrument": canonical,
+                "part_index": part_index,
+                "count": int(entry.get("count") or 1),
+            }
+        )
+    return rows
+
+
+def _unexpected_display_label(entry: dict[str, Any]) -> str:
+    """Human-readable label for a held-but-unlisted part (mirrors Script 04's `_unexpected_label`)."""
+    predicted = entry.get("predicted_part")
+    if predicted:
+        return str(predicted)
+    labels: list[str] = []
+    for facet in entry.get("instruments") or []:
+        canonical = facet.get("canonical")
+        if not canonical:
+            continue
+        idx = facet.get("part_index")
+        labels.append(str(canonical) if idx is None else f"{canonical} {idx}")
+    return " / ".join(labels) if labels else "unknown"
+
+
 def _score_info(report: dict[str, Any] | None) -> dict[str, Any]:
     """Summarize a piece's score presence and link to the score document(s)."""
     if not report:
@@ -454,6 +496,7 @@ def build_pieces(
                 "missing_required_count": sp.get("missing_required_count") or 0,
                 "missing_required": _missing_required(report),
                 "instrumentation": _instrumentation(report),
+                "unlisted": _unlisted(report),
                 "has_expected_parts": bool((report or {}).get("expected_parts")),
                 "score": _score_info(report),
                 "instrumentation_source": _instrumentation_source(report),

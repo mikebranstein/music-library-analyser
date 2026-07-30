@@ -88,6 +88,18 @@
 
     // --- Instrumentation (collapsible) --------------------------------------
     var instrumentation = p.instrumentation || [];
+    var unlisted = p.unlisted || [];
+    // No authoritative instrumentation was resolved for this piece: make it explicit that whatever
+    // parts we show are the library's holdings alone, never a verified required list.
+    if (!p.has_expected_parts) {
+      var scoreInfo = p.score || {};
+      var noScoreMsg = scoreInfo.score_missing
+        ? "No score was found for this piece and no authoritative instrumentation could be resolved from any source."
+        : "No authoritative instrumentation could be resolved for this piece.";
+      app.appendChild(el("div", { class: "callout", html:
+        "<strong>No score \u2014 held parts only.</strong> " + noScoreMsg +
+        " The parts listed below are the library's holdings, not a verified required instrumentation, so completeness cannot be judged." }));
+    }
     if (instrumentation.length) {
       app.appendChild(MLG.detailsSection(
         "Instrumentation (" + instrumentation.length + ")",
@@ -101,8 +113,21 @@
         missingRequiredTable(p.missing_required),
         true
       ));
-    } else {
+    } else if (!unlisted.length) {
       app.appendChild(el("p", { class: "muted", text: "No authoritative instrumentation available for this piece." }));
+    }
+
+    // --- Held but not in the instrumentation ("Present (unlisted)") ----------
+    // Parts the library owns that the resolved edition's instrumentation does not list (e.g. an
+    // alternate-transposition copy or a surplus part). Informational only; excluded from
+    // completeness. Shown in their own section so the instrumentation grid stays a faithful mirror
+    // of the published edition.
+    if (unlisted.length) {
+      app.appendChild(MLG.detailsSection(
+        "Also held \u2014 not in instrumentation (" + unlisted.length + ")",
+        unlistedTable(unlisted),
+        false
+      ));
     }
 
     // --- Instrumentation source / provenance (collapsible) ------------------
@@ -182,6 +207,31 @@
       tr.appendChild(el("td", { text: fmt.text(part.section) }));
       tr.appendChild(el("td", {}, [MLG.badge(part.required ? "Required" : "Optional", part.required ? "muted" : "plain")]));
       tr.appendChild(el("td", {}, [part.present ? MLG.badge("Present", "ok") : MLG.badge("Missing", part.required ? "high" : "muted")]));
+      tb.appendChild(tr);
+    });
+    t.appendChild(tb);
+    return el("div", { class: "table-wrap" }, [t]);
+  }
+
+  // "Held but not in the instrumentation" grid: parts the library owns that the resolved edition
+  // does not list. Every row is present by definition and marked "Present (unlisted)"; these never
+  // count toward completeness.
+  function unlistedTable(parts) {
+    var t = el("table", { class: "data instrumentation" });
+    t.appendChild(el("thead", {}, [el("tr", {}, [
+      el("th", { class: "num", text: "#" }),
+      el("th", { text: "Instrument" }),
+      el("th", { class: "num", text: "Copies" }),
+      el("th", { text: "Status" }),
+    ])]));
+    var tb = el("tbody");
+    parts.forEach(function (part, i) {
+      var idx = part.part_index != null ? part.part_index : i + 1;
+      var tr = el("tr", {});
+      tr.appendChild(el("td", { class: "num", text: String(idx) }));
+      tr.appendChild(el("td", { text: fmt.text(part.label || part.canonical_instrument) }));
+      tr.appendChild(el("td", { class: "num", text: String(part.count || 1) }));
+      tr.appendChild(el("td", {}, [MLG.badge("Present (unlisted)", "muted")]));
       tb.appendChild(tr);
     });
     t.appendChild(tb);

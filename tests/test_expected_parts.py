@@ -176,6 +176,80 @@ def test_build_lookup_query():
     assert "Bach" in query["identity_candidates"]
 
 
+def test_build_summarize_prompt_excludes_holdings():
+    """De-taint: score summarize must not receive library-holdings context."""
+    piece = _piece(observed=[_observed("cornet", 1), _observed("euphonium", 1)])
+    prompt = expected.build_summarize_prompt(
+        expected.DEFAULT_SUMMARIZE_TEMPLATE, piece, "Flute\nClarinet 1"
+    )
+    assert "observed_summary" not in prompt
+    assert "euphonium" not in prompt.lower()
+
+
+def test_instrumentation_producing_templates_have_no_holdings_placeholder():
+    """No instrumentation-PRODUCING prompt may reference library holdings."""
+    assert "{observed_summary}" not in expected.DEFAULT_SUMMARIZE_TEMPLATE
+    assert "observed_summary" not in expected.DEFAULT_SUMMARIZE_TEMPLATE
+    assert "{observed_summary}" not in expected.DEFAULT_INSTRUMENTATION_TEMPLATE
+    assert "observed_summary" not in expected.DEFAULT_INSTRUMENTATION_TEMPLATE
+
+
+def test_build_instrumentation_query_excludes_holdings():
+    """Phase-2 instrumentation query carries edition identity but never holdings."""
+    piece = _piece(observed=[_observed("cornet", 1), _observed("euphonium", 1)])
+    identity = _score_result([], confidence=0.9)
+    query = expected.build_instrumentation_query(identity, piece)
+    assert "observed_summary" not in query
+    assert "euphonium" not in json.dumps(query).lower()
+    # Identity + source URLs from phase 1 are carried forward.
+    assert query["ensemble_type"] == "concert_band"
+    assert "example.com" in query["source_urls"]
+    assert "Found Title" in query["work_identity"]
+
+
+def test_fetch_clean_instrumentation_two_phase_merges_identity_and_parts():
+    """Phase 2 fetches parts with a holdings-free prompt and merges them onto phase-1 identity."""
+    piece = _piece(observed=[_observed("cornet", 1), _observed("euphonium", 1)])
+    identity = _score_result([], confidence=0.9)  # phase-1 identity, no parts yet
+    parts = [
+        {"canonical_instrument": "cornet", "part_index": 1, "label": "Cornet 1", "required": True},
+    ]
+    seen_prompts: list[str] = []
+
+    def fake_lookup(prompt: str, config: dict[str, Any]) -> dict[str, Any]:
+        seen_prompts.append(prompt)
+        return _score_result(parts)
+
+    merged = expected.fetch_clean_instrumentation(
+        identity, piece, dict(expected.DEFAULT_LOOKUP_CONFIG), fake_lookup,
+        expected.DEFAULT_INSTRUMENTATION_TEMPLATE, piece_id="p1",
+    )
+    assert merged is not None
+    assert merged["expected_parts"] == parts
+    # Identity carried through from phase 1.
+    assert merged["work_identity"]["title"] == "Found Title"
+    # The phase-2 prompt never mentions library holdings.
+    assert len(seen_prompts) == 1
+    assert "euphonium" not in seen_prompts[0].lower()
+    assert "observed" not in seen_prompts[0].lower()
+
+
+def test_fetch_clean_instrumentation_returns_none_without_parts():
+    """When phase 2 yields no parts, the caller falls through (e.g. to image OCR)."""
+    piece = _piece()
+    identity = _score_result([], confidence=0.9)
+
+    def fake_lookup(prompt: str, config: dict[str, Any]) -> dict[str, Any]:
+        return _score_result([])  # no expected_parts
+
+    merged = expected.fetch_clean_instrumentation(
+        identity, piece, dict(expected.DEFAULT_LOOKUP_CONFIG), fake_lookup,
+        expected.DEFAULT_INSTRUMENTATION_TEMPLATE, piece_id="p1",
+    )
+    assert merged is None
+
+
+
 def test_render_prompt_no_leftover_placeholders():
     template, _ = expected.load_prompt_template(Path("does-not-exist"))
     query = expected.build_lookup_query(_piece(), None)
@@ -715,23 +789,25 @@ def test_collapse_transposition_editions_split_across_groups():
     assert {c["transposition"] for c in collapsed} == {"F", "Eb"}
 
 
-def test_collapse_transposition_editions_merge_and_annotate_single_group():
-    # One horn group (Horn in F I-IV): the Eb edition is a transposition alternate of the F part, so
-    # it collapses into one chair set and the editions held are recorded, not counted as extra parts.
+def test_collapse_transposition_editions_split_single_group():
+    # One horn group in the score (Horn in F I-II) but the library holds both the F and the E-flat
+    # editions of chairs 1&2. The E-flat horn is a genuinely different instrument, so even at demand
+    # 1 the two keys stay split into separate entries rather than merging into one annotated chair.
     observed = [
         {**_observed_combined([("horn", 1), ("horn", 2)]), "clef": None, "transposition": "F"},
         {**_observed_combined([("horn", 1), ("horn", 2)]), "clef": None, "transposition": "Eb"},
     ]
     key = expected._facet_set_key(observed[0])
     collapsed = expected.collapse_clef_editions(observed, {key: 1})
-    assert len(collapsed) == 1
-    assert collapsed[0]["observed_transpositions"] == ["E\u266d", "F"]
+    assert len(collapsed) == 2
+    assert {c["transposition"] for c in collapsed} == {"F", "Eb"}
 
 
-def test_reconcile_transposition_alternate_annotates_not_inflates():
+def test_reconcile_transposition_alternate_left_unlisted_not_inflated():
     # Regression (Mancini Medley): the score lists Horn in F I-IV only; the library holds the F and
-    # Eb editions of chairs 1&2. The Eb is an alternate of the F, so only I & II are present (III/IV
-    # missing) and the held editions surface on the filled slots -- no phantom chairs, no surplus.
+    # Eb editions of chairs 1&2. The E-flat horn is a different instrument (not an alternate of the
+    # F), so only I & II are present (III/IV missing) and the E-flat parts surface as unexpected
+    # (Present, unlisted) -- never filling the empty III/IV chairs.
     slots = [
         {"canonical": "horn", "part_index": i, "label": f"Horn in F {i}", "required": True}
         for i in (1, 2, 3, 4)
@@ -744,9 +820,10 @@ def test_reconcile_transposition_alternate_annotates_not_inflates():
     present = {e["part_index"]: e["present"] for e in expected_parts}
     assert present[1] and present[2]
     assert not present[3] and not present[4]
-    assert unexpected == []
+    # The E-flat horn chairs are reported as unlisted, not merged onto the F rows.
+    assert len(unexpected) == 1
     filled = [e for e in expected_parts if e["present"]]
-    assert all(e["observed_transpositions"] == ["E\u266d", "F"] for e in filled)
+    assert all(e["observed_transpositions"] == ["F"] for e in filled)
 
 
 def test_collapse_same_transposition_copies_stay_separate():
@@ -796,6 +873,41 @@ def test_reconcile_keyed_and_unkeyed_duplicate_merge_no_surplus():
     assert unexpected == []
 
 
+def test_default_transposition_conventions():
+    # Unkeyed cornet/trumpet are B-flat; an unkeyed horn is a Horn in F; concert-pitch instruments
+    # (flute) carry no transposition identity.
+    assert expected._conventional_transposition("trumpet") == "Bb"
+    assert expected._conventional_transposition("cornet") == "Bb"
+    assert expected._conventional_transposition("horn") == "F"
+    assert expected._conventional_transposition("flute") is None
+
+
+def test_slot_transposition_reads_label_then_convention():
+    # An explicit key in the label wins; otherwise the instrument convention supplies it.
+    assert expected._slot_transposition({"canonical": "horn", "label": "E-flat Horn or Alto 1"}) == "Eb"
+    assert expected._slot_transposition({"canonical": "horn", "label": "Horn in F 3"}) == "F"
+    assert expected._slot_transposition({"canonical": "trumpet", "label": "Trumpet 1"}) == "Bb"
+
+
+def test_reconcile_unkeyed_horn_fills_horn_in_f_slot():
+    # An unmarked horn part is a Horn in F by convention, so it fills a Horn in F chair.
+    slots = [{"canonical": "horn", "part_index": 1, "label": "Horn 1", "required": True}]
+    observed = [{**_observed("horn", 1), "clef": None, "transposition": None}]
+    expected_parts, unexpected = expected.reconcile_parts(slots, observed)
+    assert expected_parts[0]["present"] is True
+    assert unexpected == []
+
+
+def test_reconcile_eb_horn_does_not_fill_bare_horn_slot():
+    # Even when the score label omits the key, the horn convention (F) means an explicit E-flat horn
+    # is a different instrument: it stays unlisted and never fills the empty F chair.
+    slots = [{"canonical": "horn", "part_index": 1, "label": "Horn 1", "required": True}]
+    observed = [{**_observed("horn", 1), "clef": None, "transposition": "Eb"}]
+    expected_parts, unexpected = expected.reconcile_parts(slots, observed)
+    assert expected_parts[0]["present"] is False
+    assert len(unexpected) == 1
+
+
 # --- Completeness tiers ----------------------------------------------------------------------
 
 
@@ -832,6 +944,41 @@ def test_infer_piece_confident_complete():
     assert rec["completeness_tier"] == "complete"
     assert rec["needs_review"] is False
     assert rec["ensemble_type"] == "concert_band"
+
+
+def test_infer_piece_stage_b_uses_phase2_parts_not_phase1():
+    """Stage B is two-phase: phase-1 identifies the edition, phase-2 supplies the parts.
+
+    The parts come exclusively from the holdings-free phase-2 lookup, so if phase 1 were to leak a
+    part list it must be ignored in favor of the clean phase-2 instrumentation.
+    """
+    piece = _piece(observed=[_observed("cornet", 1)])
+    phase1_parts = [
+        {"canonical_instrument": "tuba", "part_index": 1, "label": "LEAK", "required": True},
+    ]
+    phase2_parts = [
+        {"canonical_instrument": "cornet", "part_index": 1, "label": "Cornet 1", "required": True},
+    ]
+    prompts: list[str] = []
+
+    def fake_lookup(prompt: str, config: dict[str, Any]) -> dict[str, Any]:
+        prompts.append(prompt)
+        # First call = phase-1 identify (returns a bogus leaked part list); second = phase-2 parts.
+        return _score_result(phase1_parts if len(prompts) == 1 else phase2_parts)
+
+    rec = expected.infer_piece(
+        piece, None, "run1",
+        config=dict(expected.DEFAULT_LOOKUP_CONFIG),
+        prompt_template="{title_guess}",
+        lookup_enabled=True,
+        lookup_fn=fake_lookup,
+    )
+    assert rec["lookup_status"] == "matched"
+    assert rec["inference_method"] == "authority_lookup"
+    assert len(prompts) == 2
+    labels = [p["label"] for p in rec["expected_parts"]]
+    assert "Cornet 1" in labels
+    assert "LEAK" not in labels
 
 
 def test_infer_piece_records_web_lookup_provenance():
@@ -1924,7 +2071,9 @@ def test_e2e_full_run(tmp_path: Path, monkeypatch):
     assert report_path.exists()
     assert "Expected Parts Report" in report_path.read_text()
     assert (out_path.parent / ".expected_parts_checkpoint.json").exists()
-    assert calls["count"] == 2
+    # Two-phase external lookup: each matched piece makes 2 calls (phase-1 identify +
+    # phase-2 clean instrumentation). 2 pieces => 4 calls.
+    assert calls["count"] == 4
 
     instr = (out_path.parent / "instrumentation.md").read_text()
     assert "Expected Instrumentation by Piece" in instr
@@ -1950,7 +2099,8 @@ def test_e2e_incremental_reuse(tmp_path: Path, monkeypatch):
 
     r1, _out, _, calls1 = _run_cli(tmp_path, monkeypatch, results)
     assert r1.exit_code == 0, r1.output
-    assert calls1["count"] == 1
+    # Two-phase external lookup: 1 piece => phase-1 identify + phase-2 instrumentation = 2 calls.
+    assert calls1["count"] == 2
 
     r2, _, _, calls2 = _run_cli(
         tmp_path, monkeypatch, results, extra=["--mode", "incremental"]
@@ -1980,7 +2130,8 @@ def test_e2e_parallel_lookups(tmp_path: Path, monkeypatch):
     assert result.exit_code == 0, result.output
     records = [json.loads(line) for line in out_path.read_text().splitlines() if line.strip()]
     assert {r["piece_id"] for r in records} == {"p1", "p2", "p3"}
-    assert calls["count"] == 3
+    # Two-phase external lookup: 3 pieces x 2 calls (identify + instrumentation) = 6.
+    assert calls["count"] == 6
     assert all(r["lookup_status"] == "matched" for r in records)
 
 

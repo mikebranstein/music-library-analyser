@@ -18,10 +18,10 @@ them, reconcile them, decide, and return the final contracted JSON only.
 * Title guess: `{title_guess}`
 * Catalog / item number: `{catalog_number}`
 * Source folder name: `{piece_folder}`
-* Observed instruments scanned from this library copy: `{observed_summary}`
 
 Use the context only to disambiguate ambiguous labels. The `expected_parts` list must come from the
-supplied OCR passes, not from the observed instruments.
+supplied OCR passes. Do not consider any library-holdings information; it is deliberately withheld
+so the instrumentation reflects the score alone.
 
 ***
 

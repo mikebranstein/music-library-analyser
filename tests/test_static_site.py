@@ -217,6 +217,35 @@ def test_build_pieces_includes_instrumentation_and_score():
     ]
 
 
+def test_unlisted_projects_held_but_unexpected_parts():
+    """Held parts absent from the instrumentation surface as their own 'Present (unlisted)' rows."""
+    report = _report(unexpected_parts=[
+        {"predicted_part": "Horn in Eb 1", "instruments": [{"canonical": "horn", "part_index": 1}], "count": 2},
+        {"predicted_part": None, "instruments": [{"canonical": "cornet", "part_index": None}], "count": 1},
+    ])
+    rows = ss._unlisted(report)
+    assert rows == [
+        {"label": "Horn in Eb 1", "canonical_instrument": "horn", "part_index": 1, "count": 2},
+        {"label": "cornet", "canonical_instrument": "cornet", "part_index": None, "count": 1},
+    ]
+
+
+def test_unlisted_empty_without_unexpected_parts():
+    assert ss._unlisted(_report()) == []
+    assert ss._unlisted(None) == []
+
+
+def test_build_pieces_projects_unlisted_parts():
+    report = _report(unexpected_parts=[
+        {"predicted_part": "Baritone T.C.", "instruments": [{"canonical": "baritone_horn", "part_index": None}], "count": 1},
+    ])
+    index = ss.index_reports([report])
+    pieces = ss.build_pieces(_summary()["pieces"], index, {"p1": 2}, lambda c: None)
+    assert pieces[0]["unlisted"] == [
+        {"label": "Baritone T.C.", "canonical_instrument": "baritone_horn", "part_index": None, "count": 1},
+    ]
+
+
 def test_instrumentation_links_each_rank_to_its_own_document():
     """Multi-rank parts (Trumpet 1/2/3) each link to their own file, not a shared bundle."""
     report = {

@@ -16,10 +16,10 @@ decide, and return the final contracted JSON only.
 * Title guess: `{title_guess}`
 * Catalog / item number: `{catalog_number}`
 * Source folder name: `{piece_folder}`
-* Observed instruments scanned from this library copy: `{observed_summary}`
 
 Use the context only to disambiguate ambiguous labels. The `expected_parts` list must come from the
-supplied score text, not from the observed instruments.
+supplied score text. Do not consider any library-holdings information; it is deliberately withheld
+so the instrumentation reflects the score alone.
 
 ***
 

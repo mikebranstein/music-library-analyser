@@ -161,6 +161,11 @@ DEFAULT_LOOKUP_CONFIG: dict[str, Any] = {
     "confidence_threshold": 0.5,
     "allowed_domains": [],
     "prompt_template_path": "config/llm_prompts/lookup_instrumentation.txt",
+    # Phase 2 of the external lookup: fetch the identified edition's instrumentation WITHOUT any
+    # library-holdings context, so `expected_parts` reflect the published edition, never the parts
+    # this library happens to own. Phase 1 (identify) uses `prompt_template` above; this template is
+    # a clean second pass seeded only with the resolved identity + source URLs.
+    "instrumentation_prompt_template_path": "config/llm_prompts/lookup_instrumentation_parts.txt",
     "stream_output": True,
     "extra_args": [],
     # Local score OCR (Stage A). When the leading pages were OCR'd, Script 02's multi-pass OCR
@@ -235,6 +240,34 @@ DEFAULT_PROMPT_TEMPLATE = (
 )
 
 
+DEFAULT_INSTRUMENTATION_TEMPLATE = (
+    "You are a music librarian assistant. The published edition of one piece has ALREADY been\n"
+    "identified. Report ONLY its real, edition-specific instrumentation from authoritative online\n"
+    "text sources.\n\n"
+    "Identified edition:\n"
+    "- Title guess: {title_guess}\n"
+    "- Catalog / item number: {catalog_number}\n"
+    "- Resolved work identity: {work_identity}\n"
+    "- Ensemble type: {ensemble_type}\n"
+    "- Source URLs already found: {source_urls}\n\n"
+    "Report one entry per named printed part with a lowercase snake_case canonical_instrument, a\n"
+    "part_index (or null), a label, a section, and a required flag. Set required=false only for\n"
+    "parts a source explicitly marks optional/ad lib/substitute/alternative/cue-only/doubling;\n"
+    "otherwise true. Never invent an edition, instrument, source, or URL.\n\n"
+    "IMPORTANT: base the instrumentation ONLY on the published edition and authoritative sources.\n"
+    "No information about which parts any particular library happens to hold is provided or should\n"
+    "be assumed; the instrumentation must reflect the published score alone.\n\n"
+    "If you cannot find the instrumentation in authoritative text, return expected_parts empty (a\n"
+    "later step reads score images); do not guess.\n\n"
+    "Respond with exactly one JSON object between the sentinel lines and nothing else:\n"
+    f"{RESULT_START}\n"
+    '{{"match_found": true, "identity_match_confidence": 0.0, "ensemble_type": "",\n'
+    '  "ensemble_display_name": "", "score_expected": true,\n'
+    '  "expected_parts": [], "evidence_sources": [], "notes": ""}}\n'
+    f"{RESULT_END}\n"
+)
+
+
 DEFAULT_SUMMARIZE_TEMPLATE = (
     "You are a music librarian assistant. Read the score text below (OCR or embedded text from a\n"
     "score's first page(s)) and report the piece's instrumentation as one JSON object. Do not\n"
@@ -242,8 +275,7 @@ DEFAULT_SUMMARIZE_TEMPLATE = (
     "Piece context (disambiguation only):\n"
     "- Title guess: {title_guess}\n"
     "- Catalog / item number: {catalog_number}\n"
-    "- Source folder name: {piece_folder}\n"
-    "- Observed instruments: {observed_summary}\n\n"
+    "- Source folder name: {piece_folder}\n\n"
     "Score text:\n"
     "{score_text}\n\n"
     "Report one expected_parts entry per named printed part with a lowercase snake_case\n"
@@ -370,6 +402,34 @@ def build_lookup_query(piece: dict[str, Any], doc: dict[str, Any] | None) -> dic
         "piece_folder": str(piece.get("piece_folder") or "unknown"),
         "identity_candidates": json.dumps(candidates, ensure_ascii=False) if candidates else "none",
         "observed_summary": _observed_summary(piece),
+    }
+
+
+def build_instrumentation_query(
+    identity_result: dict[str, Any], piece: dict[str, Any]
+) -> dict[str, str]:
+    """Assemble the phase-2 (instrumentation) prompt fields from a resolved identity.
+
+    Deliberately carries NO library-holdings information (`observed_summary`): the second pass sees
+    only the edition identity and the source/image URLs found in phase 1, so the returned
+    instrumentation reflects the published edition and can never be seeded by the parts this library
+    holds.
+    """
+    identity = identity_result.get("work_identity")
+    identity = identity if isinstance(identity, dict) else {}
+    sources = identity_result.get("evidence_sources")
+    urls = [
+        str(s.get("url")).strip()
+        for s in (sources if isinstance(sources, list) else [])
+        if isinstance(s, dict) and str(s.get("url") or "").strip()
+    ]
+    return {
+        "title_guess": str(piece.get("piece_title_guess") or "unknown"),
+        "catalog_number": str(piece.get("catalog_number") or "unknown"),
+        "piece_folder": str(piece.get("piece_folder") or "unknown"),
+        "work_identity": json.dumps(identity, ensure_ascii=False) if identity else "unknown",
+        "ensemble_type": str(identity_result.get("ensemble_type") or "unknown"),
+        "source_urls": json.dumps(urls, ensure_ascii=False) if urls else "none",
     }
 
 
@@ -1066,12 +1126,15 @@ def download_and_ocr_images(
 
 
 def build_summarize_prompt(template: str, piece: dict[str, Any], score_text: str) -> str:
-    """Render the summarize template with the piece context and the supplied score text."""
+    """Render the summarize template with the piece context and the supplied score text.
+
+    Library holdings are deliberately excluded so the summarized instrumentation reflects the score
+    text alone.
+    """
     query = {
         "title_guess": str(piece.get("piece_title_guess") or "unknown"),
         "catalog_number": str(piece.get("catalog_number") or "unknown"),
         "piece_folder": str(piece.get("piece_folder") or "unknown"),
-        "observed_summary": _observed_summary(piece),
         "score_text": score_text,
     }
     return render_prompt(template, query)
@@ -1315,6 +1378,106 @@ def _transposition_display(value: Any) -> str | None:
     return _TRANSPOSITION_DISPLAY.get(value, str(value))
 
 
+# Default transposition conventions: a bare (unkeyed) part for these instruments is, by long-
+# standing band/orchestral convention, in the key given here. This lets an unmarked "Trumpet 1"
+# reconcile against a "Bb Trumpet" slot, and -- crucially -- lets an explicitly *different* key
+# (e.g. an E-flat Horn) be recognised as a genuinely distinct instrument rather than an alternate
+# of the conventional one (Horn in F). Concert-pitch instruments (flutes, oboes, bassoons,
+# trombones, tuba, strings, keyboards, percussion) and instruments whose written key is a clef
+# choice rather than a transposition (euphonium/baritone B.C. vs T.C.) are omitted: they carry no
+# transposition identity and match any key.
+DEFAULT_TRANSPOSITIONS: dict[str, str] = {
+    # Clarinets (the plain "clarinet" is the B-flat soprano; sizes are their own canonicals).
+    "clarinet": "Bb",
+    "eb_clarinet": "Eb",
+    "alto_clarinet": "Eb",
+    "bass_clarinet": "Bb",
+    "contrabass_clarinet": "Bb",
+    # Saxophones.
+    "sopranino_sax": "Eb",
+    "soprano_sax": "Bb",
+    "alto_sax": "Eb",
+    "tenor_sax": "Bb",
+    "baritone_sax": "Eb",
+    "bass_sax": "Bb",
+    # Double reeds / flutes that transpose.
+    "english_horn": "F",
+    "alto_flute": "G",
+    # Cornets / trumpets / flugelhorn (unkeyed cornet or trumpet is a B-flat by convention).
+    "soprano_cornet": "Eb",
+    "cornet": "Bb",
+    "trumpet": "Bb",
+    "flugelhorn": "Bb",
+    # Horns (unkeyed horn is a Horn in F; the E-flat horn/alto is a distinct instrument).
+    "horn": "F",
+    "tenor_horn": "Eb",
+    "mellophone": "F",
+}
+
+# Ordered label patterns for reading a transposition out of an expected-slot label such as
+# "Horn in F 3", "E-flat Horn or Alto II", or "Bb Trumpet". Flat-key patterns are checked before
+# the plain "in X" patterns so "E-flat" wins over a stray "in F" elsewhere in the label.
+_LABEL_TRANSPOSITION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\be[-\s]?flat\b|\bin\s+eb\b|\beb\b", re.IGNORECASE), "Eb"),
+    (re.compile(r"\bb[-\s]?flat\b|\bin\s+bb\b|\bbb\b", re.IGNORECASE), "Bb"),
+    (re.compile(r"\ba[-\s]?flat\b|\bin\s+ab\b|\bab\b", re.IGNORECASE), "Ab"),
+    (re.compile(r"\bd[-\s]?flat\b|\bin\s+db\b|\bdb\b", re.IGNORECASE), "Db"),
+    (re.compile(r"\bin\s+f\b", re.IGNORECASE), "F"),
+    (re.compile(r"\bin\s+c\b", re.IGNORECASE), "C"),
+    (re.compile(r"\bin\s+a\b", re.IGNORECASE), "A"),
+    (re.compile(r"\bin\s+d\b", re.IGNORECASE), "D"),
+    (re.compile(r"\bin\s+g\b", re.IGNORECASE), "G"),
+]
+
+
+def _parse_label_transposition(label: Any) -> str | None:
+    """Read an explicit transposition key from an expected-slot label, or ``None`` if unstated."""
+    if not label or not isinstance(label, str):
+        return None
+    for pattern, key in _LABEL_TRANSPOSITION_PATTERNS:
+        if pattern.search(label):
+            return key
+    return None
+
+
+def _norm_transposition(value: Any) -> str | None:
+    """Canonical comparison form for a transposition key (case-insensitive), or ``None``."""
+    if not value:
+        return None
+    return str(value).strip().casefold()
+
+
+def _conventional_transposition(canonical: Any) -> str | None:
+    """Default transposition for a bare part of ``canonical``, or ``None`` if no convention."""
+    return DEFAULT_TRANSPOSITIONS.get(canonical)
+
+
+def _slot_transposition(slot: dict[str, Any]) -> str | None:
+    """Transposition identity of an expected slot: explicit label key, else convention default."""
+    return _parse_label_transposition(slot.get("label")) or _conventional_transposition(
+        slot.get("canonical")
+    )
+
+
+def _transposition_compatible(
+    slot: dict[str, Any], facet_canonical: Any, obs_transposition: Any
+) -> bool:
+    """Whether an observed instance may fill an expected slot given their transpositions.
+
+    An *unkeyed* observed part (no transposition marker) is flexible and fits any slot -- we do not
+    guess it into a mismatch. A *keyed* observed part must match the slot's transposition identity
+    (the slot's explicit label key, or its conventional default); if the slot carries no
+    transposition identity at all, any key is accepted. This is what keeps an E-flat Horn from
+    filling a Horn in F chair while still letting an unmarked horn part do so.
+    """
+    if not obs_transposition:
+        return True
+    slot_key = _slot_transposition(slot)
+    if not slot_key:
+        return True
+    return _norm_transposition(obs_transposition) == _norm_transposition(slot_key)
+
+
 def _facet_set_key(obs: dict[str, Any]) -> tuple[tuple[Any, Any], ...]:
     """Order-independent identity of the instrument set a part represents."""
     return tuple(
@@ -1361,59 +1524,120 @@ def collapse_clef_editions(
     collapsed: list[dict[str, Any]] = []
     for key in order:
         entries = groups[key]
-        by_clef: dict[Any, list[dict[str, Any]]] = {}
-        clef_order: list[Any] = []
-        for entry in entries:
-            # An edition is a (clef, transposition) pair: the same musical part published in a
-            # different written form (BC/TC clef, or a different key like Horn in F vs Eb). Same-
-            # edition copies are genuine duplicates; different editions may fill separate slots.
-            edition = (entry.get("clef"), entry.get("transposition"))
-            if edition not in by_clef:
-                by_clef[edition] = []
-                clef_order.append(edition)
-            by_clef[edition].append(entry)
-
-        instances = max(len(bucket) for bucket in by_clef.values())
         demand = slot_demand.get(key, 1) if slot_demand else 1
-        if instances < demand and len(entries) > instances:
-            # The score lists more co-equal slots for this exact part than we have same-edition
-            # copies, yet we hold multiple editions. Each edition is its own physical part able to
-            # fill a distinct slot, so surface them individually (up to demand) rather than merging.
-            for entry in entries[:demand]:
-                clef = entry.get("clef")
-                display = _CLEF_DISPLAY.get(clef, clef) if clef else None
-                trans = _transposition_display(entry.get("transposition"))
-                merged = dict(entry)
-                merged["count"] = int(entry.get("count", 1) or 1)
-                merged["observed_clefs"] = [display] if display else []
-                merged["observed_transpositions"] = [trans] if trans else []
-                collapsed.append(merged)
+        # A held part in an explicitly different key (e.g. an E-flat Horn alongside a Horn in F) is
+        # a genuinely distinct instrument, not a clef/edition alternate. When a facet set holds two
+        # or more explicit keys, split it into per-key partitions so each key collapses on its own
+        # and can be reconciled (or reported as unlisted) independently. A single key -- with or
+        # without unmarked copies -- keeps the historical clef-edition merge behaviour.
+        for partition in _partition_by_transposition(entries):
+            collapsed.extend(_collapse_group(partition, demand))
+    return collapsed
+
+
+def _partition_by_transposition(
+    entries: list[dict[str, Any]],
+) -> list[list[dict[str, Any]]]:
+    """Split a facet-set group into partitions that are distinct instruments by transposition.
+
+    Entries sharing an explicit key form one partition. Unmarked (unkeyed) entries are flexible:
+    they join the partition of the group's conventional default key when it is present, otherwise
+    they form their own partition. When fewer than two explicit keys are present the whole group is
+    returned unsplit so single-key clef-edition merging is unchanged.
+    """
+    explicit_keys = {e.get("transposition") for e in entries if e.get("transposition")}
+    if len(explicit_keys) <= 1:
+        return [entries]
+
+    buckets: dict[Any, list[dict[str, Any]]] = {}
+    order: list[Any] = []
+
+    def _add(bucket_key: Any, entry: dict[str, Any]) -> None:
+        if bucket_key not in buckets:
+            buckets[bucket_key] = []
+            order.append(bucket_key)
+        buckets[bucket_key].append(entry)
+
+    for entry in entries:
+        trans = entry.get("transposition")
+        if trans:
+            _add(_norm_transposition(trans), entry)
             continue
-        for i in range(instances):
-            base: dict[str, Any] | None = None
-            total = 0
-            clefs: list[str] = []
-            transps: list[str] = []
-            for edition in clef_order:
-                bucket = by_clef[edition]
-                if i >= len(bucket):
-                    continue
-                entry = bucket[i]
-                if base is None:
-                    base = entry
-                total += int(entry.get("count", 1) or 1)
-                clef = entry.get("clef")
-                display = _CLEF_DISPLAY.get(clef, clef) if clef else None
-                if display and display not in clefs:
-                    clefs.append(display)
-                trans = _transposition_display(entry.get("transposition"))
-                if trans and trans not in transps:
-                    transps.append(trans)
-            merged = dict(base) if base is not None else {}
-            merged["count"] = total
-            merged["observed_clefs"] = sorted(clefs)
-            merged["observed_transpositions"] = sorted(transps)
+        conv = _conventional_transposition(_primary_canonical(entry))
+        conv_key = _norm_transposition(conv)
+        if conv_key in {_norm_transposition(k) for k in explicit_keys}:
+            _add(conv_key, entry)
+        else:
+            _add(conv_key if conv_key else (None, id(entry)), entry)
+    return [buckets[k] for k in order]
+
+
+def _primary_canonical(entry: dict[str, Any]) -> Any:
+    """Canonical of the first instrument facet of an observed part, or ``None``."""
+    for facet in entry.get("instruments", []):
+        canonical = facet.get("canonical")
+        if canonical is not None:
+            return canonical
+    return None
+
+
+def _collapse_group(
+    entries: list[dict[str, Any]], demand: int
+) -> list[dict[str, Any]]:
+    """Collapse clef editions within one instrument-set / transposition partition."""
+    collapsed: list[dict[str, Any]] = []
+    by_clef: dict[Any, list[dict[str, Any]]] = {}
+    clef_order: list[Any] = []
+    for entry in entries:
+        # An edition is a (clef, transposition) pair: the same musical part published in a
+        # different written form (BC/TC clef, or an unmarked copy of a keyed part). Same-edition
+        # copies are genuine duplicates; different editions may fill separate slots.
+        edition = (entry.get("clef"), entry.get("transposition"))
+        if edition not in by_clef:
+            by_clef[edition] = []
+            clef_order.append(edition)
+        by_clef[edition].append(entry)
+
+    instances = max(len(bucket) for bucket in by_clef.values())
+    if instances < demand and len(entries) > instances:
+        # The score lists more co-equal slots for this exact part than we have same-edition
+        # copies, yet we hold multiple editions. Each edition is its own physical part able to
+        # fill a distinct slot, so surface them individually (up to demand) rather than merging.
+        for entry in entries[:demand]:
+            clef = entry.get("clef")
+            display = _CLEF_DISPLAY.get(clef, clef) if clef else None
+            trans = _transposition_display(entry.get("transposition"))
+            merged = dict(entry)
+            merged["count"] = int(entry.get("count", 1) or 1)
+            merged["observed_clefs"] = [display] if display else []
+            merged["observed_transpositions"] = [trans] if trans else []
             collapsed.append(merged)
+        return collapsed
+    for i in range(instances):
+        base: dict[str, Any] | None = None
+        total = 0
+        clefs: list[str] = []
+        transps: list[str] = []
+        for edition in clef_order:
+            bucket = by_clef[edition]
+            if i >= len(bucket):
+                continue
+            entry = bucket[i]
+            if base is None:
+                base = entry
+            total += int(entry.get("count", 1) or 1)
+            clef = entry.get("clef")
+            display = _CLEF_DISPLAY.get(clef, clef) if clef else None
+            if display and display not in clefs:
+                clefs.append(display)
+            trans = _transposition_display(entry.get("transposition"))
+            if trans and trans not in transps:
+                transps.append(trans)
+        merged = dict(base) if base is not None else {}
+        merged["count"] = total
+        merged["observed_clefs"] = sorted(clefs)
+        merged["observed_transpositions"] = sorted(transps)
+        collapsed.append(merged)
     return collapsed
 
 
@@ -1524,8 +1748,15 @@ def reconcile_parts(
             oidx = facet.get("part_index")
             if oidx is None:
                 continue
+            obs_trans = collapsed[obs_id].get("transposition")
             for sid in slot_ids:
-                if not consumed[sid] and template_parts[sid].get("part_index") == oidx:
+                if (
+                    not consumed[sid]
+                    and template_parts[sid].get("part_index") == oidx
+                    and _transposition_compatible(
+                        template_parts[sid], facet.get("canonical"), obs_trans
+                    )
+                ):
                     consumed[sid] = True
                     used[ii] = True
                     slot_obs[sid] = collapsed[obs_id]
@@ -1537,8 +1768,11 @@ def reconcile_parts(
             if used[ii]:
                 continue
             obs_id, _facet = inst_list[ii]
+            obs_trans = collapsed[obs_id].get("transposition")
             for sid in slot_ids:
-                if not consumed[sid]:
+                if not consumed[sid] and _transposition_compatible(
+                    template_parts[sid], _facet.get("canonical"), obs_trans
+                ):
                     consumed[sid] = True
                     used[ii] = True
                     slot_obs[sid] = collapsed[obs_id]
@@ -1875,6 +2109,47 @@ def _try_contract_from_text(
     )
 
 
+def fetch_clean_instrumentation(
+    identity_result: dict[str, Any],
+    piece: dict[str, Any],
+    config: dict[str, Any],
+    lookup_fn: Callable[[str, dict[str, Any]], dict[str, Any]],
+    instrumentation_template: str,
+    *,
+    piece_id: Any = None,
+) -> dict[str, Any] | None:
+    """Phase 2 of an external lookup: fetch the identified edition's instrumentation cleanly.
+
+    The second pass is seeded ONLY with the identity resolved in phase 1 (work identity, ensemble,
+    source URLs) -- never with library holdings -- so ``expected_parts`` reflect the published
+    edition and can never be echoed back from the parts this library happens to own. Returns a
+    merged result (phase-1 identity + phase-2 parts, with evidence combined) ready for
+    ``build_matched_record``, or None when the clean pass yields no parts.
+    """
+    query = build_instrumentation_query(identity_result, piece)
+    prompt = render_prompt(instrumentation_template, query)
+    try:
+        parts_result = lookup_fn(prompt, {**config, "piece_id": piece_id})
+    except (RuntimeError, TimeoutError, OSError, ValueError) as exc:
+        logger.info("[%s] Instrumentation phase failed (%s); falling through", piece_id, exc)
+        return None
+    _persist_lookup_result(config, f"{piece_id}.instrumentation", prompt, parts_result)
+    if not isinstance(parts_result, dict) or not parts_result.get("expected_parts"):
+        return None
+    merged = dict(identity_result)
+    merged["expected_parts"] = parts_result.get("expected_parts")
+    id_evidence = identity_result.get("evidence_sources")
+    combined = list(id_evidence) if isinstance(id_evidence, list) else []
+    for src in parts_result.get("evidence_sources") or []:
+        if src not in combined:
+            combined.append(src)
+    if combined:
+        merged["evidence_sources"] = combined
+    if not merged.get("notes") and parts_result.get("notes"):
+        merged["notes"] = parts_result.get("notes")
+    return merged
+
+
 def infer_piece(
     piece: dict[str, Any],
     doc: dict[str, Any] | None,
@@ -1893,6 +2168,7 @@ def infer_piece(
     image_ocr_fn: Callable[[Path], str] | None = None,
     windrep_fetch_fn: Callable[[dict[str, Any], dict[str, Any]], str | None] | None = None,
     windrep_prompt_template: str = "",
+    instrumentation_template: str = "",
 ) -> dict[str, Any]:
     """Infer expected parts for one piece across up to four stages, degrading conservatively.
 
@@ -1903,7 +2179,13 @@ def infer_piece(
     candidate images but no instrumentation. The first stage to produce a confident contract wins;
     otherwise the piece degrades to a conservative record. Stage W1's fetch is time-bounded and
     fails gracefully, so an unreachable WindRep simply falls through to W2/Stage B.
+
+    The external LLM lookups (Stages W2 and B) are two-phase: phase 1 identifies the edition (and
+    may use library holdings for disambiguation), then ``fetch_clean_instrumentation`` runs a
+    holdings-free phase 2 to obtain ``expected_parts`` -- so the reported instrumentation reflects
+    the published edition, never the parts this library happens to own.
     """
+    instr_template = instrumentation_template or DEFAULT_INSTRUMENTATION_TEMPLATE
     model = str(config.get("model") or "")
     summarize = summarize_fn or lookup_fn
     piece_id = piece.get("piece_id")
@@ -1992,17 +2274,23 @@ def infer_piece(
             if (
                 isinstance(windrep_result, dict)
                 and windrep_result.get("match_found")
-                and windrep_result.get("expected_parts")
             ):
                 windrep_conf = float(windrep_result.get("identity_match_confidence") or 0.0)
                 threshold = float(config.get("confidence_threshold", 0.5) or 0.0)
                 if windrep_conf >= threshold:
-                    logger.info("[%s] Stage W2 matched via WindRep (confidence %.2f)",
-                                piece_id, windrep_conf)
-                    return build_matched_record(
-                        piece, doc, run_id, windrep_result, model,
-                        detection_method=METHOD_WINDREP, inference_method=METHOD_WINDREP,
+                    clean = fetch_clean_instrumentation(
+                        windrep_result, piece, windrep_config, lookup_fn, instr_template,
+                        piece_id=piece_id,
                     )
+                    if clean is not None:
+                        logger.info(
+                            "[%s] Stage W2 matched via WindRep; instrumentation from clean "
+                            "phase-2 lookup (confidence %.2f)", piece_id, windrep_conf,
+                        )
+                        return build_matched_record(
+                            piece, doc, run_id, clean, model,
+                            detection_method=METHOD_WINDREP, inference_method=METHOD_WINDREP,
+                        )
             logger.info("[%s] Stage W2: no confident WindRep match; falling through to general "
                         "lookup", piece_id)
 
@@ -2039,16 +2327,21 @@ def infer_piece(
     confidence = float(result.get("identity_match_confidence") or 0.0)
     threshold = float(config.get("confidence_threshold", 0.5) or 0.0)
 
-    if confidence >= threshold and result.get("expected_parts"):
-        logger.info("[%s] Stage B matched an edition with instrumentation (confidence %.2f)",
-                    piece_id, confidence)
-        return build_matched_record(
-            piece, doc, run_id, result, model,
-            detection_method=METHOD_AUTHORITY, inference_method=METHOD_AUTHORITY,
+    if confidence >= threshold:
+        # Phase 2: fetch the identified edition's instrumentation WITHOUT library-holdings context.
+        clean = fetch_clean_instrumentation(
+            result, piece, config, lookup_fn, instr_template, piece_id=piece_id
         )
+        if clean is not None:
+            logger.info("[%s] Stage B matched an edition; instrumentation from clean phase-2 "
+                        "lookup (confidence %.2f)", piece_id, confidence)
+            return build_matched_record(
+                piece, doc, run_id, clean, model,
+                detection_method=METHOD_AUTHORITY, inference_method=METHOD_AUTHORITY,
+            )
 
-    # --- Stage C: remote image OCR (online matched an edition but returned no parts) ------
-    if confidence >= threshold and not result.get("expected_parts"):
+    # --- Stage C: remote image OCR (identity matched but no text instrumentation) ---------
+    if confidence >= threshold:
         stage_c_ready = (
             config.get("image_ocr_enabled", True)
             and image_fetch_fn is not None
@@ -2158,6 +2451,7 @@ def config_fingerprint(
     windrep_enabled: bool = True,
     windrep_prompt_template: str = "",
     score_ocr_summarize_template: str = "",
+    instrumentation_template: str = "",
 ) -> str:
     """Fingerprint of the inference-affecting configuration (invalidates stale reuse)."""
     basis = "|".join([
@@ -2178,6 +2472,7 @@ def config_fingerprint(
         sha256_text(summarize_template),
         sha256_text(score_ocr_summarize_template),
         sha256_text(windrep_prompt_template),
+        sha256_text(instrumentation_template),
     ])
     return sha256_text(basis)
 
@@ -2419,7 +2714,9 @@ def render_piece_instrumentation_body(rec: dict[str, Any]) -> list[str]:
             idx_cell = "-" if idx is None else str(idx)
             required = "required" if part.get("required") else "optional"
             if part.get("present"):
-                editions = (part.get("observed_clefs") or []) + (part.get("observed_transpositions") or [])
+                # Transposition is now part of instrument identity (its own row), so the Observed
+                # column annotates only the clef edition(s) that satisfied the slot.
+                editions = part.get("observed_clefs") or []
                 observed = f"yes ({', '.join(editions)})" if editions else "yes"
             else:
                 observed = "MISSING"
@@ -2646,6 +2943,15 @@ def main(
     template_path = Path(config.get("prompt_template_path", "")).resolve()
     prompt_template, prompt_source = load_prompt_template(template_path)
 
+    instrumentation_path = Path(config.get("instrumentation_prompt_template_path", "")).resolve()
+    instrumentation_template, instrumentation_source = load_prompt_template(instrumentation_path)
+    if instrumentation_template is DEFAULT_PROMPT_TEMPLATE:
+        # load_prompt_template falls back to the identify template when the file is missing; the
+        # phase-2 pass needs the holdings-free instrumentation template instead.
+        instrumentation_template, instrumentation_source = DEFAULT_INSTRUMENTATION_TEMPLATE, "builtin"
+    logger.info("Instrumentation (phase 2) prompt: %s (%s)", instrumentation_path,
+                instrumentation_source)
+
     summarize_path = Path(config.get("summarize_prompt_template_path", "")).resolve()
     summarize_template, summarize_source = load_summarize_template(summarize_path)
 
@@ -2769,6 +3075,7 @@ def main(
         summarize_template, local_score_enabled, image_ocr_enabled,
         windrep_enabled, windrep_prompt_template,
         score_ocr_summarize_template,
+        instrumentation_template,
     )
 
     ckpt_path = make_checkpoint_path(output, CHECKPOINT_FILENAME)
@@ -2919,6 +3226,7 @@ def main(
                     else None
                 ),
                 windrep_prompt_template=windrep_prompt_template,
+                instrumentation_template=instrumentation_template,
             )
         except Exception as exc:
             logger.exception("Unexpected inference error on piece %s", piece.get("piece_id"))
