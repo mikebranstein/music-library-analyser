@@ -153,25 +153,30 @@ def _missing_required(report: dict[str, Any] | None) -> list[dict[str, Any]]:
     return out
 
 
-def _part_facet_by_predicted_part(report: dict[str, Any]) -> dict[str, tuple[str, Any]]:
-    """Map a predicted_part label (as attached to documents) to its ``(canonical, part_index)``.
+def _part_facet_by_predicted_part(report: dict[str, Any]) -> dict[str, list[tuple[str, Any]]]:
+    """Map a predicted_part label (as attached to documents) to all its ``(canonical, part_index)``.
 
     Learned from the Script 06 ``observed_parts`` rollup, where each observed part carries the
-    predicted_part label and the instrument facet(s) it resolved to. Carrying the ``part_index``
-    lets each expected line be linked to the specific document that fills it (e.g. Trumpet 3 -> the
-    Trumpet 3 file), not merely to any file of that instrument. The rollup facet key is ``canonical``
-    (Script 03's token); ``canonical_instrument`` is accepted as a fallback for older reports.
+    predicted_part label and the instrument facet(s) it resolved to. Carrying every facet's
+    ``part_index`` lets each expected line be linked to the specific document that fills it (e.g.
+    Trumpet 3 -> the Trumpet 3 file), and lets one physical file that covers several chairs or
+    instruments (e.g. a "Flutes" file resolved to Flute 1 / Flute 2) link to each of those slots.
+    The rollup facet key is ``canonical`` (Script 03's token); ``canonical_instrument`` is accepted
+    as a fallback for older reports.
     """
-    mapping: dict[str, tuple[str, Any]] = {}
+    mapping: dict[str, list[tuple[str, Any]]] = {}
     for observed in report.get("observed_parts") or []:
         part = observed.get("predicted_part")
         instruments = observed.get("instruments") or []
         if not part or not instruments or part in mapping:
             continue
-        facet = instruments[0]
-        canonical = facet.get("canonical") or facet.get("canonical_instrument")
-        if canonical:
-            mapping[part] = (canonical, facet.get("part_index"))
+        facets: list[tuple[str, Any]] = []
+        for facet in instruments:
+            canonical = facet.get("canonical") or facet.get("canonical_instrument")
+            if canonical:
+                facets.append((canonical, facet.get("part_index")))
+        if facets:
+            mapping[part] = facets
     return mapping
 
 
@@ -195,16 +200,21 @@ def _instrumentation(report: dict[str, Any] | None) -> list[dict[str, Any]]:
         pdf_path = doc.get("pdf_path")
         if not pdf_path:
             continue
-        facet = facet_by_part.get(doc.get("predicted_part") or "")
-        if not facet:
+        facets = facet_by_part.get(doc.get("predicted_part") or "")
+        if not facets:
             continue
-        canonical, part_index = facet
         entry = {
             "doc_id": synth_doc_id(pdf_path),
             "filename": doc.get("pdf_filename") or Path(pdf_path.replace("\\", "/")).name,
         }
-        docs_by_key.setdefault((canonical, part_index), []).append(entry)
-        docs_by_canonical.setdefault(canonical, []).append(entry)
+        # One file may cover several chairs/instruments; link it under each facet, but list it only
+        # once per canonical in the instrument-level fallback.
+        seen_canonical: set[str] = set()
+        for canonical, part_index in facets:
+            docs_by_key.setdefault((canonical, part_index), []).append(entry)
+            if canonical not in seen_canonical:
+                docs_by_canonical.setdefault(canonical, []).append(entry)
+                seen_canonical.add(canonical)
 
     def _documents_for(canonical: str | None, part_index: Any) -> list[dict[str, Any]]:
         if not canonical:

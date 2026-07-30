@@ -262,6 +262,35 @@ def test_instrumentation_links_each_rank_to_its_own_document():
     ]
 
 
+def test_instrumentation_links_multi_chair_file_to_every_chair():
+    """A single file covering several chairs (Flute 1 / Flute 2) links to each chair's line."""
+    report = {
+        "piece_id": "p3",
+        "expected_parts": [
+            {"label": "Flute 1", "canonical_instrument": "flute", "part_index": 1,
+             "section": "flutes", "required": True, "present": True},
+            {"label": "Flute 2", "canonical_instrument": "flute", "part_index": 2,
+             "section": "flutes", "required": True, "present": True},
+        ],
+        "observed_parts": [
+            {"predicted_part": "Flute 1 / Flute 2", "instruments": [
+                {"canonical": "flute", "part_index": 1, "section": "flutes"},
+                {"canonical": "flute", "part_index": 2, "section": "flutes"},
+            ]},
+        ],
+        "documents": [
+            {"pdf_path": "005/flutes.pdf", "pdf_filename": "flutes.pdf",
+             "predicted_part": "Flute 1 / Flute 2", "is_score": False},
+        ],
+    }
+    grid = ss._instrumentation(report)
+    by_label = {part["label"]: part for part in grid}
+    flutes_doc = {"doc_id": ss.synth_doc_id("005/flutes.pdf"), "filename": "flutes.pdf"}
+    # Both chairs resolve to the one physical file.
+    assert by_label["Flute 1"]["documents"] == [flutes_doc]
+    assert by_label["Flute 2"]["documents"] == [flutes_doc]
+
+
 def test_build_pieces_projects_metadata_preferring_resolved():
     index = ss.index_reports([_report()])
     pieces = ss.build_pieces(_summary()["pieces"], index, {"p1": 2}, lambda c: None)
