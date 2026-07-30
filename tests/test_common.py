@@ -102,6 +102,7 @@ def test_load_instrument_taxonomy_interchangeable_groups() -> None:
     taxonomy = load_instrument_taxonomy(_RULES_PATH)
     groups = taxonomy["interchangeable_groups"]
     assert any(set(g) == {"euphonium", "baritone_horn"} for g in groups)
+    assert any(set(g) == {"cornet", "trumpet"} for g in groups)
 
 
 def test_load_instrument_taxonomy_missing_file_is_empty(tmp_path: Path) -> None:

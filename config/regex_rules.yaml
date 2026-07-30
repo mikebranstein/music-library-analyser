@@ -232,6 +232,7 @@ sections:
 # slot must be filled by its own instrument and no cross-matching is allowed.
 interchangeable_instruments:
   - ["euphonium", "baritone_horn"]
+  - ["cornet", "trumpet"]
 
 # legacy keys retained for backward compatibility with earlier drafts
 part_patterns: {}

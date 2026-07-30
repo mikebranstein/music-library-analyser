@@ -558,6 +558,39 @@ def test_reconcile_separate_euph_and_bari_slots_are_not_cross_filled():
     assert present["baritone_horn"] is False
 
 
+_CORNET_TRUMPET_GROUPS = [["cornet", "trumpet"]]
+
+
+def test_reconcile_cornets_satisfy_trumpet_slots():
+    # Regression (Procession of the Sardar): WindRep lists three Bb Trumpet parts; the library holds
+    # three Cornet parts. Cornet and trumpet are interchangeable, so the cornets fill the trumpet
+    # chairs -- none missing, no unexpected surplus.
+    slots = [
+        {"canonical": "trumpet", "part_index": i, "label": f"B-flat Trumpet {i}", "required": True}
+        for i in (1, 2, 3)
+    ]
+    observed = [_observed("cornet", 1), _observed("cornet", 2), _observed("cornet", 3)]
+    eq = expected.build_equivalents(slots, _CORNET_TRUMPET_GROUPS)
+    expected_parts, unexpected = expected.reconcile_parts(slots, observed, eq)
+    assert all(e["present"] for e in expected_parts)
+    assert unexpected == []
+
+
+def test_reconcile_separate_cornet_and_trumpet_slots_are_not_cross_filled():
+    # Score enumerates both cornet and trumpet as distinct parts -> bridging disabled; a held cornet
+    # cannot stand in for the trumpet chair, so the trumpet is still reported missing.
+    slots = [
+        {"canonical": "cornet", "part_index": 1, "label": "Cornet 1", "required": True},
+        {"canonical": "trumpet", "part_index": 1, "label": "Trumpet 1", "required": True},
+    ]
+    observed = [_observed("cornet", 1), _observed("cornet", 1)]
+    eq = expected.build_equivalents(slots, _CORNET_TRUMPET_GROUPS)
+    expected_parts, _unexpected = expected.reconcile_parts(slots, observed, eq)
+    present = {e["canonical_instrument"]: e["present"] for e in expected_parts}
+    assert present["cornet"] is True
+    assert present["trumpet"] is False
+
+
 def test_reconcile_no_bridging_without_groups():
     # Without an equivalents map a baritone does NOT fill a euphonium slot (baseline behaviour).
     slots = [{"canonical": "euphonium", "part_index": None, "label": "Euphonium", "required": True}]
