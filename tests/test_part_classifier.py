@@ -405,6 +405,50 @@ def test_classify_keeps_llm_when_more_confident_than_vision():
     assert any(f["canonical"] == "piccolo" for f in rec["instruments"])
 
 
+def test_extract_transposition_detects_adjacent_key():
+    lexicon, compiled = _lexicon_and_compiled()
+
+    def tr(s: str):
+        return classifier.extract_transposition(classifier.normalize(s), lexicon, compiled)
+
+    assert tr("F Horns 1 & 2") == "F"
+    assert tr("Eb Horns 1 & 2") == "Eb"
+    assert tr("Bb Trumpet 1") == "Bb"
+    assert tr("C Trumpet") == "C"
+    assert tr("Clarinet in A") == "A"
+    # Unkeyed labels stay None -- a bare letter elsewhere must not be misread as a key.
+    assert tr("Clarinet 1") is None
+    assert tr("Bass Clarinet") is None
+    assert tr("Alto Sax 1") is None
+    assert tr("Trombone 2") is None
+    assert tr("Cornets 1 & 2") is None
+
+
+def test_rollup_splits_transposition_editions():
+    # F Horns and Eb Horns cover the same chairs but in different keys; the rollup must keep them as
+    # two observed parts (not collapse to one) so downstream coverage can fill both authority groups.
+    def rec(trans: str, fp: str) -> dict:
+        return {
+            "piece_id": "p1", "piece_folder": "P", "processing_status": "success",
+            "is_score": False,
+            "instruments": [
+                {"canonical": "horn", "part_index": 1, "family": "brass", "section": "horns"},
+                {"canonical": "horn", "part_index": 2, "family": "brass", "section": "horns"},
+            ],
+            "clef": None, "transposition": trans, "confidence": 0.9,
+            "predicted_part": f"Horn in {trans} 1 / Horn 2", "part_sort_key": "x",
+            "duplicate_in_piece": True, "needs_review": False, "file_fingerprint": fp,
+        }
+
+    rollups = classifier.build_piece_rollups([rec("F", "f1"), rec("Eb", "f2")], "run1")
+    horns = [
+        o for o in rollups[0]["observed_parts"]
+        if any(f["canonical"] == "horn" for f in o["instruments"])
+    ]
+    assert len(horns) == 2
+    assert {o["transposition"] for o in horns} == {"F", "Eb"}
+
+
 def test_classify_vision_ignored_without_success():
     # A failed vision result must not alter the filename-based classification.
     inv = {

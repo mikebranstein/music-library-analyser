@@ -693,10 +693,35 @@ def extract_clef(text_norm: str, lexicon: dict[str, Any]) -> str | None:
     return None
 
 
-def extract_transposition(text_norm: str, lexicon: dict[str, Any]) -> str | None:
+# Pitch tokens bound to an instrument name with no "in" ("F Horns", "Bb Trumpet"). Two-word
+# spellings first so "b flat"/"e flat" win over a bare "b"/"f".
+_ADJACENT_KEY_TOKENS: list[tuple[str, str]] = [
+    ("b flat", "Bb"), ("e flat", "Eb"),
+    ("bb", "Bb"), ("eb", "Eb"), ("f", "F"), ("c", "C"), ("a", "A"), ("d", "D"),
+]
+
+
+def extract_transposition(
+    text_norm: str,
+    lexicon: dict[str, Any],
+    compiled: list[tuple[str, str]] | None = None,
+) -> str | None:
     for marker, pitch in lexicon["transposition_markers"].items():
         if _word_search(marker, text_norm):
             return pitch
+    if compiled is not None:
+        # A pitch printed tight against the instrument name with no "in" -- "F Horns", "Bb Trumpet",
+        # "Eb Alto Clarinet". Scope the scan to the matched instrument (its alias plus the one or two
+        # tokens right before it) so a bare letter elsewhere in the label is never misread as a key.
+        _canon, alias, _alts = match_instrument_first(text_norm, compiled)
+        if alias:
+            match = re.search(r"(?<![a-z0-9])" + re.escape(alias) + r"(?![a-z0-9])", text_norm)
+            if match is not None:
+                prefix_tokens = text_norm[: match.start()].split()
+                window = " ".join(prefix_tokens[-2:] + [alias])
+                for token, pitch in _ADJACENT_KEY_TOKENS:
+                    if _word_search(token, window):
+                        return pitch
     return None
 
 
@@ -887,7 +912,7 @@ def classify_document(
     ocr_norm = strip_cues(normalize(strip_music_glyphs(ocr_text or "")))
 
     clef = extract_clef(seg_norm, lexicon)
-    transposition = extract_transposition(seg_norm, lexicon)
+    transposition = extract_transposition(seg_norm, lexicon, compiled)
 
     instruments: list[dict[str, Any]] = []
     alternates: list[dict[str, Any]] = []
@@ -1277,6 +1302,7 @@ def build_piece_rollups(
             key = (
                 tuple(sorted((f.get("canonical"), f.get("part_index")) for f in facets)),
                 d.get("clef"),
+                d.get("transposition"),
             )
             entry = observed.get(key)
             conf = d.get("confidence", 0.0)
@@ -1291,6 +1317,7 @@ def build_piece_rollups(
                         for f in facets
                     ],
                     "clef": d.get("clef"),
+                    "transposition": d.get("transposition"),
                     "predicted_part": d.get("predicted_part"),
                     "count": 1,
                     "min_confidence": conf,

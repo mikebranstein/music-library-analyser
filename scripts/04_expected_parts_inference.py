@@ -1353,18 +1353,21 @@ def collapse_clef_editions(
         by_clef: dict[Any, list[dict[str, Any]]] = {}
         clef_order: list[Any] = []
         for entry in entries:
-            clef = entry.get("clef")
-            if clef not in by_clef:
-                by_clef[clef] = []
-                clef_order.append(clef)
-            by_clef[clef].append(entry)
+            # An edition is a (clef, transposition) pair: the same musical part published in a
+            # different written form (BC/TC clef, or a different key like Horn in F vs Eb). Same-
+            # edition copies are genuine duplicates; different editions may fill separate slots.
+            edition = (entry.get("clef"), entry.get("transposition"))
+            if edition not in by_clef:
+                by_clef[edition] = []
+                clef_order.append(edition)
+            by_clef[edition].append(entry)
 
         instances = max(len(bucket) for bucket in by_clef.values())
         demand = slot_demand.get(key, 1) if slot_demand else 1
         if instances < demand and len(entries) > instances:
-            # The score lists more co-equal slots for this exact part than we have same-clef copies,
-            # yet we hold multiple clef editions. Each edition is its own physical part able to fill
-            # a distinct slot, so surface them individually (up to demand) rather than merging.
+            # The score lists more co-equal slots for this exact part than we have same-edition
+            # copies, yet we hold multiple editions. Each edition is its own physical part able to
+            # fill a distinct slot, so surface them individually (up to demand) rather than merging.
             for entry in entries[:demand]:
                 clef = entry.get("clef")
                 display = _CLEF_DISPLAY.get(clef, clef) if clef else None
@@ -1377,14 +1380,15 @@ def collapse_clef_editions(
             base: dict[str, Any] | None = None
             total = 0
             clefs: list[str] = []
-            for clef in clef_order:
-                bucket = by_clef[clef]
+            for edition in clef_order:
+                bucket = by_clef[edition]
                 if i >= len(bucket):
                     continue
                 entry = bucket[i]
                 if base is None:
                     base = entry
                 total += int(entry.get("count", 1) or 1)
+                clef = entry.get("clef")
                 display = _CLEF_DISPLAY.get(clef, clef) if clef else None
                 if display and display not in clefs:
                     clefs.append(display)

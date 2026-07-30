@@ -669,6 +669,66 @@ def test_reconcile_two_baritone_slots_filled_by_bc_and_tc_editions():
     assert unexpected == []
 
 
+def test_collapse_transposition_editions_split_across_groups():
+    # F Horns 1&2 and Eb Horns 1&2 are the same chairs printed in two keys. With demand 2 (two
+    # parallel horn groups in the score) they must stay split so each edition fills its own group.
+    observed = [
+        {**_observed_combined([("horn", 1), ("horn", 2)]), "clef": None, "transposition": "F"},
+        {**_observed_combined([("horn", 1), ("horn", 2)]), "clef": None, "transposition": "Eb"},
+    ]
+    key = expected._facet_set_key(observed[0])
+    collapsed = expected.collapse_clef_editions(observed, {key: 2})
+    assert len(collapsed) == 2
+    assert {c["transposition"] for c in collapsed} == {"F", "Eb"}
+
+
+def test_collapse_same_transposition_copies_stay_separate():
+    # Two copies of the same key are two physical parts, not editions of one -> keep both, exactly
+    # as same-clef copies are kept. Adding transposition to the bucket key must not change this.
+    observed = [
+        {**_observed("trumpet", 1), "clef": None, "transposition": "Bb"},
+        {**_observed("trumpet", 1), "clef": None, "transposition": "Bb"},
+    ]
+    collapsed = expected.collapse_clef_editions(observed)
+    assert len(collapsed) == 2
+
+
+def test_reconcile_transposition_editions_fill_parallel_horn_groups():
+    # Regression (Mancini Medley): the authority lists two parallel horn sets (E-flat Horn or Alto
+    # I-III and Horn in F I-III). The library holds the F and Eb editions of chairs 1&2, so chairs
+    # 1&2 of BOTH groups are present; only the III chairs are missing.
+    slots = [
+        {"canonical": "horn", "part_index": i, "label": f"E-flat Horn or Alto {i}", "required": True}
+        for i in (1, 2, 3)
+    ] + [
+        {"canonical": "horn", "part_index": i, "label": f"Horn in F {i}", "required": True}
+        for i in (1, 2, 3)
+    ]
+    observed = [
+        {**_observed_combined([("horn", 1), ("horn", 2)]), "clef": None, "transposition": "F"},
+        {**_observed_combined([("horn", 1), ("horn", 2)]), "clef": None, "transposition": "Eb"},
+    ]
+    expected_parts, unexpected = expected.reconcile_parts(slots, observed)
+    present = {e["label"]: e["present"] for e in expected_parts}
+    assert present["E-flat Horn or Alto 1"] and present["E-flat Horn or Alto 2"]
+    assert present["Horn in F 1"] and present["Horn in F 2"]
+    assert not present["E-flat Horn or Alto 3"] and not present["Horn in F 3"]
+    assert unexpected == []
+
+
+def test_reconcile_keyed_and_unkeyed_duplicate_merge_no_surplus():
+    # A single trumpet slot with an unkeyed "Trumpet 1" and a "Bb Trumpet 1" copy: demand 1 keeps
+    # them merged so the slot is filled once with no spurious unexpected surplus part.
+    slots = [{"canonical": "trumpet", "part_index": 1, "label": "Trumpet 1", "required": True}]
+    observed = [
+        {**_observed("trumpet", 1), "clef": None, "transposition": None},
+        {**_observed("trumpet", 1), "clef": None, "transposition": "Bb"},
+    ]
+    expected_parts, unexpected = expected.reconcile_parts(slots, observed)
+    assert expected_parts[0]["present"] is True
+    assert unexpected == []
+
+
 # --- Completeness tiers ----------------------------------------------------------------------
 
 
