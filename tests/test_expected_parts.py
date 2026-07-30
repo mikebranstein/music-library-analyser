@@ -566,6 +566,27 @@ def test_reconcile_combined_part_satisfies_multiple_slots():
     assert unexpected == []
 
 
+def test_reconcile_mallet_book_covers_all_mallet_slots():
+    # A score lists Bells / Vibraphone / Xylophone as three separate mallet_percussion slots. The
+    # library holds ONE aux mallets book that Script 03 split into one facet per named instrument,
+    # so the single book must satisfy all three co-equal slots without any surplus.
+    slots = [
+        {"canonical": "mallet_percussion", "part_index": None, "label": "Bells", "required": True},
+        {"canonical": "mallet_percussion", "part_index": None, "label": "Vibraphone",
+         "required": True},
+        {"canonical": "mallet_percussion", "part_index": None, "label": "Xylophone",
+         "required": True},
+    ]
+    observed = [
+        _observed_combined(
+            [("mallet_percussion", None), ("mallet_percussion", None), ("mallet_percussion", None)]
+        )
+    ]
+    expected_parts, unexpected = expected.reconcile_parts(slots, observed)
+    assert all(e["present"] for e in expected_parts)
+    assert unexpected == []
+
+
 def test_reconcile_anchored_doubling_not_flagged_unexpected():
     # Only flute is expected; the piccolo doubling on the same part is silently accepted
     # because the part is anchored by a matched instrument.

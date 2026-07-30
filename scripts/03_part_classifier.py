@@ -828,12 +828,17 @@ def compose_label(
     clef: str | None,
     is_score: bool,
     score_type: str | None,
+    detail: str | None = None,
 ) -> str | None:
     if is_score:
         return SCORE_DISPLAY.get(score_type or "full", "Score")
     if canonical is None:
         return None
-    parts = [INSTRUMENT_DISPLAY.get(canonical, canonical.replace("_", " ").title())]
+    # ``detail`` names the specific instrument a collective canonical resolved to (e.g. a mallet
+    # book's "Bells"/"Xylophone"), so the label reads the actual part rather than the umbrella
+    # "Mallet Percussion" repeated per facet.
+    display = detail or INSTRUMENT_DISPLAY.get(canonical, canonical.replace("_", " ").title())
+    parts = [display]
     if transposition and transposition.lower() not in parts[0].lower():
         parts.append(f"in {transposition}")
     if part_index is not None:
@@ -842,6 +847,42 @@ def compose_label(
     if clef in CLEF_ABBREV:
         label = f"{label} ({CLEF_ABBREV[clef]})"
     return label
+
+
+# A single "mallets" book routinely covers several distinct pitched-mallet instruments: its printed
+# label reads e.g. "Bells, Xylophone & Vibraphone". Every pitched mallet shares the one
+# ``mallet_percussion`` canonical, so a naive read collapses them into a single facet that can
+# satisfy only ONE of the separate Bells / Xylophone / Vibraphone parts an authority enumerates.
+# Splitting the book into one facet per named instrument lets Script 04 coverage credit every mallet
+# slot the book actually holds. Each entry is (display, subtype, alias tokens); the subtype
+# de-duplicates spellings of the same instrument (orchestra bells == glockenspiel == bells).
+_MALLET_SUBTYPES: list[tuple[str, str, tuple[str, ...]]] = [
+    ("Bells", "glockenspiel", ("orchestra bells", "glockenspiel", "bells")),
+    ("Xylophone", "xylophone", ("xylophone",)),
+    ("Vibraphone", "vibraphone", ("vibraphone", "vibes")),
+    ("Marimba", "marimba", ("marimba",)),
+    ("Chimes", "chimes", ("chimes", "tubular bells")),
+]
+
+
+def mallet_instruments_named(texts: list[str]) -> list[tuple[str, str]]:
+    """Distinct pitched-mallet instruments named across ``texts``, in canonical order.
+
+    Every pitched mallet shares the ``mallet_percussion`` canonical, so a book naming several of
+    them ("Bells, Xylophone & Vibraphone") otherwise reads as one instrument. Returns an ordered
+    list of ``(display, subtype)`` pairs -- e.g. ``[("Bells", "glockenspiel"), ("Xylophone",
+    "xylophone")]`` -- de-duplicated by subtype, or ``[]`` when no specific mallet is named.
+    """
+    norms = [normalize(t) for t in texts if t]
+    found: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for display, subtype, tokens in _MALLET_SUBTYPES:
+        if subtype in seen:
+            continue
+        if any(_word_search(normalize(tok), norm) for norm in norms for tok in tokens):
+            found.append((display, subtype))
+            seen.add(subtype)
+    return found
 
 
 # --- Text signal gathering -------------------------------------------------------------------
@@ -1128,6 +1169,28 @@ def classify_document(
             if evidence in ("filename", "none", "text", "ocr_llm", "vision"):
                 evidence = "combined"
 
+    # Mallet-book multi-instrument recovery: one mallets book covers several distinct pitched
+    # mallets -- its label names "Bells, Xylophone & Vibraphone" -- yet they all share the single
+    # ``mallet_percussion`` canonical and collapse to one facet, which can satisfy only ONE of the
+    # separate Bells / Xylophone / Vibraphone parts an authority enumerates. When the page names 2+
+    # distinct mallet instruments, emit one facet per named instrument (tagged with its display
+    # name) so Script 04 coverage credits each slot the book holds. Purely additive: it only ever
+    # names instruments the page itself printed, never fabricating coverage.
+    if (
+        not is_score
+        and len(instruments) == 1
+        and instruments[0]["canonical"] == "mallet_percussion"
+        and instruments[0]["part_index"] is None
+    ):
+        vision_label = doc_record.get("vision_part_label") if doc_record else None
+        named = mallet_instruments_named(
+            [part_segment, ocr_text or "", full_norm, vision_label or ""]
+        )
+        if len(named) >= 2:
+            base = instruments[0]
+            instruments = [{**base, "detail": display} for display, _subtype in named]
+            text_match = True
+
     first = instruments[0] if instruments else None
     if is_score:
         predicted_part = compose_label(None, None, None, None, True, score_type)
@@ -1142,6 +1205,7 @@ def classify_document(
                 None,
                 False,
                 None,
+                detail=f.get("detail"),
             )
             for i, f in enumerate(instruments)
         ]

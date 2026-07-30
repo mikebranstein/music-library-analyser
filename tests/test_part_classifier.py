@@ -405,6 +405,67 @@ def test_classify_keeps_llm_when_more_confident_than_vision():
     assert any(f["canonical"] == "piccolo" for f in rec["instruments"])
 
 
+def test_mallet_instruments_named_dedupes_by_subtype():
+    # "Orchestra Bells" and "Glockenspiel" are two spellings of the same instrument, so they count
+    # once; unrelated percussion is ignored entirely.
+    named = classifier.mallet_instruments_named(["Orchestra Bells", "Glockenspiel", "Xylophone"])
+    assert named == [("Bells", "glockenspiel"), ("Xylophone", "xylophone")]
+    assert classifier.mallet_instruments_named(["Snare Drum"]) == []
+    assert classifier.mallet_instruments_named([]) == []
+
+
+def test_mallet_book_splits_into_named_mallet_instruments():
+    # One "Aux Percussion" mallets book whose printed label names several distinct pitched mallets.
+    # They all share the mallet_percussion canonical, so it must split into one facet per named
+    # instrument to cover the separate Bells / Xylophone / Vibraphone parts a score enumerates.
+    inv = {
+        "pdf_path": "P/005 Mancini Medley Aux Percussion.pdf",
+        "pdf_filename": "005 Mancini Medley Aux Percussion.pdf",
+        "piece_folder": "005 Mancini Medley",
+        "piece_id": "abc",
+        "file_fingerprint": "fp1",
+    }
+    doc = {
+        "vision_status": "success",
+        "vision_instruments": ["mallet_percussion"],
+        "vision_part_numbers": [],
+        "vision_part_label": "Percussion II\nBells, Xylophone & Vibraphone\n(Marimba)",
+        "vision_confidence": 0.95,
+    }
+    rec = _classify(inv, doc=doc)
+    assert all(f["canonical"] == "mallet_percussion" for f in rec["instruments"])
+    assert [f.get("detail") for f in rec["instruments"]] == [
+        "Bells",
+        "Xylophone",
+        "Vibraphone",
+        "Marimba",
+    ]
+    for name in ("Bells", "Xylophone", "Vibraphone", "Marimba"):
+        assert name in rec["predicted_part"]
+
+
+def test_mallet_book_single_named_instrument_not_split():
+    # A mallets book naming only one instrument stays a single facet -- nothing to split.
+    inv = {
+        "pdf_path": "P/005 Mancini Medley Bells.pdf",
+        "pdf_filename": "005 Mancini Medley Bells.pdf",
+        "piece_folder": "005 Mancini Medley",
+        "piece_id": "abc",
+        "file_fingerprint": "fp1",
+    }
+    doc = {
+        "vision_status": "success",
+        "vision_instruments": ["mallet_percussion"],
+        "vision_part_numbers": [],
+        "vision_part_label": "Bells",
+        "vision_confidence": 0.95,
+    }
+    rec = _classify(inv, doc=doc)
+    assert len(rec["instruments"]) == 1
+    assert rec["instruments"][0]["canonical"] == "mallet_percussion"
+    assert "detail" not in rec["instruments"][0]
+
+
 def test_extract_transposition_detects_adjacent_key():
     lexicon, compiled = _lexicon_and_compiled()
 
