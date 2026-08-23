@@ -41,6 +41,7 @@ from typing import Any
 import typer
 
 from scripts._common import (
+    instrument_display_name,
     piece_sort_key,
     read_json,
     read_jsonl,
@@ -72,6 +73,121 @@ DATA_MODULES: tuple[tuple[str, str], ...] = (
 # the web-root-relative thumbnail path the site should reference, or ``None`` when no usable
 # thumbnail exists. Kept as a parameter so the model builders never touch the filesystem.
 ThumbResolver = Callable[[str | None], str | None]
+
+
+# Stable display order for instrumentation rows. This mirrors common concert-band score order:
+# woodwinds first, then saxophones, brass, strings, and percussion. Within a section, rows are
+# ordered by instrument and then by chair number.
+SECTION_DISPLAY_ORDER: tuple[str, ...] = (
+    "woodwind",
+    "flutes",
+    "double_reeds",
+    "clarinets",
+    "saxophones",
+    "brass",
+    "cornets_trumpets",
+    "horns",
+    "low_brass",
+    "strings",
+    "percussion",
+    "keyboards",
+    "voices",
+)
+
+DEFAULT_INSTRUMENT_DISPLAY_ORDER: dict[str, int] = {
+    "piccolo": 0,
+    "flute": 1,
+    "alto_flute": 2,
+    "bass_flute": 3,
+    "oboe": 4,
+    "english_horn": 5,
+    "bassoon": 6,
+    "contrabassoon": 7,
+    "eb_clarinet": 8,
+    "clarinet": 9,
+    "alto_clarinet": 10,
+    "bass_clarinet": 11,
+    "contra_alto_clarinet": 12,
+    "contrabass_clarinet": 13,
+    "soprano_sax": 14,
+    "alto_sax": 15,
+    "tenor_sax": 16,
+    "baritone_sax": 17,
+    "bass_sax": 18,
+    "soprano_cornet": 19,
+    "cornet": 20,
+    "trumpet": 21,
+    "flugelhorn": 22,
+    "horn": 23,
+    "tenor_horn": 24,
+    "mellophone": 25,
+    "trombone": 26,
+    "bass_trombone": 27,
+    "baritone_horn": 28,
+    "euphonium": 29,
+    "tuba": 30,
+    "string_bass": 31,
+    "violin": 32,
+    "viola": 33,
+    "cello": 34,
+    "guitar": 35,
+    "bass_guitar": 36,
+    "harp": 37,
+    "timpani": 38,
+    "mallet_percussion": 39,
+    "snare_drum": 40,
+    "bass_drum": 41,
+    "cymbals": 42,
+    "castanets": 43,
+    "tambourine": 44,
+    "percussion": 45,
+    "drum_set": 46,
+    "triangle": 47,
+    "woodblock": 48,
+    "temple_blocks": 49,
+    "claves": 50,
+    "maracas": 51,
+    "cowbell": 52,
+    "guiro": 53,
+    "vibraslap": 54,
+    "tom_toms": 55,
+    "bongos": 56,
+    "congas": 57,
+    "timbales": 58,
+    "tenor_drum": 59,
+    "field_drum": 60,
+    "sleigh_bells": 61,
+    "wind_chimes": 62,
+    "mark_tree": 63,
+    "tam_tam": 64,
+    "ratchet": 65,
+    "slapstick": 66,
+    "crotales": 67,
+    "finger_cymbals": 68,
+    "anvil": 69,
+    "brake_drum": 70,
+    "piano": 71,
+    "keyboard": 72,
+    "celesta": 73,
+    "organ": 74,
+    "voice": 75,
+}
+
+
+def _display_sort_key(section: str | None, canonical: str | None, part_index: Any, label: str | None) -> tuple[int, int, int, str]:
+    section_key = str(section or "").strip().lower()
+    section_rank = SECTION_DISPLAY_ORDER.index(section_key) if section_key in SECTION_DISPLAY_ORDER else len(SECTION_DISPLAY_ORDER)
+    canonical_key = str(canonical or "").strip().lower()
+    instrument_rank = DEFAULT_INSTRUMENT_DISPLAY_ORDER.get(canonical_key, 999)
+    if part_index is None:
+        chair_rank = -1
+    else:
+        try:
+            chair_rank = int(part_index)
+        except (TypeError, ValueError):
+            chair_rank = 999
+    label_key = str(label or instrument_display_name(canonical_key)).strip().lower()
+    return section_rank, instrument_rank, chair_rank, label_key
 
 
 # --- identity synthesis -----------------------------------------------------------------------
@@ -242,8 +358,12 @@ def _instrumentation(report: dict[str, Any] | None) -> list[dict[str, Any]]:
                 "required": bool(part.get("required")),
                 "present": present,
                 "documents": _documents_for(canonical, part_index) if present else [],
+                "display_order": _display_sort_key(
+                    part.get("section"), canonical, part_index, part.get("label")
+                ),
             }
         )
+    parts.sort(key=lambda part: part.get("display_order") or (999, 999, 999, ""))
     return parts
 
 
@@ -263,6 +383,7 @@ def _unlisted(report: dict[str, Any] | None) -> list[dict[str, Any]]:
         instruments = entry.get("instruments") or []
         canonical = instruments[0].get("canonical") if instruments else None
         part_index = instruments[0].get("part_index") if instruments else None
+        section = instruments[0].get("section") if instruments else None
         rows.append(
             {
                 "label": _unexpected_display_label(entry),
@@ -271,6 +392,10 @@ def _unlisted(report: dict[str, Any] | None) -> list[dict[str, Any]]:
                 "count": int(entry.get("count") or 1),
             }
         )
+        rows[-1]["_sort_key"] = _display_sort_key(section, canonical, part_index, entry.get("predicted_part"))
+    rows.sort(key=lambda row: row.get("_sort_key") or (999, 999, 999, ""))
+    for row in rows:
+        row.pop("_sort_key", None)
     return rows
 
 

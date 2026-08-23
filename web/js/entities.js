@@ -253,7 +253,7 @@
     ])]));
     var tb = el("tbody");
     parts.forEach(function (part, i) {
-      var idx = part.part_index != null ? part.part_index : i + 1;
+      var idx = part.part_index != null ? part.part_index : "—";
       var missingRequired = part.required && !part.present;
       var tr = el("tr", missingRequired ? { class: "is-missing" } : {});
       tr.appendChild(el("td", { class: "num", text: String(idx) }));
@@ -280,7 +280,7 @@
     ])]));
     var tb = el("tbody");
     parts.forEach(function (part, i) {
-      var idx = part.part_index != null ? part.part_index : i + 1;
+      var idx = part.part_index != null ? part.part_index : "—";
       var tr = el("tr", {});
       tr.appendChild(el("td", { class: "num", text: String(idx) }));
       tr.appendChild(el("td", { text: canonicalInstrumentName(part.canonical_instrument || part.label) }));

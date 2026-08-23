@@ -225,8 +225,8 @@ def test_unlisted_projects_held_but_unexpected_parts():
     ])
     rows = ss._unlisted(report)
     assert rows == [
-        {"label": "Horn in Eb 1", "canonical_instrument": "horn", "part_index": 1, "count": 2},
         {"label": "cornet", "canonical_instrument": "cornet", "part_index": None, "count": 1},
+        {"label": "Horn in Eb 1", "canonical_instrument": "horn", "part_index": 1, "count": 2},
     ]
 
 
@@ -318,6 +318,59 @@ def test_instrumentation_links_multi_chair_file_to_every_chair():
     # Both chairs resolve to the one physical file.
     assert by_label["Flute 1"]["documents"] == [flutes_doc]
     assert by_label["Flute 2"]["documents"] == [flutes_doc]
+
+
+def test_instrumentation_uses_stable_display_order():
+    report = {
+        "piece_id": "p4",
+        "expected_parts": [
+            {"label": "Trumpet 3", "canonical_instrument": "trumpet", "part_index": 3,
+             "section": "cornets_trumpets", "required": True, "present": True},
+            {"label": "Tuba", "canonical_instrument": "tuba", "part_index": None,
+             "section": "low_brass", "required": True, "present": True},
+            {"label": "Clarinet 2", "canonical_instrument": "clarinet", "part_index": 2,
+             "section": "clarinets", "required": True, "present": True},
+            {"label": "Flute 2", "canonical_instrument": "flute", "part_index": 2,
+             "section": "flutes", "required": True, "present": True},
+            {"label": "Oboe", "canonical_instrument": "oboe", "part_index": None,
+             "section": "double_reeds", "required": True, "present": True},
+            {"label": "Clarinet 1", "canonical_instrument": "clarinet", "part_index": 1,
+             "section": "clarinets", "required": True, "present": True},
+            {"label": "Flute 1", "canonical_instrument": "flute", "part_index": 1,
+             "section": "flutes", "required": True, "present": True},
+        ],
+        "observed_parts": [
+            {"predicted_part": "Trumpet 3", "instruments": [{"canonical": "trumpet", "part_index": 3, "section": "cornets_trumpets"}]},
+            {"predicted_part": "Tuba", "instruments": [{"canonical": "tuba", "part_index": None, "section": "low_brass"}]},
+            {"predicted_part": "Clarinet 2", "instruments": [{"canonical": "clarinet", "part_index": 2, "section": "clarinets"}]},
+            {"predicted_part": "Flute 2", "instruments": [{"canonical": "flute", "part_index": 2, "section": "flutes"}]},
+            {"predicted_part": "Oboe", "instruments": [{"canonical": "oboe", "part_index": None, "section": "double_reeds"}]},
+            {"predicted_part": "Clarinet 1", "instruments": [{"canonical": "clarinet", "part_index": 1, "section": "clarinets"}]},
+            {"predicted_part": "Flute 1", "instruments": [{"canonical": "flute", "part_index": 1, "section": "flutes"}]},
+        ],
+        "documents": [
+            {"pdf_path": "004/trumpet3.pdf", "pdf_filename": "trumpet3.pdf", "predicted_part": "Trumpet 3", "is_score": False},
+            {"pdf_path": "004/tuba.pdf", "pdf_filename": "tuba.pdf", "predicted_part": "Tuba", "is_score": False},
+            {"pdf_path": "004/clarinet2.pdf", "pdf_filename": "clarinet2.pdf", "predicted_part": "Clarinet 2", "is_score": False},
+            {"pdf_path": "004/flute2.pdf", "pdf_filename": "flute2.pdf", "predicted_part": "Flute 2", "is_score": False},
+            {"pdf_path": "004/oboe.pdf", "pdf_filename": "oboe.pdf", "predicted_part": "Oboe", "is_score": False},
+            {"pdf_path": "004/clarinet1.pdf", "pdf_filename": "clarinet1.pdf", "predicted_part": "Clarinet 1", "is_score": False},
+            {"pdf_path": "004/flute1.pdf", "pdf_filename": "flute1.pdf", "predicted_part": "Flute 1", "is_score": False},
+        ],
+    }
+    grid = ss._instrumentation(report)
+    assert [part["label"] for part in grid] == [
+        "Flute 1",
+        "Flute 2",
+        "Oboe",
+        "Clarinet 1",
+        "Clarinet 2",
+        "Trumpet 3",
+        "Tuba",
+    ]
+    assert all("display_order" in part for part in grid)
+    assert grid[0]["part_index"] == 1
+    assert grid[2]["part_index"] is None
 
 
 def test_build_pieces_projects_metadata_preferring_resolved():
