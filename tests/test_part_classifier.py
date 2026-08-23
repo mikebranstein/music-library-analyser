@@ -103,6 +103,21 @@ def test_reversed_word_order_eb_clarinets():
     assert plain == "clarinet"
 
 
+def test_abbreviated_clarinet_labels_prefer_specific_variants():
+    # The OCR/score label may reduce "Clarinet" to "Cl." while keeping the qualifier in the same
+    # phrase; the specific transposed clarinet must beat the generic "cl" abbreviation.
+    _, compiled = _lexicon_and_compiled()
+    assert classifier.match_instrument(classifier.normalize("Eb Cl."), compiled)[0] == "eb_clarinet"
+    assert classifier.match_instrument(classifier.normalize("Alto Cl."), compiled)[0] == "alto_clarinet"
+    assert classifier.match_instrument(classifier.normalize("Bass Cl."), compiled)[0] == "bass_clarinet"
+
+
+def test_abbreviated_trombone_labels_keep_specificity():
+    _, compiled = _lexicon_and_compiled()
+    assert classifier.match_instrument(classifier.normalize("Bass Tbn."), compiled)[0] == "bass_trombone"
+    assert classifier.match_instrument(classifier.normalize("Tbn."), compiled)[0] == "trombone"
+
+
 def test_bass_clarinet_in_bb_not_plain_clarinet():
     # Regression (The Wellerman): the transposition-qualified filename "Bass Clarinet in Bb" must
     # classify as bass_clarinet. The redundant "clarinet in bb" alias (longer than "bass clarinet")

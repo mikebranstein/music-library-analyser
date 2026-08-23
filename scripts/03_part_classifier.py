@@ -90,12 +90,12 @@ DEFAULT_LEXICON: dict[str, Any] = {
         "english_horn": ["english horn", "cor anglais"],
         "bassoon": ["bassoon", "bassoons", "basson", "bassons", "bsn", "fagotto", "fagotti"],
         "eb_clarinet": ["eb clarinet", "eb clarinets", "e flat clarinet", "clarinet in eb",
-                        "clarinet in e flat", "clarinet eb"],
+                        "clarinet in e flat", "clarinet eb", "eb cl", "e flat cl"],
         "clarinet": ["bb clarinet", "bb clarinets", "b flat clarinet",
                      "clarinets", "clarinet", "clar", "cl"],
         "alto_clarinet": ["alto clarinet in e flat", "alto clarinet in eb", "alto clarinet",
                           "alto clarinets", "eb alto clarinet", "clarinet eb alto",
-                          "clarinet alto"],
+                              "clarinet alto", "alto cl"],
         "bass_clarinet": ["bass clarinet", "bass clarinets", "b cl", "bass cl"],
         "contrabass_clarinet": [
             "contrabass clarinet", "contra bass clarinet",
@@ -446,31 +446,51 @@ def isolate_part_segment(pdf_filename: str, piece_folder: str) -> str:
 # --- Matching --------------------------------------------------------------------------------
 
 
+def _match_score(text_norm: str, alias: str) -> int:
+    """Rank a match by specificity instead of raw alias length alone."""
+    score = len(alias) * 2
+    if alias == text_norm:
+        score += 20
+    if " " in alias:
+        score += 10
+    if len(alias) <= 3:
+        score -= 35
+    if alias in {"cl", "hn", "tbn", "tpt", "ob", "fl", "alto", "tenor", "bass"}:
+        score -= 20
+    if any(token in alias for token in ("bass", "alto", "tenor", "baritone", "soprano", "contra", "eb", "bb")):
+        score += 12
+    if any(token in text_norm for token in ("bass", "alto", "tenor", "baritone", "soprano", "contra", "eb", "bb")):
+        score += 6
+    if " " in text_norm and len(alias) <= 4:
+        score -= 10
+    return score
+
+
 def match_instrument(
     text_norm: str,
     compiled: list[tuple[str, str]],
     min_alias_len: int = 1,
 ) -> tuple[str | None, str | None, list[dict[str, Any]]]:
-    """Return (canonical, matched_alias, alternates) using longest-alias-wins."""
-    matches: list[tuple[str, str]] = []
+    """Return (canonical, matched_alias, alternates) using specificity-aware scoring."""
+    matches: list[tuple[str, str, int]] = []
     for canonical, alias in compiled:
         if len(alias) < min_alias_len:
             continue
         if _word_search(alias, text_norm):
-            matches.append((canonical, alias))
+            matches.append((canonical, alias, _match_score(text_norm, alias)))
     if not matches:
         return None, None, []
-    best_canonical, best_alias = matches[0]
+    best_canonical, best_alias, best_score = max(matches, key=lambda item: item[2])
     alternates: list[dict[str, Any]] = []
     seen = {best_canonical}
-    for canonical, alias in matches:
+    for canonical, alias, score in matches:
         if canonical in seen:
             continue
         seen.add(canonical)
         alternates.append(
             {
                 "canonical_instrument": canonical,
-                "score": round(len(alias) / max(len(best_alias), 1), 3),
+                "score": round(score / max(best_score, 1), 3),
             }
         )
         if len(alternates) >= 2:
@@ -483,33 +503,33 @@ def match_instrument_first(
     compiled: list[tuple[str, str]],
     min_alias_len: int = 1,
 ) -> tuple[str | None, str | None, list[dict[str, Any]]]:
-    """Return the EARLIEST-positioned instrument match; ties broken by longest alias.
+    """Return the EARLIEST-positioned instrument match; ties broken by specificity.
 
     The printed part label sits topmost/leftmost in the upper-left corner, above any body cue that
     names another instrument, so earliest-position wins there (unlike :func:`match_instrument`,
-    which is longest-alias-wins and used where position is not meaningful).
+    which is specificity-aware and used where position is not meaningful).
     """
-    found: list[tuple[int, int, str, str]] = []  # (start, -len(alias), canonical, alias)
+    found: list[tuple[int, int, str, str]] = []  # (start, -score, canonical, alias)
     for canonical, alias in compiled:
         if len(alias) < min_alias_len:
             continue
         match = re.search(r"(?<![a-z0-9])" + re.escape(alias) + r"(?![a-z0-9])", text_norm)
         if match is not None:
-            found.append((match.start(), -len(alias), canonical, alias))
+            found.append((match.start(), -_match_score(text_norm, alias), canonical, alias))
     if not found:
         return None, None, []
     found.sort()
     best_canonical, best_alias = found[0][2], found[0][3]
     alternates: list[dict[str, Any]] = []
     seen = {best_canonical}
-    for _start, _neg_len, canonical, alias in found:
+    for _start, _neg_score, canonical, alias in found:
         if canonical in seen:
             continue
         seen.add(canonical)
         alternates.append(
             {
                 "canonical_instrument": canonical,
-                "score": round(len(alias) / max(len(best_alias), 1), 3),
+                "score": round(_match_score(text_norm, alias) / max(_match_score(text_norm, best_alias), 1), 3),
             }
         )
         if len(alternates) >= 2:
