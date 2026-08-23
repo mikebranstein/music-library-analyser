@@ -230,9 +230,10 @@ sections:
 # part fills a euphonium slot and vice versa). This bridging is DISABLED for a group whenever the
 # score explicitly calls for more than one member as separate parts -- in that case each expected
 # slot must be filled by its own instrument and no cross-matching is allowed.
+# NOTE: cornet and trumpet are deliberately NOT grouped -- they are distinct instrument identities,
+# so a held trumpet never fills a cornet chair (and vice versa).
 interchangeable_instruments:
   - ["euphonium", "baritone_horn"]
-  - ["cornet", "trumpet"]
 
 # legacy keys retained for backward compatibility with earlier drafts
 part_patterns: {}

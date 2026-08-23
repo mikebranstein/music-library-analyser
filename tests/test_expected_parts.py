@@ -670,19 +670,19 @@ def test_reconcile_separate_euph_and_bari_slots_are_not_cross_filled():
 _CORNET_TRUMPET_GROUPS = [["cornet", "trumpet"]]
 
 
-def test_reconcile_cornets_satisfy_trumpet_slots():
-    # Regression (Procession of the Sardar): WindRep lists three Bb Trumpet parts; the library holds
-    # three Cornet parts. Cornet and trumpet are interchangeable, so the cornets fill the trumpet
-    # chairs -- none missing, no unexpected surplus.
+def test_reconcile_trumpet_does_not_fill_cornet_slot():
+    # Product decision: Cornet and Trumpet are distinct identities (NOT interchangeable). Mancini
+    # Medley case -- the score lists cornet chairs and the library holds separate trumpet books, so
+    # a held trumpet must leave the cornet chair MISSING and be reported as an unlisted extra.
     slots = [
-        {"canonical": "trumpet", "part_index": i, "label": f"B-flat Trumpet {i}", "required": True}
-        for i in (1, 2, 3)
+        {"canonical": "cornet", "part_index": 1, "label": "B-flat Cornet 1", "required": True},
     ]
-    observed = [_observed("cornet", 1), _observed("cornet", 2), _observed("cornet", 3)]
-    eq = expected.build_equivalents(slots, _CORNET_TRUMPET_GROUPS)
-    expected_parts, unexpected = expected.reconcile_parts(slots, observed, eq)
-    assert all(e["present"] for e in expected_parts)
-    assert unexpected == []
+    observed = [_observed("trumpet", 1)]
+    expected_parts, unexpected = expected.reconcile_parts(slots, observed)
+    assert expected_parts[0]["present"] is False
+    assert any(
+        any(f["canonical"] == "trumpet" for f in u["instruments"]) for u in unexpected
+    )
 
 
 def test_reconcile_separate_cornet_and_trumpet_slots_are_not_cross_filled():
