@@ -156,10 +156,64 @@
 
   // Score fact for the Overview panel: presence, full/partial indicator, and link(s) to the
   // score document(s). Returned as a single node so it can live in the Overview facts list.
+  function canonicalInstrumentName(canonical) {
+    var value = fmt.text(canonical || "");
+    if (value === "—") return value;
+    var overrides = {
+      alb: "Alto B",
+      alto_sax: "Alto Saxophone",
+      baritone_sax: "Baritone Saxophone",
+      bass_sax: "Bass Saxophone",
+      bass_trombone: "Bass Trombone",
+      clarinet: "Clarinet",
+      contrabassoon: "Contrabassoon",
+      cornet: "Cornet",
+      eb_clarinet: "E-flat Clarinet",
+      english_horn: "English Horn",
+      euphonium: "Euphonium",
+      flute: "Flute",
+      horn: "Horn in F",
+      oboe: "Oboe",
+      piccolo: "Piccolo",
+      soprano_sax: "Soprano Saxophone",
+      tenor_sax: "Tenor Saxophone",
+      trombone: "Trombone",
+      trumpet: "Trumpet",
+      tuba: "Tuba",
+    };
+    if (overrides[value.replace(/\s+/g, "_").toLowerCase()]) {
+      return overrides[value.replace(/\s+/g, "_").toLowerCase()];
+    }
+    var normalized = String(value).replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
+    return normalized ? fmt.title(normalized) : "—";
+  }
+
+  function standardSectionName(section) {
+    var raw = fmt.text(section || "");
+    if (raw === "—") return raw;
+    var normalized = String(raw).trim().toLowerCase().replace(/[_\-\s]+/g, "_").replace(/^_+|_+$/g, "");
+    var overrides = {
+      flutes: "Flutes",
+      double_reeds: "Double Reeds",
+      clarinets: "Clarinets",
+      saxophones: "Saxophones",
+      cornets_trumpets: "Cornets & Trumpets",
+      horns: "Horns",
+      low_brass: "Low Brass",
+      tubas: "Low Brass",
+      strings: "Strings",
+      keyboards: "Keyboards",
+      voices: "Voices",
+      percussion: "Percussion",
+      score: "Score",
+    };
+    return overrides[normalized] || fmt.title(raw);
+  }
+
   function pieceScoreFact(p) {
-    var score = p.score || {};
-    var docs = score.documents || [];
-    var wrap = el("div", { class: "stack-tight" });
+  var score = p.score || {};
+  var docs = score.documents || [];
+  var wrap = el("div", { class: "stack-tight" });
 
     var head = el("div", { class: "row" });
     if (docs.length) {
@@ -191,7 +245,7 @@
   function instrumentationTable(parts) {
     var t = el("table", { class: "data instrumentation" });
     t.appendChild(el("thead", {}, [el("tr", {}, [
-      el("th", { class: "num", text: "#" }),
+      el("th", { class: "num", text: "Part #" }),
       el("th", { text: "Instrument" }),
       el("th", { text: "Section" }),
       el("th", { text: "Required" }),
@@ -204,7 +258,7 @@
       var tr = el("tr", missingRequired ? { class: "is-missing" } : {});
       tr.appendChild(el("td", { class: "num", text: String(idx) }));
       tr.appendChild(el("td", {}, [instrumentCell(part)]));
-      tr.appendChild(el("td", { text: fmt.text(part.section) }));
+      tr.appendChild(el("td", { text: standardSectionName(part.section) }));
       tr.appendChild(el("td", {}, [MLG.badge(part.required ? "Required" : "Optional", part.required ? "muted" : "plain")]));
       tr.appendChild(el("td", {}, [part.present ? MLG.badge("Present", "ok") : MLG.badge("Missing", part.required ? "high" : "muted")]));
       tb.appendChild(tr);
@@ -219,7 +273,7 @@
   function unlistedTable(parts) {
     var t = el("table", { class: "data instrumentation" });
     t.appendChild(el("thead", {}, [el("tr", {}, [
-      el("th", { class: "num", text: "#" }),
+      el("th", { class: "num", text: "Part #" }),
       el("th", { text: "Instrument" }),
       el("th", { class: "num", text: "Copies" }),
       el("th", { text: "Status" }),
@@ -229,7 +283,7 @@
       var idx = part.part_index != null ? part.part_index : i + 1;
       var tr = el("tr", {});
       tr.appendChild(el("td", { class: "num", text: String(idx) }));
-      tr.appendChild(el("td", { text: fmt.text(part.label || part.canonical_instrument) }));
+      tr.appendChild(el("td", { text: canonicalInstrumentName(part.canonical_instrument || part.label) }));
       tr.appendChild(el("td", { class: "num", text: String(part.count || 1) }));
       tr.appendChild(el("td", {}, [MLG.badge("Present (unlisted)", "muted")]));
       tb.appendChild(tr);
@@ -240,12 +294,22 @@
 
   // Instrument name, linked to the original document when the part is satisfied by one.
   function instrumentCell(part) {
-    var label = fmt.text(part.label || part.canonical_instrument);
+    var canonical = part.canonical_instrument || part.label || "";
+    var label = canonicalInstrumentName(canonical);
+    var originalLabel = fmt.text(part.label || part.canonical_instrument || "");
     var docs = part.documents || [];
     if (docs.length) {
-      return link("document.html", { id: docs[0].doc_id }, label);
+      var linkNode = link("document.html", { id: docs[0].doc_id }, label);
+      if (originalLabel && originalLabel !== label) {
+        linkNode.setAttribute("title", originalLabel);
+      }
+      return linkNode;
     }
-    return document.createTextNode(label);
+    var node = document.createTextNode(label);
+    if (originalLabel && originalLabel !== label) {
+      node = document.createTextNode(label);
+    }
+    return node;
   }
 
   // "Where did this instrumentation come from?" \u2014 provenance summary for the piece detail
@@ -308,7 +372,11 @@
     t.appendChild(el("thead", {}, [el("tr", {}, [el("th", { text: "Part" }), el("th", { text: "Instrument" }), el("th", { text: "Section" })])]));
     var tb = el("tbody");
     missing.forEach(function (m) {
-      tb.appendChild(el("tr", { class: "is-missing" }, [el("td", { text: fmt.text(m.label) }), el("td", { text: fmt.text(m.canonical_instrument) }), el("td", { text: fmt.text(m.section) })]));
+      tb.appendChild(el("tr", { class: "is-missing" }, [
+        el("td", { text: fmt.text(m.label) }),
+        el("td", { text: canonicalInstrumentName(m.canonical_instrument || m.label) }),
+        el("td", { text: standardSectionName(m.section) }),
+      ]));
     });
     t.appendChild(tb);
     return el("div", { class: "table-wrap" }, [t]);
