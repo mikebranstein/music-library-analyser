@@ -417,6 +417,30 @@ def test_normalize_expected_parts_canonicalizes_to_taxonomy():
     assert slots[0]["label"] == "Alto Saxophone I"
 
 
+def test_normalize_expected_parts_refines_generic_canonical_from_label():
+    # Regression (MacArthur Park et al.): summarize stages may emit a generic canonical (clarinet)
+    # while the label names a specific subtype. Normalization must promote the slot to that subtype.
+    raw = [
+        {"canonical_instrument": "clarinet", "label": "Eb Clarinet", "required": True},
+        {"canonical_instrument": "clarinet", "label": "Eb Alto Clarinet", "required": True},
+        {"canonical_instrument": "clarinet", "label": "Bb Bass Clarinet / Bb C.B. Clarinet", "required": True},
+        {"canonical_instrument": "clarinet", "label": "Eb Contra Alto Clarinet", "required": True},
+        {"canonical_instrument": "trumpet", "label": "Solo Cornet", "required": True},
+        {"canonical_instrument": "horn", "label": "Eb Alto Horn", "required": True},
+    ]
+    slots = expected.normalize_expected_parts(raw)
+    assert [s["canonical"] for s in slots] == [
+        "eb_clarinet",
+        "alto_clarinet",
+        "bass_clarinet",
+        "contra_alto_clarinet",
+        "cornet",
+        "tenor_horn",
+    ]
+    # Explicit either/or labels retain acceptable alternates for reconciliation.
+    assert slots[2].get("equivalent_canonicals") == ["contrabass_clarinet"]
+
+
 def test_normalize_expected_parts_drops_score_entries():
     # Authority instrumentation lists routinely start with the score edition (e.g. "Condensed
     # Score"). That is not a playable instrument part -- score presence is tracked separately --
@@ -941,6 +965,24 @@ def test_reconcile_eb_horn_does_not_fill_bare_horn_slot():
     expected_parts, unexpected = expected.reconcile_parts(slots, observed)
     assert expected_parts[0]["present"] is False
     assert len(unexpected) == 1
+
+
+def test_reconcile_slot_local_alternative_canonical():
+    # A single expected slot may explicitly list acceptable alternatives in one label
+    # (e.g. "Bass Clarinet / Contrabass Clarinet"). Either observed canonical should satisfy it.
+    slots = [
+        {
+            "canonical": "bass_clarinet",
+            "part_index": None,
+            "label": "Bass Clarinet / Contrabass Clarinet",
+            "required": True,
+            "equivalent_canonicals": ["contrabass_clarinet"],
+        }
+    ]
+    observed = [{**_observed("contrabass_clarinet", None), "clef": None, "transposition": "Bb"}]
+    expected_parts, unexpected = expected.reconcile_parts(slots, observed)
+    assert expected_parts[0]["present"] is True
+    assert unexpected == []
 
 
 # --- Completeness tiers ----------------------------------------------------------------------

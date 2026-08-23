@@ -179,9 +179,23 @@ def test_build_pieces_projects_missing_required_and_score_pct():
     assert p["completeness_score"] == 50.0
     assert p["page_count"] == 2
     assert p["missing_required"] == [
-        {"label": "Oboe", "canonical_instrument": "oboe", "section": "woodwind"}
+        {"label": "Oboe", "canonical_instrument": "oboe", "part_index": None, "section": "woodwind"}
     ]
     assert p["thumbnail"] == "assets/thumbs/p1_p0001_aaa.webp"
+
+
+def test_build_pieces_preserves_missing_part_chair_numbers():
+    report = _report(
+        expected_parts=[
+            {"label": "Clarinet 1", "canonical_instrument": "clarinet", "part_index": 1, "section": "clarinets", "required": True, "present": True},
+            {"label": "Clarinet 2", "canonical_instrument": "clarinet", "part_index": 2, "section": "clarinets", "required": True, "present": False},
+        ],
+    )
+    index = ss.index_reports([report])
+    pieces = ss.build_pieces(_summary()["pieces"], index, {"p1": 2}, lambda c: None)
+    assert pieces[0]["missing_required"] == [
+        {"label": "Clarinet 2", "canonical_instrument": "clarinet", "part_index": 2, "section": "clarinets"}
+    ]
 
 
 def test_build_pieces_includes_instrumentation_and_score():

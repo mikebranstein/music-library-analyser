@@ -369,11 +369,17 @@
 
   function missingRequiredTable(missing) {
     var t = el("table", { class: "data" });
-    t.appendChild(el("thead", {}, [el("tr", {}, [el("th", { text: "Part" }), el("th", { text: "Instrument" }), el("th", { text: "Section" })])]));
+    t.appendChild(el("thead", {}, [el("tr", {}, [
+      el("th", { text: "Part" }),
+      el("th", { text: "Chair" }),
+      el("th", { text: "Instrument" }),
+      el("th", { text: "Section" }),
+    ])]));
     var tb = el("tbody");
     missing.forEach(function (m) {
       tb.appendChild(el("tr", { class: "is-missing" }, [
         el("td", { text: fmt.text(m.label) }),
+        el("td", { text: m.part_index == null ? "—" : fmt.text(m.part_index) }),
         el("td", { text: canonicalInstrumentName(m.canonical_instrument || m.label) }),
         el("td", { text: standardSectionName(m.section) }),
       ]));
@@ -538,7 +544,9 @@
           severity: p.severity,
           completeness_score: p.completeness_score,
           missing_in_section: missing.length,
-          missing_parts: missing.map(function (m) { return fmt.text(m.label); }).join(", "),
+          missing_parts: missing.map(function (m) {
+            return fmt.text(m.label) + (m.part_index == null ? "" : " (part " + fmt.text(m.part_index) + ")");
+          }).join(", "),
         });
       }
     });

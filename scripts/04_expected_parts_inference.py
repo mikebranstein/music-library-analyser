@@ -85,6 +85,7 @@ from scripts._common import (
     make_checkpoint_path,
     md_cell,
     new_record_envelope,
+    normalize_instrument_name,
     only_piece_decision,
     pct,
     piece_sort_key,
@@ -1181,6 +1182,9 @@ _INSTRUMENTATION_PLAIN_RE = re.compile(
     r"^[ \t]*(?:instrumentation|scoring|besetzung)[ \t]*:?[ \t]*$",
     re.IGNORECASE | re.MULTILINE,
 )
+_LABEL_NORMALIZE_RE = re.compile(r"[^a-z0-9]+")
+_ALTERNATE_DELIMITER_RE = re.compile(r"/|\bor\b", re.IGNORECASE)
+_DOUBLING_DELIMITER_RE = re.compile(r"&|\+|\band\b|\bdoubling\b|\bdbl\b", re.IGNORECASE)
 
 
 def _instrumentation_region(text: str) -> str | None:
@@ -1203,6 +1207,95 @@ def _instrumentation_region(text: str) -> str | None:
     if m:
         return text[m.end():]
     return None
+
+
+def _normalize_label_for_alias_match(label: Any) -> str:
+    """Normalize a part label for alias matching against taxonomy phrases."""
+    if not isinstance(label, str):
+        return ""
+    lowered = label.lower().replace("♭", " flat ").replace("♯", " sharp ")
+    cleaned = _LABEL_NORMALIZE_RE.sub(" ", lowered)
+    return normalize_instrument_name(cleaned)
+
+
+def _label_canonical_matches(label: Any, alias_to_canonical: dict[str, str]) -> list[str]:
+    """Canonical instruments mentioned in ``label`` (ordered by first match position)."""
+    text = _normalize_label_for_alias_match(label)
+    if not text:
+        return []
+    alias_items = sorted(alias_to_canonical.items(), key=lambda kv: len(kv[0]), reverse=True)
+    occupied: list[tuple[int, int]] = []
+    hits: list[tuple[int, str]] = []
+    for alias, canonical in alias_items:
+        if not alias:
+            continue
+        pattern = r"(?<![a-z0-9])" + re.escape(alias) + r"(?![a-z0-9])"
+        for match in re.finditer(pattern, text):
+            start, end = match.span()
+            overlaps = any(not (end <= left or start >= right) for left, right in occupied)
+            if overlaps:
+                continue
+            occupied.append((start, end))
+            hits.append((start, canonical))
+    if not hits:
+        return []
+    hits.sort(key=lambda pair: pair[0])
+    ordered: list[str] = []
+    for _start, canonical in hits:
+        if canonical not in ordered:
+            ordered.append(canonical)
+    return ordered
+
+
+def _canonical_from_label(
+    fallback_canonical: str,
+    label: Any,
+    *,
+    alias_to_canonical: dict[str, str],
+    canonical_to_section: dict[str, str],
+) -> tuple[str, list[str]]:
+    """Refine a slot's canonical instrument from its printed label.
+
+    Returns ``(primary_canonical, equivalent_canonicals)`` where
+    ``equivalent_canonicals`` are alternate instruments in an explicit either/or label
+    (e.g. ``"Bass Clarinet / Contrabass Clarinet"``). Alternates are emitted only for
+    explicit alternatives (``/`` or ``or``) and only within the same section.
+    """
+    matches = _label_canonical_matches(label, alias_to_canonical)
+    if not matches:
+        return fallback_canonical, []
+    primary = matches[0]
+    if fallback_canonical in matches:
+        primary = fallback_canonical
+    # Prefer a more specific label-derived canonical when the fallback is generic.
+    if fallback_canonical == "clarinet":
+        for candidate in matches:
+            if candidate != "clarinet":
+                primary = candidate
+                break
+    elif fallback_canonical == "horn":
+        for candidate in matches:
+            if candidate in {"tenor_horn", "mellophone"}:
+                primary = candidate
+                break
+    elif fallback_canonical in {"trumpet", "cornet"}:
+        for candidate in matches:
+            if candidate in {"trumpet", "cornet", "flugelhorn", "soprano_cornet"}:
+                primary = candidate
+                break
+    raw_label = str(label or "")
+    has_alternatives = bool(_ALTERNATE_DELIMITER_RE.search(raw_label))
+    has_doubling = bool(_DOUBLING_DELIMITER_RE.search(raw_label))
+    equivalents: list[str] = []
+    if has_alternatives and not has_doubling:
+        primary_section = canonical_to_section.get(primary)
+        for candidate in matches:
+            if candidate == primary or candidate in equivalents:
+                continue
+            if primary_section and canonical_to_section.get(candidate) != primary_section:
+                continue
+            equivalents.append(candidate)
+    return primary, equivalents
 
 
 def _percussion_alias_index() -> list[tuple[str, str]]:
@@ -1327,19 +1420,28 @@ def normalize_expected_parts(raw_parts: Any) -> list[dict[str, Any]]:
         raw_canonical = entry.get("canonical_instrument") or entry.get("canonical")
         if not raw_canonical or not isinstance(raw_canonical, str):
             continue
-        canonical = canonicalize_instrument(raw_canonical, alias_to_canonical)
+        fallback_canonical = canonicalize_instrument(raw_canonical, alias_to_canonical)
+        canonical, equivalent_canonicals = _canonical_from_label(
+            fallback_canonical,
+            entry.get("label"),
+            alias_to_canonical=alias_to_canonical,
+            canonical_to_section=section_map,
+        )
         if not canonical:
             continue
         if _is_score_slot(canonical, entry.get("section")):
             continue
         required = entry.get("required")
-        slots.append({
+        slot = {
             "canonical": canonical,
             "part_index": _coerce_index(entry.get("part_index")),
             "label": str(entry.get("label") or canonical),
             "section": section_map.get(canonical, entry.get("section")),
             "required": True if required is None else bool(required),
-        })
+        }
+        if equivalent_canonicals:
+            slot["equivalent_canonicals"] = equivalent_canonicals
+        slots.append(slot)
     return slots
 
 
@@ -1706,6 +1808,18 @@ def reconcile_parts(
     for slot_canonical, aliases in (equivalents or {}).items():
         for alias in aliases:
             alias_to_slot[alias] = slot_canonical
+    # Slot-local alternatives from explicit label either/or forms
+    # (e.g. "Bass Clarinet / Contrabass Clarinet"): treat alternates as satisfying
+    # the same expected slot unless they are also explicitly listed as primary slots.
+    explicit_primary = {slot["canonical"] for slot in template_parts}
+    for slot in template_parts:
+        slot_canonical = slot["canonical"]
+        for alias in slot.get("equivalent_canonicals", []):
+            if not alias or alias == slot_canonical:
+                continue
+            if alias in explicit_primary:
+                continue
+            alias_to_slot.setdefault(alias, slot_canonical)
 
     expected_idx_by_instr: dict[str, list[int]] = defaultdict(list)
     slots_by_key: dict[tuple[Any, Any], int] = defaultdict(int)

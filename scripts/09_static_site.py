@@ -263,6 +263,7 @@ def _missing_required(report: dict[str, Any] | None) -> list[dict[str, Any]]:
                 {
                     "label": part.get("label"),
                     "canonical_instrument": part.get("canonical_instrument"),
+                    "part_index": part.get("part_index"),
                     "section": part.get("section"),
                 }
             )
