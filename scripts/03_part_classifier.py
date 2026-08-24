@@ -443,6 +443,28 @@ def isolate_part_segment(pdf_filename: str, piece_folder: str) -> str:
     return remainder
 
 
+def detect_part_role(pdf_path: str | None, part_segment: str, is_score: bool) -> str:
+    """Classify a part as section/solo/solo_alternative for downstream reconciliation."""
+    if is_score:
+        return "score"
+    rel = (pdf_path or "").replace("\\", "/").lower()
+    seg = normalize(part_segment)
+    if "/solo alternatives/" in rel:
+        return "solo_alternative"
+    if re.search(r"(?<![a-z0-9])solo(?![a-z0-9])", seg):
+        return "solo"
+    return "section"
+
+
+def apply_part_role_label(part_label: str | None, part_role: str, is_score: bool) -> str | None:
+    """Decorate a predicted part label with solo-role context for human-facing outputs."""
+    if is_score or not part_label:
+        return part_label
+    if part_role in {"solo", "solo_alternative"} and not part_label.lower().startswith("solo "):
+        return f"Solo {part_label}"
+    return part_label
+
+
 # --- Matching --------------------------------------------------------------------------------
 
 
@@ -1232,6 +1254,9 @@ def classify_document(
         if clef in CLEF_ABBREV:
             predicted_part = f"{predicted_part} ({CLEF_ABBREV[clef]})"
 
+    part_role = detect_part_role(inv_record.get("pdf_path"), part_segment, is_score)
+    predicted_part = apply_part_role_label(predicted_part, part_role, is_score)
+
     part_sort_key = compute_part_sort_key(
         first["canonical"] if first else None,
         first["part_index"] if first else None,
@@ -1261,6 +1286,7 @@ def classify_document(
         "clef": clef,
         "transposition": transposition,
         "is_score": is_score,
+        "part_role": part_role,
         "score_type": score_type,
         "confidence": confidence,
         "confidence_tier": tier,
@@ -1300,6 +1326,7 @@ def build_skipped_record(inv_record: dict[str, Any], run_id: str) -> dict[str, A
         "clef": None,
         "transposition": None,
         "is_score": False,
+        "part_role": "unknown",
         "score_type": None,
         "confidence": 0.0,
         "confidence_tier": "none",
@@ -1329,11 +1356,7 @@ def apply_ensemble(records: list[dict[str, Any]]) -> None:
         facet_key = tuple(
             sorted((f.get("canonical"), f.get("part_index")) for f in rec["instruments"])
         )
-        key = (
-            rec.get("piece_id"),
-            facet_key,
-            rec.get("clef"),
-        )
+        key = (rec.get("piece_id"), facet_key, rec.get("clef"), rec.get("part_role", "section"))
         signatures.setdefault(key, []).append(rec)
     for group in signatures.values():
         if len(group) > 1:
@@ -1386,6 +1409,7 @@ def build_piece_rollups(
                 tuple(sorted((f.get("canonical"), f.get("part_index")) for f in facets)),
                 d.get("clef"),
                 d.get("transposition"),
+                d.get("part_role", "section"),
             )
             entry = observed.get(key)
             conf = d.get("confidence", 0.0)
@@ -1401,6 +1425,7 @@ def build_piece_rollups(
                     ],
                     "clef": d.get("clef"),
                     "transposition": d.get("transposition"),
+                    "part_role": d.get("part_role", "section"),
                     "predicted_part": d.get("predicted_part"),
                     "count": 1,
                     "min_confidence": conf,

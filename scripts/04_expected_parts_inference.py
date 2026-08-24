@@ -1598,6 +1598,7 @@ def _unexpected_entry(obs: dict[str, Any]) -> dict[str, Any]:
             {"canonical": f.get("canonical"), "part_index": f.get("part_index")}
             for f in obs.get("instruments", [])
         ],
+        "part_role": obs.get("part_role", "section"),
         "count": obs.get("count", 1),
         "observed_clefs": list(obs.get("observed_clefs", [])),
     }
@@ -1712,6 +1713,21 @@ def _slot_transposition(slot: dict[str, Any]) -> str | None:
     return _parse_label_transposition(slot.get("label")) or _conventional_transposition(
         slot.get("canonical")
     )
+
+
+def _slot_role(slot: dict[str, Any]) -> str:
+    """Expected slot role inferred from its label."""
+    label = str(slot.get("label") or "")
+    return "solo" if re.search(r"(?<![a-z0-9])solo(?![a-z0-9])", label, re.IGNORECASE) else "section"
+
+
+def _role_compatible(slot: dict[str, Any], observed_role: Any) -> bool:
+    """Whether an observed part role may satisfy an expected slot role."""
+    slot_role = _slot_role(slot)
+    role = str(observed_role or "section")
+    if slot_role == "solo":
+        return role in {"solo", "solo_alternative"}
+    return role == "section"
 
 
 def _transposition_compatible(
@@ -2020,6 +2036,7 @@ def reconcile_parts(
                 if (
                     not consumed[sid]
                     and template_parts[sid].get("part_index") == oidx
+                    and _role_compatible(template_parts[sid], collapsed[obs_id].get("part_role"))
                     and _transposition_compatible(
                         template_parts[sid], facet.get("canonical"), obs_trans
                     )
@@ -2030,32 +2047,66 @@ def reconcile_parts(
                     matched_obs_ids.add(obs_id)
                     break
 
-        # Pass 2: consume remaining instances against remaining slots in order.
-        for ii in range(len(inst_list)):
-            if used[ii]:
+        # Pass 2: fill remaining slots with the best remaining instance.
+        for sid in slot_ids:
+            if consumed[sid]:
                 continue
-            obs_id, _facet = inst_list[ii]
-            obs_trans = collapsed[obs_id].get("transposition")
-            for sid in slot_ids:
-                if not consumed[sid] and _transposition_compatible(
-                    template_parts[sid], _facet.get("canonical"), obs_trans
-                ):
-                    consumed[sid] = True
-                    used[ii] = True
-                    slot_obs[sid] = collapsed[obs_id]
-                    matched_obs_ids.add(obs_id)
-                    break
+            slot = template_parts[sid]
+            target_idx = slot.get("part_index")
+            best_ii: int | None = None
+            best_rank: tuple[int, int] | None = None
+            for ii, (obs_id, facet) in enumerate(inst_list):
+                if used[ii]:
+                    continue
+                obs = collapsed[obs_id]
+                if not _role_compatible(slot, obs.get("part_role")):
+                    continue
+                if not _transposition_compatible(slot, facet.get("canonical"), obs.get("transposition")):
+                    continue
+                oidx = facet.get("part_index")
+                if target_idx is None:
+                    # Prefer an unnumbered instance for an unnumbered slot.
+                    rank = (0, ii) if oidx is None else (1, ii)
+                else:
+                    # Explicit index should already be filled in pass 1; keep deterministic fallback.
+                    rank = (0, ii) if oidx == target_idx else (1, ii)
+                if best_rank is None or rank < best_rank:
+                    best_rank = rank
+                    best_ii = ii
+            if best_ii is None:
+                continue
+            obs_id, _facet = inst_list[best_ii]
+            consumed[sid] = True
+            used[best_ii] = True
+            slot_obs[sid] = collapsed[obs_id]
+            matched_obs_ids.add(obs_id)
 
         for sid in slot_ids:
             if consumed[sid]:
                 present_ids.add(sid)
 
     # A part is unexpected only if none of its instruments anchored an expected slot.
+    has_unindexed_section_slot: set[str] = {
+        slot["canonical"]
+        for slot in template_parts
+        if slot.get("part_index") is None and _slot_role(slot) == "section"
+    }
     unexpected: list[dict[str, Any]] = []
     for obs_id, obs in enumerate(collapsed):
         if not obs.get("instruments"):
             continue
         if obs_id not in matched_obs_ids:
+            role = str(obs.get("part_role") or "section")
+            if role in {"solo", "solo_alternative"}:
+                continue
+            # A split numbered section part against an unnumbered section slot (e.g. Alto Sax 1/2
+            # vs. expected "Alto Sax") is a variant, not an actionable surprise.
+            indexed_variants = [
+                f for f in obs.get("instruments", [])
+                if f.get("part_index") is not None and f.get("canonical") in has_unindexed_section_slot
+            ]
+            if indexed_variants and len(indexed_variants) == len(obs.get("instruments", [])):
+                continue
             unexpected.append(_unexpected_entry(obs))
 
     expected: list[dict[str, Any]] = []

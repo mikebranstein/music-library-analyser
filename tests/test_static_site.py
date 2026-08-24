@@ -52,7 +52,8 @@ def _report(piece_id: str = "p1", **overrides: Any) -> dict:
             {"label": "Harp", "canonical_instrument": "harp", "section": "strings", "required": False, "present": False},
         ],
         "observed_parts": [
-            {"predicted_part": "Flute", "instruments": [{"canonical": "flute", "part_index": None, "section": "woodwind"}]},
+            {"predicted_part": "Flute", "part_role": "section",
+             "instruments": [{"canonical": "flute", "part_index": None, "section": "woodwind"}]},
         ],
         "has_score": True,
         "score_missing": False,
@@ -169,6 +170,7 @@ def test_index_reports_builds_cross_references():
     assert "p1" in index.by_piece_id
     assert "001/oboe.pdf" in index.doc_meta_by_pdf_path
     assert index.section_by_predicted_part.get("Flute") == "woodwind"
+    assert index.role_by_predicted_part.get("Flute") == "section"
 
 
 def test_build_pieces_projects_missing_required_and_score_pct():
@@ -260,6 +262,25 @@ def test_build_pieces_projects_unlisted_parts():
     ]
 
 
+def test_solo_alternatives_projects_held_solo_parts():
+    report = _report(observed_parts=[
+        {"predicted_part": "Solo Alto Saxophone", "part_role": "solo_alternative",
+         "count": 1, "instruments": [{"canonical": "alto_sax", "part_index": None, "section": "saxophones"}]},
+        {"predicted_part": "Alto Saxophone 1", "part_role": "section",
+         "count": 1, "instruments": [{"canonical": "alto_sax", "part_index": 1, "section": "saxophones"}]},
+    ])
+    rows = ss._solo_alternatives(report)
+    assert rows == [
+        {
+            "label": "Solo Alto Saxophone",
+            "canonical_instrument": "alto_sax",
+            "part_index": None,
+            "count": 1,
+            "part_role": "solo_alternative",
+        }
+    ]
+
+
 def test_instrumentation_links_each_rank_to_its_own_document():
     """Multi-rank parts (Trumpet 1/2/3) each link to their own file, not a shared bundle."""
     report = {
@@ -332,6 +353,40 @@ def test_instrumentation_links_multi_chair_file_to_every_chair():
     # Both chairs resolve to the one physical file.
     assert by_label["Flute 1"]["documents"] == [flutes_doc]
     assert by_label["Flute 2"]["documents"] == [flutes_doc]
+
+
+def test_instrumentation_prefers_section_docs_over_solo_alternatives():
+    """An unnumbered section slot should not link to a solo-alternative file first."""
+    report = {
+        "piece_id": "p5",
+        "expected_parts": [
+            {"label": "Alto Sax", "canonical_instrument": "alto_sax", "part_index": None,
+             "section": "saxophones", "required": True, "present": True},
+        ],
+        "observed_parts": [
+            {"predicted_part": "Solo Alto Saxophone", "part_role": "solo_alternative", "instruments": [
+                {"canonical": "alto_sax", "part_index": None, "section": "saxophones"},
+            ]},
+            {"predicted_part": "Alto Saxophone 1", "part_role": "section", "instruments": [
+                {"canonical": "alto_sax", "part_index": 1, "section": "saxophones"},
+            ]},
+            {"predicted_part": "Alto Saxophone 2", "part_role": "section", "instruments": [
+                {"canonical": "alto_sax", "part_index": 2, "section": "saxophones"},
+            ]},
+        ],
+        "documents": [
+            {"pdf_path": "368/solo_alto.pdf", "pdf_filename": "solo_alto.pdf",
+             "predicted_part": "Solo Alto Saxophone", "is_score": False},
+            {"pdf_path": "368/alto1.pdf", "pdf_filename": "alto1.pdf",
+             "predicted_part": "Alto Saxophone 1", "is_score": False},
+            {"pdf_path": "368/alto2.pdf", "pdf_filename": "alto2.pdf",
+             "predicted_part": "Alto Saxophone 2", "is_score": False},
+        ],
+    }
+    grid = ss._instrumentation(report)
+    docs = grid[0]["documents"]
+    names = [d["filename"] for d in docs]
+    assert names == ["alto1.pdf", "alto2.pdf"]
 
 
 def test_instrumentation_uses_stable_display_order():
@@ -442,6 +497,7 @@ def test_build_documents_synthesizes_ids_and_enriches():
     assert by_file["flute.pdf"]["doc_id"] == ss.synth_doc_id("001/flute.pdf")
     assert by_file["flute.pdf"]["instrument"] == "Flute"
     assert by_file["flute.pdf"]["section"] == "woodwind"
+    assert by_file["flute.pdf"]["part_role"] == "section"
     assert by_file["oboe.pdf"]["quality"] == "poor"
     # score flags projected from the report's per-document metadata
     assert by_file["flute.pdf"]["is_score"] is False

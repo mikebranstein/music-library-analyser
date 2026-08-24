@@ -38,6 +38,7 @@ def _observed(canonical: str, part_index: int | None, count: int = 1) -> dict[st
             {"canonical": canonical, "part_index": part_index, "section": None}
         ],
         "clef": "treble",
+        "part_role": "section",
         "predicted_part": f"{canonical}_{part_index}",
         "count": count,
         "min_confidence": 0.9,
@@ -58,6 +59,7 @@ def _observed_combined(
             {"canonical": c, "part_index": i, "section": None} for c, i in facets
         ],
         "clef": "treble",
+        "part_role": "section",
         "predicted_part": label,
         "count": count,
         "min_confidence": 0.9,
@@ -611,6 +613,32 @@ def test_reconcile_extra_same_instrument_is_unexpected():
     assert expected_parts[0]["present"] is True
     assert len(unexpected) == 1
     assert unexpected[0]["instruments"][0]["canonical"] == "cornet"
+
+
+def test_reconcile_indexed_variants_not_unexpected_when_slot_is_unnumbered():
+    slots = [{"canonical": "alto_sax", "part_index": None, "label": "Alto Sax", "required": True}]
+    observed = [_observed("alto_sax", 1), _observed("alto_sax", 2)]
+    expected_parts, unexpected = expected.reconcile_parts(slots, observed)
+    assert expected_parts[0]["present"] is True
+    assert unexpected == []
+
+
+def test_reconcile_solo_alt_does_not_fill_section_slot():
+    slots = [{"canonical": "alto_sax", "part_index": None, "label": "Alto Sax", "required": True}]
+    solo_alt = _observed("alto_sax", None)
+    solo_alt["part_role"] = "solo_alternative"
+    expected_parts, unexpected = expected.reconcile_parts(slots, [solo_alt])
+    assert expected_parts[0]["present"] is False
+    assert unexpected == []
+
+
+def test_reconcile_solo_slot_accepts_solo_alternative():
+    slots = [{"canonical": "alto_sax", "part_index": None, "label": "Solo Alto Sax", "required": True}]
+    solo_alt = _observed("alto_sax", None)
+    solo_alt["part_role"] = "solo_alternative"
+    expected_parts, unexpected = expected.reconcile_parts(slots, [solo_alt])
+    assert expected_parts[0]["present"] is True
+    assert unexpected == []
 
 
 def test_reconcile_combined_part_satisfies_multiple_slots():

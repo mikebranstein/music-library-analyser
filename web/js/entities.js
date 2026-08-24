@@ -89,6 +89,7 @@
     // --- Instrumentation (collapsible) --------------------------------------
     var instrumentation = p.instrumentation || [];
     var unlisted = p.unlisted || [];
+    var soloAlternatives = p.solo_alternatives || [];
     // No authoritative instrumentation was resolved for this piece: make it explicit that whatever
     // parts we show are the library's holdings alone, never a verified required list.
     if (!p.has_expected_parts) {
@@ -129,6 +130,13 @@
         false
       ));
     }
+    if (soloAlternatives.length) {
+      app.appendChild(MLG.detailsSection(
+        "Solo alternatives held (" + soloAlternatives.length + ")",
+        soloAlternativesTable(soloAlternatives),
+        false
+      ));
+    }
 
     // --- Instrumentation source / provenance (collapsible) ------------------
     if (p.instrumentation_source) {
@@ -146,6 +154,7 @@
       MLG.table(docs, [
         { key: "pdf_filename", label: "Document", render: function (r) { return link("document.html", { id: r.doc_id }, r.pdf_filename); }, filterText: function (r) { return r.pdf_filename; } },
         { key: "instrument", label: "Instrument" },
+        { key: "part_role", label: "Role", render: function (r) { return roleBadge(r.part_role); }, filterText: function (r) { return r.part_role; } },
         { key: "section", label: "Section" },
         { key: "page_count", label: "Pages", num: true },
         { key: "quality", label: "Quality", render: function (r) { return MLG.qualityBadge(r.quality); }, filterText: function (r) { return r.quality; } },
@@ -292,6 +301,38 @@
     return el("div", { class: "table-wrap" }, [t]);
   }
 
+  function roleBadge(role) {
+    var key = (role || "").toLowerCase();
+    if (key === "solo" || key === "solo_alternative") return MLG.badge("Solo", "review");
+    if (key === "section") return MLG.badge("Section", "muted");
+    if (key === "score") return MLG.badge("Score", "ok");
+    return MLG.badge("Unknown", "plain");
+  }
+
+  function soloAlternativesTable(parts) {
+    var t = el("table", { class: "data instrumentation" });
+    t.appendChild(el("thead", {}, [el("tr", {}, [
+      el("th", { class: "num", text: "Part #" }),
+      el("th", { text: "Instrument" }),
+      el("th", { text: "Role" }),
+      el("th", { class: "num", text: "Copies" }),
+      el("th", { text: "Status" }),
+    ])]));
+    var tb = el("tbody");
+    parts.forEach(function (part) {
+      var idx = part.part_index != null ? part.part_index : "—";
+      var tr = el("tr", {});
+      tr.appendChild(el("td", { class: "num", text: String(idx) }));
+      tr.appendChild(el("td", { text: fmt.text(part.label || canonicalInstrumentName(part.canonical_instrument || "")) }));
+      tr.appendChild(el("td", {}, [roleBadge(part.part_role)]));
+      tr.appendChild(el("td", { class: "num", text: String(part.count || 1) }));
+      tr.appendChild(el("td", {}, [MLG.badge("Held solo alternative", "muted")]));
+      tb.appendChild(tr);
+    });
+    t.appendChild(tb);
+    return el("div", { class: "table-wrap" }, [t]);
+  }
+
   // Instrument name, linked to the original document when the part is satisfied by one.
   function instrumentCell(part) {
     var canonical = part.canonical_instrument || part.label || "";
@@ -398,6 +439,7 @@
       { key: "pdf_filename", label: "Document", render: function (r) { return link("document.html", { id: r.doc_id }, r.pdf_filename); }, filterText: function (r) { return r.pdf_filename; } },
       { key: "piece_title", label: "Piece", render: function (r) { return link("piece.html", { id: r.piece_id }, r.piece_title); }, filterText: function (r) { return r.piece_title; } },
       { key: "instrument", label: "Instrument" },
+      { key: "part_role", label: "Role", render: function (r) { return roleBadge(r.part_role); }, filterText: function (r) { return r.part_role; } },
       { key: "section", label: "Section" },
       { key: "page_count", label: "Pages", num: true },
       { key: "quality", label: "Quality", render: function (r) { return MLG.qualityBadge(r.quality); }, filterText: function (r) { return r.quality; } },
@@ -430,6 +472,7 @@
       el("div", { class: "card__label", text: "Facts" }),
       MLG.facts([
         ["Instrument", d.instrument],
+        ["Role", d.part_role ? fmt.title(String(d.part_role).replace(/_/g, " ")) : "—"],
         ["Section", d.section],
         ["Pages", fmt.num(d.page_count)],
         ["Notation source", d.notation_source],

@@ -879,6 +879,59 @@ def test_apply_ensemble_flags_duplicates():
     assert records[1]["needs_review"] is True
 
 
+def test_apply_ensemble_does_not_merge_section_and_solo_roles():
+    def _facet(canonical, idx):
+        return {"canonical": canonical, "part_index": idx, "family": "other", "section": "x"}
+
+    records = [
+        {"piece_id": "p", "instruments": [_facet("alto_sax", None)],
+         "clef": None, "part_role": "section", "is_score": False, "duplicate_in_piece": False},
+        {"piece_id": "p", "instruments": [_facet("alto_sax", None)],
+         "clef": None, "part_role": "solo_alternative", "is_score": False, "duplicate_in_piece": False},
+    ]
+    classifier.apply_ensemble(records)
+    assert records[0]["duplicate_in_piece"] is False
+    assert records[1]["duplicate_in_piece"] is False
+
+
+def test_classify_detects_solo_roles():
+    solo_alt = _classify(
+        {
+            "pdf_path": "368 Czardas/Solo Alternatives/368 Czardas - Solo Alto Sax.pdf",
+            "pdf_filename": "368 Czardas - Solo Alto Sax.pdf",
+            "piece_folder": "368 Czardas",
+            "piece_id": "p",
+            "file_fingerprint": "f",
+        }
+    )
+    assert solo_alt["part_role"] == "solo_alternative"
+    assert solo_alt["predicted_part"] == "Solo Alto Saxophone"
+
+    solo = _classify(
+        {
+            "pdf_path": "500 Waltz/500 Waltz - Solo Clarinet.pdf",
+            "pdf_filename": "500 Waltz - Solo Clarinet.pdf",
+            "piece_folder": "500 Waltz",
+            "piece_id": "p",
+            "file_fingerprint": "f2",
+        }
+    )
+    assert solo["part_role"] == "solo"
+    assert solo["predicted_part"] == "Solo Clarinet"
+
+    section = _classify(
+        {
+            "pdf_path": "500 Waltz/500 Waltz - Alto Sax 1.pdf",
+            "pdf_filename": "500 Waltz - Alto Sax 1.pdf",
+            "piece_folder": "500 Waltz",
+            "piece_id": "p",
+            "file_fingerprint": "f3",
+        }
+    )
+    assert section["part_role"] == "section"
+    assert section["predicted_part"] == "Alto Saxophone 1"
+
+
 # --- v1.1 field tests -----------------------------------------------------------------------
 
 
@@ -996,6 +1049,7 @@ def test_build_piece_rollups():
     assert len(cornet_entries) == 1
     assert cornet_entries[0]["count"] == 2
     assert cornet_entries[0]["duplicate"] is True
+    assert cornet_entries[0]["part_role"] == "section"
 
 
 # --- End-to-end test ------------------------------------------------------------------------

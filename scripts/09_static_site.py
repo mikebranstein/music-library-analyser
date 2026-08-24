@@ -31,6 +31,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import shutil
 import time
 from collections.abc import Callable
@@ -228,6 +229,7 @@ class ReportIndex:
         self.by_piece_id: dict[str, dict[str, Any]] = {}
         self.doc_meta_by_pdf_path: dict[str, dict[str, Any]] = {}
         self.section_by_predicted_part: dict[str, str] = {}
+        self.role_by_predicted_part: dict[str, str] = {}
 
 
 def index_reports(reports: list[dict[str, Any]]) -> ReportIndex:
@@ -249,6 +251,9 @@ def index_reports(reports: list[dict[str, Any]]) -> ReportIndex:
             section = instruments[0].get("section") if instruments else None
             if part and section and part not in index.section_by_predicted_part:
                 index.section_by_predicted_part[part] = section
+            role = observed.get("part_role")
+            if part and role and part not in index.role_by_predicted_part:
+                index.role_by_predicted_part[part] = str(role)
     return index
 
 
@@ -270,8 +275,8 @@ def _missing_required(report: dict[str, Any] | None) -> list[dict[str, Any]]:
     return out
 
 
-def _part_facet_by_predicted_part(report: dict[str, Any]) -> dict[str, list[tuple[str, Any]]]:
-    """Map a predicted_part label (as attached to documents) to all its ``(canonical, part_index)``.
+def _part_facet_by_predicted_part(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Map predicted_part labels to observed facet/role metadata.
 
     Learned from the Script 06 ``observed_parts`` rollup, where each observed part carries the
     predicted_part label and the instrument facet(s) it resolved to. Carrying every facet's
@@ -281,7 +286,7 @@ def _part_facet_by_predicted_part(report: dict[str, Any]) -> dict[str, list[tupl
     The rollup facet key is ``canonical`` (Script 03's token); ``canonical_instrument`` is accepted
     as a fallback for older reports.
     """
-    mapping: dict[str, list[tuple[str, Any]]] = {}
+    mapping: dict[str, dict[str, Any]] = {}
     for observed in report.get("observed_parts") or []:
         part = observed.get("predicted_part")
         instruments = observed.get("instruments") or []
@@ -293,8 +298,17 @@ def _part_facet_by_predicted_part(report: dict[str, Any]) -> dict[str, list[tupl
             if canonical:
                 facets.append((canonical, facet.get("part_index")))
         if facets:
-            mapping[part] = facets
+            mapping[part] = {
+                "facets": facets,
+                "part_role": str(observed.get("part_role") or "section"),
+            }
     return mapping
+
+
+def _expected_slot_role(part: dict[str, Any]) -> str:
+    """Expected slot role inferred from its printed label."""
+    label = str(part.get("label") or "")
+    return "solo" if re.search(r"(?<![a-z0-9])solo(?![a-z0-9])", label, re.IGNORECASE) else "section"
 
 
 def _instrumentation(report: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -310,46 +324,65 @@ def _instrumentation(report: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not report:
         return []
     facet_by_part = _part_facet_by_predicted_part(report)
-    # (canonical, part_index) -> [ {doc_id, filename}, ... ] and canonical -> [ ... ] for fallback.
-    docs_by_key: dict[tuple[str, Any], list[dict[str, Any]]] = {}
-    docs_by_canonical: dict[str, list[dict[str, Any]]] = {}
+    docs_by_key_role: dict[tuple[str, Any, str], list[dict[str, Any]]] = {}
+    docs_by_key_any: dict[tuple[str, Any], list[dict[str, Any]]] = {}
+    docs_by_canonical_role: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    docs_by_canonical_any: dict[str, list[dict[str, Any]]] = {}
     for doc in report.get("documents") or []:
         pdf_path = doc.get("pdf_path")
         if not pdf_path:
             continue
-        facets = facet_by_part.get(doc.get("predicted_part") or "")
-        if not facets:
+        meta = facet_by_part.get(doc.get("predicted_part") or "")
+        if not meta:
             continue
+        facets = meta.get("facets") or []
+        part_role = str(meta.get("part_role") or "section")
         entry = {
             "doc_id": synth_doc_id(pdf_path),
             "filename": doc.get("pdf_filename") or Path(pdf_path.replace("\\", "/")).name,
         }
         # One file may cover several chairs/instruments; link it under each facet, but list it only
         # once per canonical in the instrument-level fallback.
-        seen_canonical: set[str] = set()
+        seen_canonical: set[tuple[str, str]] = set()
+        seen_canonical_any: set[str] = set()
         for canonical, part_index in facets:
-            docs_by_key.setdefault((canonical, part_index), []).append(entry)
-            if canonical not in seen_canonical:
-                docs_by_canonical.setdefault(canonical, []).append(entry)
-                seen_canonical.add(canonical)
+            docs_by_key_role.setdefault((canonical, part_index, part_role), []).append(entry)
+            docs_by_key_any.setdefault((canonical, part_index), []).append(entry)
+            role_key = (canonical, part_role)
+            if role_key not in seen_canonical:
+                docs_by_canonical_role.setdefault(role_key, []).append(entry)
+                seen_canonical.add(role_key)
+            if canonical not in seen_canonical_any:
+                docs_by_canonical_any.setdefault(canonical, []).append(entry)
+                seen_canonical_any.add(canonical)
 
-    def _documents_for(canonical: str | None, part_index: Any) -> list[dict[str, Any]]:
+    def _documents_for(canonical: str | None, part_index: Any, slot_role: str) -> list[dict[str, Any]]:
         if not canonical:
             return []
         if part_index is not None:
-            exact = docs_by_key.get((canonical, part_index))
+            exact = docs_by_key_role.get((canonical, part_index, slot_role))
             if exact:
                 return exact
+            exact_any = docs_by_key_any.get((canonical, part_index))
+            if exact_any:
+                return exact_any
             # No exact-index file: fall back to an unnumbered document of the same instrument.
-            return docs_by_key.get((canonical, None), [])
-        # Unnumbered expected part links every document of this instrument.
-        return docs_by_canonical.get(canonical, [])
+            role_unnumbered = docs_by_key_role.get((canonical, None, slot_role))
+            if role_unnumbered:
+                return role_unnumbered
+            return docs_by_key_any.get((canonical, None), [])
+        # Unnumbered expected part links matching-role docs first.
+        role_docs = docs_by_canonical_role.get((canonical, slot_role))
+        if role_docs:
+            return role_docs
+        return docs_by_canonical_any.get(canonical, [])
 
     parts: list[dict[str, Any]] = []
     for part in report.get("expected_parts") or []:
         canonical = part.get("canonical_instrument")
         part_index = part.get("part_index")
         present = bool(part.get("present"))
+        slot_role = _expected_slot_role(part)
         parts.append(
             {
                 "part_index": part_index,
@@ -358,7 +391,7 @@ def _instrumentation(report: dict[str, Any] | None) -> list[dict[str, Any]]:
                 "section": part.get("section"),
                 "required": bool(part.get("required")),
                 "present": present,
-                "documents": _documents_for(canonical, part_index) if present else [],
+                "documents": _documents_for(canonical, part_index, slot_role) if present else [],
                 "display_order": _display_sort_key(
                     part.get("section"), canonical, part_index, part.get("label")
                 ),
@@ -393,6 +426,35 @@ def _unlisted(report: dict[str, Any] | None) -> list[dict[str, Any]]:
                 "count": int(entry.get("count") or 1),
             }
         )
+        rows[-1]["_sort_key"] = _display_sort_key(section, canonical, part_index, entry.get("predicted_part"))
+    rows.sort(key=lambda row: row.get("_sort_key") or (999, 999, 999, ""))
+    for row in rows:
+        row.pop("_sort_key", None)
+    return rows
+
+
+def _solo_alternatives(report: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Project held solo/solo-alternative parts into a dedicated informational grid."""
+    if not report:
+        return []
+    rows: list[dict[str, Any]] = []
+    for entry in report.get("observed_parts") or []:
+        role = str(entry.get("part_role") or "")
+        if role not in {"solo", "solo_alternative"}:
+            continue
+        instruments = entry.get("instruments") or []
+        canonical = instruments[0].get("canonical") if instruments else None
+        part_index = instruments[0].get("part_index") if instruments else None
+        rows.append(
+            {
+                "label": str(entry.get("predicted_part") or _unexpected_display_label(entry)),
+                "canonical_instrument": canonical,
+                "part_index": part_index,
+                "count": int(entry.get("count") or 1),
+                "part_role": role,
+            }
+        )
+        section = instruments[0].get("section") if instruments else None
         rows[-1]["_sort_key"] = _display_sort_key(section, canonical, part_index, entry.get("predicted_part"))
     rows.sort(key=lambda row: row.get("_sort_key") or (999, 999, 999, ""))
     for row in rows:
@@ -623,6 +685,7 @@ def build_pieces(
                 "missing_required": _missing_required(report),
                 "instrumentation": _instrumentation(report),
                 "unlisted": _unlisted(report),
+                "solo_alternatives": _solo_alternatives(report),
                 "has_expected_parts": bool((report or {}).get("expected_parts")),
                 "score": _score_info(report),
                 "instrumentation_source": _instrumentation_source(report),
@@ -657,6 +720,7 @@ def build_documents(
                 "pdf_path": pdf_path,
                 "instrument": instrument,
                 "section": index.section_by_predicted_part.get(predicted_part or ""),
+                "part_role": index.role_by_predicted_part.get(predicted_part or ""),
                 "is_score": bool(doc_meta.get("is_score")),
                 "score_type": doc_meta.get("score_type"),
                 "page_count": rec.get("page_count") or 0,
