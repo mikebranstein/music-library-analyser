@@ -309,6 +309,77 @@
     return MLG.badge("Unknown", "plain");
   }
 
+  var DEFAULT_TRANSPOSITIONS = {
+    piccolo: "C",
+    clarinet: "Bb",
+    eb_clarinet: "Eb",
+    alto_clarinet: "Eb",
+    bass_clarinet: "Bb",
+    contrabass_clarinet: "Bb",
+    sopranino_sax: "Eb",
+    soprano_sax: "Bb",
+    alto_sax: "Eb",
+    tenor_sax: "Bb",
+    baritone_sax: "Eb",
+    bass_sax: "Bb",
+    english_horn: "F",
+    alto_flute: "G",
+    soprano_cornet: "Eb",
+    cornet: "Bb",
+    trumpet: "Bb",
+    flugelhorn: "Bb",
+    horn: "F",
+    tenor_horn: "Eb",
+    mellophone: "F",
+  };
+
+  var TRANSPOSITION_LABELS = {
+    Bb: "B-flat",
+    Eb: "E-flat",
+    Ab: "A-flat",
+    Db: "D-flat",
+    Gb: "G-flat",
+  };
+
+  var LABEL_TRANSPOSITION_PATTERNS = [
+    { re: /\be[-\s]?flat\b|\bin\s+eb\b|\beb\b/i, key: "Eb" },
+    { re: /\bb[-\s]?flat\b|\bin\s+bb\b|\bbb\b/i, key: "Bb" },
+    { re: /\ba[-\s]?flat\b|\bin\s+ab\b|\bab\b/i, key: "Ab" },
+    { re: /\bd[-\s]?flat\b|\bin\s+db\b|\bdb\b/i, key: "Db" },
+    { re: /\bg[-\s]?flat\b|\bin\s+gb\b|\bgb\b/i, key: "Gb" },
+    { re: /\bin\s+f\b/i, key: "F" },
+    { re: /\bin\s+c\b/i, key: "C" },
+    { re: /\bin\s+a\b/i, key: "A" },
+    { re: /\bin\s+d\b/i, key: "D" },
+    { re: /\bin\s+g\b/i, key: "G" },
+  ];
+
+  function parseLabelTransposition(label) {
+    var text = fmt.text(label);
+    if (!text) return null;
+    for (var i = 0; i < LABEL_TRANSPOSITION_PATTERNS.length; i++) {
+      if (LABEL_TRANSPOSITION_PATTERNS[i].re.test(text)) return LABEL_TRANSPOSITION_PATTERNS[i].key;
+    }
+    return null;
+  }
+
+  function transpositionLabel(key) {
+    var t = fmt.text(key);
+    return TRANSPOSITION_LABELS[t] || t;
+  }
+
+  function instrumentLabelWithKey(canonical, originalLabel) {
+    var base = canonicalInstrumentName(canonical || originalLabel || "");
+    if (!base) return "";
+    var explicit = parseLabelTransposition(originalLabel);
+    if (explicit) return base + " (" + transpositionLabel(explicit) + ")";
+    var ckey = fmt.text(canonical).toLowerCase();
+    if (DEFAULT_TRANSPOSITIONS[ckey]) {
+      return base + " (" + transpositionLabel(DEFAULT_TRANSPOSITIONS[ckey]) + ", inferred)";
+    }
+    return base;
+  }
+
   function soloAlternativesTable(parts) {
     var t = el("table", { class: "data instrumentation" });
     t.appendChild(el("thead", {}, [el("tr", {}, [
@@ -336,7 +407,7 @@
   // Instrument name, linked to the original document when the part is satisfied by one.
   function instrumentCell(part) {
     var canonical = part.canonical_instrument || part.label || "";
-    var label = canonicalInstrumentName(canonical);
+    var label = instrumentLabelWithKey(canonical, part.label);
     var originalLabel = fmt.text(part.label || part.canonical_instrument || "");
     var docs = part.documents || [];
     if (docs.length) {
@@ -421,7 +492,7 @@
       tb.appendChild(el("tr", { class: "is-missing" }, [
         el("td", { text: fmt.text(m.label) }),
         el("td", { text: m.part_index == null ? "—" : fmt.text(m.part_index) }),
-        el("td", { text: canonicalInstrumentName(m.canonical_instrument || m.label) }),
+        el("td", { text: instrumentLabelWithKey(m.canonical_instrument || "", m.label) }),
         el("td", { text: standardSectionName(m.section) }),
       ]));
     });

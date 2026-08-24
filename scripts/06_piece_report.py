@@ -34,7 +34,7 @@ from scripts._common import (
     atomic_write_json,
     atomic_write_text,
     build_checkpoint,
-    instrument_display_name,
+    instrument_display_name_with_key,
     load_checkpoint,
     make_checkpoint_path,
     md_cell,
@@ -504,7 +504,7 @@ def render_piece_report(rec: dict[str, Any]) -> str:
                 required = "required" if part.get("required") else "optional"
                 observed = "yes" if part.get("present") else "MISSING"
                 out.append(
-                    f"| {idx_cell} | {md_cell(instrument_display_name(part.get('canonical_instrument')))} "
+                    f"| {idx_cell} | {md_cell(instrument_display_name_with_key(part.get('canonical_instrument'), part.get('label')))} "
                     f"| {md_cell(part.get('label'))} | {md_cell(part.get('section'))} "
                     f"| {required} | {observed} |"
                 )

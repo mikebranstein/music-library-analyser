@@ -381,6 +381,56 @@ INSTRUMENT_DISPLAY_OVERRIDES: dict[str, str] = {
     "tam_tam": "Tam-tam",
 }
 
+# Prettified transposition key names used in human-facing labels.
+_TRANSPOSITION_DISPLAY: dict[str, str] = {
+    "Bb": "B-flat",
+    "Eb": "E-flat",
+    "Ab": "A-flat",
+    "Db": "D-flat",
+    "Gb": "G-flat",
+}
+
+# Conventional default key for an unkeyed part label of a transposing instrument.
+_DEFAULT_TRANSPOSITIONS: dict[str, str] = {
+    "piccolo": "C",
+    "clarinet": "Bb",
+    "eb_clarinet": "Eb",
+    "alto_clarinet": "Eb",
+    "bass_clarinet": "Bb",
+    "contrabass_clarinet": "Bb",
+    "sopranino_sax": "Eb",
+    "soprano_sax": "Bb",
+    "alto_sax": "Eb",
+    "tenor_sax": "Bb",
+    "baritone_sax": "Eb",
+    "bass_sax": "Bb",
+    "english_horn": "F",
+    "alto_flute": "G",
+    "soprano_cornet": "Eb",
+    "cornet": "Bb",
+    "trumpet": "Bb",
+    "flugelhorn": "Bb",
+    "horn": "F",
+    "tenor_horn": "Eb",
+    "mellophone": "F",
+}
+
+# Key-aware instruments where an unkeyed label should still call out key ambiguity.
+_KEY_AWARE_CANONICALS: set[str] = set(_DEFAULT_TRANSPOSITIONS)
+
+_LABEL_TRANSPOSITION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\be[-\s]?flat\b|\bin\s+eb\b|\beb\b", re.IGNORECASE), "Eb"),
+    (re.compile(r"\bb[-\s]?flat\b|\bin\s+bb\b|\bbb\b", re.IGNORECASE), "Bb"),
+    (re.compile(r"\ba[-\s]?flat\b|\bin\s+ab\b|\bab\b", re.IGNORECASE), "Ab"),
+    (re.compile(r"\bd[-\s]?flat\b|\bin\s+db\b|\bdb\b", re.IGNORECASE), "Db"),
+    (re.compile(r"\bg[-\s]?flat\b|\bin\s+gb\b|\bgb\b", re.IGNORECASE), "Gb"),
+    (re.compile(r"\bin\s+f\b", re.IGNORECASE), "F"),
+    (re.compile(r"\bin\s+c\b", re.IGNORECASE), "C"),
+    (re.compile(r"\bin\s+a\b", re.IGNORECASE), "A"),
+    (re.compile(r"\bin\s+d\b", re.IGNORECASE), "D"),
+    (re.compile(r"\bin\s+g\b", re.IGNORECASE), "G"),
+]
+
 
 def instrument_display_name(canonical: str | None) -> str:
     """Return the standardized human-facing name for a canonical instrument key.
@@ -398,6 +448,42 @@ def instrument_display_name(canonical: str | None) -> str:
     words = _INSTRUMENT_SEPARATORS_RE.sub(" ", key)
     words = _INSTRUMENT_WHITESPACE_RE.sub(" ", words).strip()
     return words.title()
+
+
+def parse_label_transposition(label: str | None) -> str | None:
+    """Read an explicit transposition key from a printed part label, if one is stated."""
+    if not label:
+        return None
+    text = str(label)
+    for pattern, key in _LABEL_TRANSPOSITION_PATTERNS:
+        if pattern.search(text):
+            return key
+    return None
+
+
+def transposition_display_name(key: str | None) -> str:
+    """Return a human-facing key label (e.g. ``Bb`` -> ``B-flat``)."""
+    if not key:
+        return ""
+    text = str(key).strip()
+    return _TRANSPOSITION_DISPLAY.get(text, text)
+
+
+def instrument_display_name_with_key(canonical: str | None, label: str | None = None) -> str:
+    """Display a canonical instrument name with explicit/inferred/unspecified key status."""
+    base = instrument_display_name(canonical) if canonical else str(label or "").strip()
+    if not base:
+        return ""
+    canonical_key = str(canonical or "").strip().lower()
+    explicit = parse_label_transposition(label)
+    if explicit:
+        return f"{base} ({transposition_display_name(explicit)})"
+    inferred = _DEFAULT_TRANSPOSITIONS.get(canonical_key)
+    if inferred:
+        return f"{base} ({transposition_display_name(inferred)}, inferred)"
+    if canonical_key in _KEY_AWARE_CANONICALS:
+        return f"{base} (key unspecified)"
+    return base
 
 
 def load_instrument_taxonomy(rules_path: Path) -> dict[str, Any]:

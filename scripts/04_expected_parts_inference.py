@@ -79,7 +79,7 @@ from scripts._common import (
     atomic_write_text,
     build_checkpoint,
     canonicalize_instrument,
-    instrument_display_name,
+    instrument_display_name_with_key,
     load_checkpoint,
     load_instrument_taxonomy,
     make_checkpoint_path,
@@ -3053,7 +3053,7 @@ def render_piece_instrumentation_body(rec: dict[str, Any]) -> list[str]:
             else:
                 observed = "MISSING"
             out.append(
-                f"| {idx_cell} | {md_cell(instrument_display_name(part.get('canonical_instrument')))} "
+                f"| {idx_cell} | {md_cell(instrument_display_name_with_key(part.get('canonical_instrument'), part.get('label')))} "
                 f"| {md_cell(part.get('label'))} | {md_cell(part.get('section'))} "
                 f"| {required} | {observed} |"
             )

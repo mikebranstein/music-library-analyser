@@ -6,6 +6,7 @@ from scripts._common import (
     canonicalize_instrument,
     has_readable_text,
     instrument_display_name,
+    instrument_display_name_with_key,
     load_instrument_taxonomy,
     normalize_instrument_name,
     read_jsonl,
@@ -84,6 +85,27 @@ def test_instrument_display_name_handles_blank_and_case() -> None:
     assert instrument_display_name(None) == ""
     assert instrument_display_name("") == ""
     assert instrument_display_name("  Baritone_Horn ") == "Baritone Horn"
+
+
+def test_instrument_display_name_with_key_prefers_explicit_key() -> None:
+    assert (
+        instrument_display_name_with_key("piccolo", "D-flat Piccolo")
+        == "Piccolo (D-flat)"
+    )
+    assert (
+        instrument_display_name_with_key("clarinet", "B-flat Soprano Clarinet I")
+        == "Clarinet (B-flat)"
+    )
+
+
+def test_instrument_display_name_with_key_marks_inferred_when_unkeyed() -> None:
+    assert instrument_display_name_with_key("piccolo", "Piccolo") == "Piccolo (C, inferred)"
+    assert instrument_display_name_with_key("trumpet", "Trumpet 1") == "Trumpet (B-flat, inferred)"
+
+
+def test_instrument_display_name_with_key_leaves_non_transposing_as_is() -> None:
+    assert instrument_display_name_with_key("flute", "Flute 1") == "Flute"
+    assert instrument_display_name_with_key("timpani", "Timpani") == "Timpani"
 
 
 def test_load_instrument_taxonomy_from_yaml() -> None:
