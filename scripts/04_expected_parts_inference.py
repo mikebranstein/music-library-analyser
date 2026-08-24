@@ -202,6 +202,9 @@ DEFAULT_LOOKUP_CONFIG: dict[str, Any] = {
     "windrep_api_url": "https://www.windrep.org/api.php",
     "windrep_prompt_template_path": "config/llm_prompts/windrep_lookup_instrumentation.txt",
     "windrep_cache_dir": "cache/windrep",
+    "llm_cache_enabled": True,
+    "llm_cache_dir": "cache/llm/results",
+    "llm_cache_version": 1,
     # When live windrep.org is unreachable (e.g. IP-blocked), let the W2 LLM lookup also consult
     # the Wayback Machine snapshot of the work page. Adds the archive hosts to the W2 URL allowlist
     # and instructs the prompt to fall back to the latest archived copy.
@@ -549,6 +552,113 @@ def parse_lookup_response(stdout: str) -> dict[str, Any]:
     return _loads_json_lenient(text[first:last + 1])
 
 
+class LLMResultCache:
+    """Reusable LLM result cache for prompt-based lookups.
+
+    The cache is intentionally keyed to the actual prompt plus relevant config values, so a piece
+    whose observation set changes gets a different prompt and bypasses stale results automatically.
+    Each cache payload is versioned so the script can safely ignore older or incompatible cache
+    files without risking stale LLM responses. This makes the layer easy to extract into another
+    module or disable entirely by setting ``llm_cache_enabled`` to ``False``.
+    """
+
+    DEFAULT_VERSION = 1
+
+    def __init__(self, base_dir: str | Path = "cache/llm/results") -> None:
+        self.base_dir = Path(base_dir)
+
+    @staticmethod
+    def _config_fingerprint(config: dict[str, Any]) -> str:
+        payload = {
+            "piece_id": config.get("piece_id"),
+            "command": config.get("command", "copilot"),
+            "model": config.get("model") or "",
+            "allowed_domains": list(config.get("allowed_domains") or []),
+            "llm_cache_version": config.get("llm_cache_version", LLMResultCache.DEFAULT_VERSION),
+        }
+        return sha256_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+    @classmethod
+    def _cache_version(cls, config: dict[str, Any]) -> int:
+        try:
+            return int(config.get("llm_cache_version", cls.DEFAULT_VERSION) or cls.DEFAULT_VERSION)
+        except (TypeError, ValueError):
+            return cls.DEFAULT_VERSION
+
+    def cache_path(self, prompt: str, config: dict[str, Any]) -> Path:
+        payload = {
+            "piece_id": config.get("piece_id"),
+            "command": config.get("command", "copilot"),
+            "model": config.get("model") or "",
+            "allowed_domains": list(config.get("allowed_domains") or []),
+            "llm_cache_version": self._cache_version(config),
+            "config_fingerprint": self._config_fingerprint(config),
+            "prompt": prompt,
+        }
+        digest = sha256_text(json.dumps(payload, ensure_ascii=False, sort_keys=True)).replace(":", "_")
+        return self.base_dir / f"{digest}.json"
+
+    def load(self, prompt: str, config: dict[str, Any]) -> dict[str, Any] | None:
+        if not bool(config.get("llm_cache_enabled", True)):
+            return None
+        if bool(config.get("force_refresh", False)):
+            return None
+        path = self.cache_path(prompt, config)
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("cache_version") != self._cache_version(config):
+            return None
+        expected_fingerprint = self._config_fingerprint(config)
+        if payload.get("config_fingerprint") not in (None, expected_fingerprint):
+            return None
+        result = payload.get("result")
+        return result if isinstance(result, dict) else None
+
+    def save(self, prompt: str, config: dict[str, Any], result: dict[str, Any]) -> None:
+        if not bool(config.get("llm_cache_enabled", True)):
+            return
+        path = self.cache_path(prompt, config)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(
+                path,
+                {
+                    "cache_version": self._cache_version(config),
+                    "config_fingerprint": self._config_fingerprint(config),
+                    "piece_id": config.get("piece_id"),
+                    "cached_at": utc_now_iso(),
+                    "result": result,
+                },
+            )
+        except OSError:
+            logger.debug("Lookup cache write failed for %s", path)
+
+
+def lookup_cache_path(prompt: str, config: dict[str, Any]) -> Path:
+    """Backward-compatible wrapper for the concrete cache path used by Script 04."""
+    return LLMResultCache(config.get("llm_cache_dir") or "cache/llm/results").cache_path(
+        prompt, config
+    )
+
+
+def load_cached_lookup_result(prompt: str, config: dict[str, Any]) -> dict[str, Any] | None:
+    """Backward-compatible wrapper for loading a cached result."""
+    return LLMResultCache(config.get("llm_cache_dir") or "cache/llm/results").load(
+        prompt, config
+    )
+
+
+def save_cached_lookup_result(prompt: str, config: dict[str, Any], result: dict[str, Any]) -> None:
+    """Backward-compatible wrapper for persisting a cached result."""
+    LLMResultCache(config.get("llm_cache_dir") or "cache/llm/results").save(prompt, config, result)
+
+
 def run_copilot_lookup(prompt: str, config: dict[str, Any]) -> dict[str, Any]:
     """Invoke the Copilot CLI headlessly and return the parsed JSON result.
 
@@ -557,6 +667,13 @@ def run_copilot_lookup(prompt: str, config: dict[str, Any]) -> dict[str, Any]:
     when lookup is disabled. Raises on a missing binary, non-zero exit, timeout, or unparseable
     output.
     """
+    cache = LLMResultCache(config.get("llm_cache_dir") or "cache/llm/results")
+    cached = cache.load(prompt, config)
+    if cached is not None:
+        logger.info("[%s] Using cached Copilot lookup result for prompt hash %s.",
+                    config.get("piece_id"), sha256_text(prompt))
+        return cached
+
     command = config.get("command", "copilot")
     if not shutil.which(command):
         raise FileNotFoundError(f"Copilot CLI '{command}' not found on PATH.")
@@ -648,7 +765,9 @@ def run_copilot_lookup(prompt: str, config: dict[str, Any]) -> dict[str, Any]:
     logger.info(
         "%sCopilot CLI completed in %.1fs (%d chars captured).", prefix, elapsed, len(stdout)
     )
-    return parse_lookup_response(stdout)
+    result = parse_lookup_response(stdout)
+    cache.save(prompt, config, result)
+    return result
 
 
 def _log_lookup_summary(piece_id: Any, result: Any) -> None:
@@ -1397,6 +1516,30 @@ def _is_score_slot(canonical: str, section: Any) -> bool:
     return isinstance(section, str) and section.strip().lower() == "score"
 
 
+def _drop_unqualified_generic_slot(canonical: str, label: Any, part_index: int | None) -> bool:
+    """Reject generic umbrella labels that are not tied to a subtype or part number.
+
+    A bare ``Clarinet`` or ``Trombone`` line is too vague to become a required expected-part slot by
+    itself; if the score actually names a subtype (``Eb Clarinet``) or identifies a numbered chair
+    (``Clarinet 1``) we keep it. This prevents spurious "missing clarinet/trombone" reports from
+    generic fallback entries that are not source-backed by a more specific label.
+    """
+    if part_index is not None:
+        return False
+    if not isinstance(label, str):
+        return False
+    text = label.strip().lower().replace("_", " ")
+    if not text:
+        return False
+    generic_canonicals = {"clarinet", "trombone", "horn", "trumpet", "cornet"}
+    if canonical not in generic_canonicals:
+        return False
+    variants = {canonical, canonical.replace("_", " "), canonical.replace("_", " ") + "s"}
+    if text not in variants:
+        return False
+    return True
+
+
 def normalize_expected_parts(raw_parts: Any) -> list[dict[str, Any]]:
     """Coerce lookup ``expected_parts`` into internal slot dicts.
 
@@ -1431,10 +1574,13 @@ def normalize_expected_parts(raw_parts: Any) -> list[dict[str, Any]]:
             continue
         if _is_score_slot(canonical, entry.get("section")):
             continue
+        part_index = _coerce_index(entry.get("part_index"))
+        if _drop_unqualified_generic_slot(canonical, entry.get("label"), part_index):
+            continue
         required = entry.get("required")
         slot = {
             "canonical": canonical,
-            "part_index": _coerce_index(entry.get("part_index")),
+            "part_index": part_index,
             "label": str(entry.get("label") or canonical),
             "section": section_map.get(canonical, entry.get("section")),
             "required": True if required is None else bool(required),

@@ -149,6 +149,27 @@ def test_load_lookup_config_yaml_override(tmp_path: Path):
     assert config["allowed_domains"] == ["a.com"]
 
 
+def test_llm_cache_version_is_configured_and_invalidates_stale_entries(tmp_path: Path):
+    assert expected.DEFAULT_LOOKUP_CONFIG["llm_cache_version"] == 1
+    cache = expected.LLMResultCache(tmp_path / "llm-cache")
+    config = {
+        "piece_id": "p1",
+        "command": "copilot",
+        "model": "",
+        "allowed_domains": [],
+        "llm_cache_enabled": True,
+        "llm_cache_version": 1,
+    }
+    prompt = "hello prompt"
+    result = {"match_found": True, "expected_parts": []}
+
+    cache.save(prompt, config, result)
+    assert cache.load(prompt, config) == result
+
+    stale = {**config, "llm_cache_version": 2}
+    assert cache.load(prompt, stale) is None
+
+
 def test_load_prompt_template_builtin_when_missing(tmp_path: Path):
     template, source = expected.load_prompt_template(tmp_path / "nope.txt")
     assert source == "builtin"
@@ -439,6 +460,22 @@ def test_normalize_expected_parts_refines_generic_canonical_from_label():
     ]
     # Explicit either/or labels retain acceptable alternates for reconciliation.
     assert slots[2].get("equivalent_canonicals") == ["contrabass_clarinet"]
+
+
+def test_normalize_expected_parts_drops_unqualified_generic_umbrella_labels():
+    # Bare "Clarinet" / "Trombone" entries are too vague to become required slots by themselves;
+    # they must be tied to a subtype or a numbered chair to survive.
+    raw = [
+        {"canonical_instrument": "clarinet", "label": "Clarinet", "required": True},
+        {"canonical_instrument": "trombone", "label": "Trombone", "required": True},
+        {"canonical_instrument": "clarinet", "part_index": 1, "label": "Clarinet 1", "required": True},
+        {"canonical_instrument": "clarinet", "label": "Eb Clarinet", "required": True},
+        {"canonical_instrument": "trumpet", "label": "Trumpet 1", "required": True},
+    ]
+    slots = expected.normalize_expected_parts(raw)
+    assert [s["canonical"] for s in slots] == ["clarinet", "eb_clarinet", "trumpet"]
+    assert all(s["label"] != "Clarinet" for s in slots)
+    assert all(s["label"] != "Trombone" for s in slots)
 
 
 def test_normalize_expected_parts_drops_score_entries():

@@ -118,6 +118,14 @@ def test_abbreviated_trombone_labels_keep_specificity():
     assert classifier.match_instrument(classifier.normalize("Tbn."), compiled)[0] == "trombone"
 
 
+def test_config_yaml_keeps_abbreviated_woodwind_and_trombone_aliases():
+    lexicon, _ = classifier.load_lexicon(Path(__file__).resolve().parents[1] / "config" / "regex_rules.yaml")
+    compiled = classifier.compile_aliases(lexicon)
+    assert classifier.match_instrument(classifier.normalize("Eb Cl."), compiled)[0] == "eb_clarinet"
+    assert classifier.match_instrument(classifier.normalize("Alto Cl."), compiled)[0] == "alto_clarinet"
+    assert classifier.match_instrument(classifier.normalize("Bass Tbn."), compiled)[0] == "bass_trombone"
+
+
 def test_bass_clarinet_in_bb_not_plain_clarinet():
     # Regression (The Wellerman): the transposition-qualified filename "Bass Clarinet in Bb" must
     # classify as bass_clarinet. The redundant "clarinet in bb" alias (longer than "bass clarinet")
