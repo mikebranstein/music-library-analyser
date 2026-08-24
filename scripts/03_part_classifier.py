@@ -415,6 +415,34 @@ def _word_search(needle: str, haystack: str) -> bool:
     return re.search(pattern, haystack) is not None
 
 
+def is_reliable_instrument_label(text_norm: str, canonical: str | None) -> bool:
+    """Whether page text is likely naming the part itself, not incidental metadata.
+
+    The filename provides the baseline instrument for a single-part PDF. Page text can legitimately
+    override it only when the candidate instrument is explicitly named in the text and the mention is
+    not just a credit or work label. This keeps false same-section overrides like a Tuba part reading
+    as Trombone because the page contains "Arranged by Arr. Fire Trombone".
+    """
+    if not text_norm:
+        return False
+    if not canonical:
+        return False
+    lower = text_norm.lower()
+    token = normalize(canonical.lower()).replace(" ", " ")
+    token_re = re.escape(token)
+    if not re.search(rf"(?<![a-z0-9]){token_re}(?![a-z0-9])", lower):
+        return False
+    # Reject common metadata phrases that mention another instrument without identifying the part.
+    if re.search(r"\barranged by\b.*\b" + token + r"\b", lower):
+        return False
+    if re.search(r"\bto\s+voice\b|\bto\s+tb[ab]\b|\bto\s+part\b", lower):
+        # Directions like "To Voice" / "To Tba" are not part of the instrument label.
+        return False
+    if re.search(r"\bcopyright\b|\bby \[copyright holder\]\b|\barr\.\b", lower):
+        return False
+    return True
+
+
 # Cue annotations (e.g. "Oboe cue" printed in a clarinet part) quote ANOTHER instrument for the
 # player's reference. They are removed before scanning so they never masquerade as the part's own
 # instrument. Matches "<word> cue" / "<word> cues" in already-normalized (lowercased) text.
@@ -1127,6 +1155,16 @@ def classify_document(
             # only relabels within a section (enforced above). The filename part index is kept.
             family = lexicon["families"].get(content_canon, "other")
             content_section = section_for(content_canon, family, section_map)
+            candidate_reliable = (
+                is_reliable_instrument_label(upper_left_norm, content_canon)
+                or is_reliable_instrument_label(full_norm, content_canon)
+            )
+            if filename_primary is not None and filename_primary != content_canon and not candidate_reliable:
+                # Reject metadata-only or ambiguous in-file hits before they override the filename.
+                content_canon = filename_primary
+                content_section = filename_section
+                family = lexicon["families"].get(content_canon, "other")
+                candidate_reliable = True
             instruments = [{
                 "canonical": content_canon,
                 "part_index": filename_index,
@@ -1146,7 +1184,8 @@ def classify_document(
                 confidence = 0.50
                 evidence = "text"
             else:
-                # In-file label names a different instrument than the filename -> content wins.
+                # In-file label names a different instrument than the filename -> content wins only when
+                # the text actually looks like a part label rather than incidental metadata.
                 filename_match = True
                 same_section = filename_section == content_section
                 confidence = 0.80 if same_section else 0.70

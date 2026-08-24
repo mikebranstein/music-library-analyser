@@ -168,6 +168,14 @@ def test_classify_bass_clarinet_filename_only():
     assert rec["transposition"] == "Bb"
 
 
+def test_metadata_mentions_do_not_override_filename_instrument():
+    # Regression: a score with "Arranged by Arr. Fire Trombone" must not relabel a Tuba part as
+    # Trombone just because the arranger credit mentions that low-brass instrument.
+    text = "arranged by arr. fire trombone to voice tuba"
+    assert classifier.is_reliable_instrument_label(text, "trombone") is False
+    assert classifier.is_reliable_instrument_label("tuba", "tuba") is True
+
+
 def test_guitar_part_is_classified():
     # Regression: "Guitar (Opt)" must classify as guitar, not fall through unmatched
     # (which previously produced a false "missing guitar" report downstream).
@@ -858,6 +866,28 @@ def test_full_text_cross_section_reference_does_not_override_filename():
     assert rec["evidence_source"] == "filename"
 
 
+def test_arranger_trombone_credit_does_not_override_tuba_filename():
+    # The Tuba part is named in the text, but the arranger credit is a different low-brass instrument
+    # and must not override the filename baseline.
+    inv = {
+        "pdf_path": "741 vThe Wellerman/741 The Wellerman - Tuba,.pdf",
+        "pdf_filename": "741 The Wellerman - Tuba,.pdf",
+        "piece_folder": "741 vThe Wellerman",
+        "piece_id": "d5201b99e31aadd7",
+        "file_fingerprint": "fp1",
+    }
+    doc = {
+        "first_page_header_candidates": ["5", "2", "44", "24", "?bbb", "?", "&", "bbb"],
+        "first_page_text": (
+            "Tuba Voice Copyright ? 2026 by [Copyright Holder] "
+            "Traditional, Arranged by Arr. Fire Trombone To Voice To Tba. Tuba"
+        ),
+    }
+    rec = _classify(inv, doc)
+    assert [f["canonical"] for f in rec["instruments"]] == ["tuba"]
+    assert rec["predicted_part"] == "Tuba"
+
+
 def test_apply_ensemble_flags_duplicates():
     def _facet(canonical, idx):
         return {"canonical": canonical, "part_index": idx, "family": "other", "section": "x"}
@@ -1002,7 +1032,7 @@ def test_section_assignment():
         {"pdf_path": "P/Song - Tuba.pdf", "pdf_filename": "Song - Tuba.pdf",
          "piece_folder": "Song", "piece_id": "p", "file_fingerprint": "f"}
     )
-    assert tuba["instruments"][0]["section"] == "tubas"
+    assert tuba["instruments"][0]["section"] == "low_brass"
     # Score parts carry no instrument facets; the record is flagged as a score instead.
     score = _classify(
         {"pdf_path": "P/Song - Full Score.pdf", "pdf_filename": "Song - Full Score.pdf",

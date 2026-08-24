@@ -742,6 +742,20 @@ def test_reconcile_euphonium_satisfies_baritone_slot():
     assert unexpected == []
 
 
+def test_reconcile_exact_euphonium_match_preferred_over_equivalent_baritone():
+    # If the score calls for Euphonium and the library holds both a Baritone and an Euphonium,
+    # the exact Euphonium match should consume the slot before an interchangeable Baritone falls back
+    # to the same equivalence class. Otherwise the extra instrument gets reported as unexpected only
+    # because the substitute matched first.
+    slots = [{"canonical": "euphonium", "part_index": None, "label": "Euphonium", "required": True}]
+    observed = [_observed("baritone_horn", None), _observed("euphonium", None)]
+    eq = expected.build_equivalents(slots, _EUPH_BARI_GROUPS)
+    expected_parts, unexpected = expected.reconcile_parts(slots, observed, eq)
+    assert expected_parts[0]["present"] is True
+    assert len(unexpected) == 1
+    assert unexpected[0]["instruments"][0]["canonical"] == "baritone_horn"
+
+
 def test_reconcile_separate_euph_and_bari_slots_are_not_cross_filled():
     # Score calls for both; library holds two euphoniums and no baritone -> baritone still missing.
     slots = [

@@ -2007,22 +2007,34 @@ def reconcile_parts(
 
     collapsed = collapse_clef_editions(observed_parts, slot_demand)
     # Flatten every observed part into one instance per instrument facet, tagged with the owning
-    # observed-part id so we can tell whether a part anchored at least one slot.
-    instances_by_instr: dict[str, list[tuple[int, dict[str, Any]]]] = defaultdict(list)
+    # observed-part id so we can tell whether a part anchored at least one slot. Prefer a literal
+    # same-canonical match for an expected slot before falling back to an equivalent alternative
+    # (e.g. an observed Euphonium satisfying an expected Euphonium slot ahead of a held Baritone
+    # that only counts as an interchangeable substitute).
+    exact_instances_by_instr: dict[str, list[tuple[int, dict[str, Any]]]] = defaultdict(list)
+    equivalent_instances_by_instr: dict[str, list[tuple[int, dict[str, Any]]]] = defaultdict(list)
     for obs_id, obs in enumerate(collapsed):
         for facet in obs.get("instruments", []):
             canonical = facet.get("canonical")
             if canonical is None:
                 continue
             slot_canonical = alias_to_slot.get(canonical, canonical)
-            instances_by_instr[slot_canonical].append((obs_id, facet))
+            exact_instances_by_instr[canonical].append((obs_id, facet))
+            if slot_canonical != canonical:
+                equivalent_instances_by_instr[slot_canonical].append((obs_id, facet))
 
     present_ids: set[int] = set()
     slot_obs: dict[int, dict[str, Any]] = {}
     matched_obs_ids: set[int] = set()
 
     for canonical, slot_ids in expected_idx_by_instr.items():
-        inst_list = instances_by_instr.get(canonical, [])
+        exact_matches = exact_instances_by_instr.get(canonical, [])
+        equivalent_matches = [
+            pair
+            for pair in equivalent_instances_by_instr.get(canonical, [])
+            if pair[0] not in {obs_id for obs_id, _facet in exact_matches}
+        ]
+        inst_list = exact_matches + equivalent_matches
         consumed = {sid: False for sid in slot_ids}
         used = [False] * len(inst_list)
 
