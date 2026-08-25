@@ -1392,9 +1392,7 @@ def apply_ensemble(records: list[dict[str, Any]]) -> None:
     for rec in records:
         if rec.get("is_score") or not rec.get("instruments"):
             continue
-        facet_key = tuple(
-            sorted((f.get("canonical"), f.get("part_index")) for f in rec["instruments"])
-        )
+        facet_key = instrument_signature(rec["instruments"])
         key = (rec.get("piece_id"), facet_key, rec.get("clef"), rec.get("part_role", "section"))
         signatures.setdefault(key, []).append(rec)
     for group in signatures.values():
@@ -1402,6 +1400,26 @@ def apply_ensemble(records: list[dict[str, Any]]) -> None:
             for rec in group:
                 rec["duplicate_in_piece"] = True
                 rec["needs_review"] = True
+
+
+def instrument_signature(facets: list[dict[str, Any]]) -> tuple[tuple[Any, Any], ...]:
+    """Stable facet signature that tolerates mixed/unknown chair-index types."""
+
+    pairs = [(f.get("canonical"), f.get("part_index")) for f in facets]
+
+    def _pair_sort_key(pair: tuple[Any, Any]) -> tuple[str, int, int, str]:
+        canonical, index = pair
+        canonical_key = str(canonical or "")
+        if isinstance(index, int):
+            return (canonical_key, 0, index, "")
+        if isinstance(index, str):
+            try:
+                return (canonical_key, 0, int(index), "")
+            except ValueError:
+                return (canonical_key, 2, 0, index)
+        return (canonical_key, 1, 0, "")
+
+    return tuple(sorted(pairs, key=_pair_sort_key))
 
 
 def build_piece_rollups(
@@ -1445,7 +1463,7 @@ def build_piece_rollups(
         for d in parts:
             facets = d.get("instruments") or []
             key = (
-                tuple(sorted((f.get("canonical"), f.get("part_index")) for f in facets)),
+                instrument_signature(facets),
                 d.get("clef"),
                 d.get("transposition"),
                 d.get("part_role", "section"),
