@@ -104,6 +104,11 @@ Primary outputs:
 - Emit six registered data modules (`web/data/00_manifest.js` … `50_pages.js`) as classic `<script>` files that call `MLG.register("<key>", <json>)` onto `window.MLG` (no `fetch`/ES modules, which are blocked under `file://`); synthesize a stable `doc_id = sha256(pdf_path)[:16]` and `page_id = <doc_id>__p<page_num>`, and convert `0..1` completeness scores to display percentages. Downsize referenced render PNGs to WebP under `web/assets/thumbs/` (via Pillow); `--copy-pdfs` optionally bundles the original PDFs into `web/assets/pdfs/`
 - The generated `web/data/` and `web/assets/{thumbs,pdfs}/` derive from copyrighted sheet music and are never source-controlled (git-ignored); a made-up fixture in `web/data-sample/` (seeded by `web/seed_sample.py`) gives a copyright-safe preview, and a fresh clone shows a friendly "run Script 09" callout until real data is generated
 
+10. `10_excel_export.py`
+- Compile every per-piece report (`data/piece_reports/*.json`, Script 06 schema 1.1) and the collection summary (`data/collection_reports/summary.json`, Script 07 schema 1.2) into one multi-sheet Excel workbook so the whole collection can be sorted, filtered, and pivoted in Excel. A pure reporting transform: never re-derives completeness/quality/severity/reason codes, only flattens the nested per-piece facts into normalized tabular sheets joined by `piece_id`
+- Emit one sheet per grain: `Collection Summary` (headline KPIs), `Pieces` (one row per piece), `Documents` (one row per PDF), `Expected Parts` (one row per expected part slot, required/optional × present/missing), `Observed Parts` (one row per detected part group), and `Action Items` (one row per targeted recommended-action item). Every sheet except `Collection Summary` carries `piece_id`/`catalog_number`/`piece_title_guess` for cross-referencing; each sheet is written with a header row, frozen header, and an autofilter for immediate sort/filter/group use in Excel
+- Emit `outputs/excel_export/music_library_report.xlsx` plus a companion column glossary `outputs/excel_export/definitions.md`; errors with a "run Script 06 first" message if there are no piece reports, and warns (without failing) if Script 07's summary or any piece reports are missing/stale
+
 ## Recommended Repository Structure
 
 ```text
@@ -118,6 +123,7 @@ project-root/
     07_collection_report.py
     08_manual_review_pack.py
     09_static_site.py
+  10_excel_export.py
   config/
     authority_sources.yaml
     score_lookup.yaml
@@ -169,6 +175,9 @@ project-root/
   logs/
   outputs/
     analysis.db
+    excel_export/
+      music_library_report.xlsx
+      definitions.md
 ```
 
 ## Data and Confidence Policy
