@@ -1,7 +1,7 @@
 /*
  * theme.css - color + shape language.
- * Source of truth: docs/WEB_DESIGN_REFERENCE.md ("paper & ink" light / "stage light" dark).
- * Neutrals do ~90% of the work; a single brass accent marks what matters. No gradients,
+ * Source of truth: docs/WEB_DESIGN_REFERENCE.md ("crisp" light / "midnight" dark).
+ * Neutrals do ~90% of the work; a single blue accent marks what matters. No gradients,
  * no glassmorphism, borders over shadows, no pure black/white.
  */
 
@@ -13,7 +13,7 @@
   --radius-chip: 999px; /* pills reserved for small status chips only */
 
   --hairline: 1px;
-  --shadow-overlay: 0 2px 4px rgba(23, 21, 17, 0.18); /* overlays only */
+  --shadow-overlay: 0 2px 4px rgba(15, 23, 42, 0.16); /* overlays only */
 
   --space-1: 4px;
   --space-2: 8px;
@@ -29,62 +29,62 @@
   --maxw: 1180px;
 }
 
-/* Light mode - "paper" (default) */
+/* Light mode - "crisp" (default) */
 :root,
 :root[data-theme="light"] {
-  --bg: #F6F1E7;
-  --surface: #FCFAF4;
+  --bg: #F4F6F9;
+  --surface: #FFFFFF;
   --surface-raised: #FFFFFF;
-  --border: #DCD3BE;
-  --border-strong: #C4B89C;
-  --text: #231F1A;
-  --text-secondary: #6B6152;
-  --text-muted: #9C9280;
-  --accent: #9C6B14;
-  --accent-on-pale: #7A5510;
-  --accent-fill: #F1E3C4;
-  --success: #4B6B4C;
-  --warning: #9C6B14;
-  --error: #8C3B31;
+  --border: #E1E7EF;
+  --border-strong: #C3CDDA;
+  --text: #131B2C;
+  --text-secondary: #56637A;
+  --text-muted: #8B96A8;
+  --accent: #2359D6;
+  --accent-on-pale: #1A45AC;
+  --accent-fill: #DEE9FC;
+  --success: #1E8A5B;
+  --warning: #B4790E;
+  --error: #C4362A;
   color-scheme: light;
 }
 
-/* Dark mode - "stage light" (a separate palette, not an inversion) */
+/* Dark mode - "midnight" (a separate palette, not an inversion) */
 :root[data-theme="dark"] {
-  --bg: #171511;
-  --surface: #1F1C17;
-  --surface-raised: #26221C;
-  --border: #3A352B;
-  --border-strong: #524A3A;
-  --text: #EDE6D6;
-  --text-secondary: #A69A82;
-  --text-muted: #746A56;
-  --accent: #D9AE4E;
-  --accent-on-pale: #EDE6D6;
-  --accent-fill: #3A2F17;
-  --success: #84AE86;
-  --warning: #D9AE4E;
-  --error: #C77468;
+  --bg: #0B1220;
+  --surface: #111A2C;
+  --surface-raised: #17223A;
+  --border: #263351;
+  --border-strong: #38477A;
+  --text: #E7ECF6;
+  --text-secondary: #9CA9C2;
+  --text-muted: #6B7997;
+  --accent: #6C9BFF;
+  --accent-on-pale: #0B1220;
+  --accent-fill: #1B2C52;
+  --success: #4FCE97;
+  --warning: #E9B24E;
+  --error: #F17A6D;
   color-scheme: dark;
 }
 
 /* Follow the OS on first load when no explicit choice has been stored. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme]) {
-    --bg: #171511;
-    --surface: #1F1C17;
-    --surface-raised: #26221C;
-    --border: #3A352B;
-    --border-strong: #524A3A;
-    --text: #EDE6D6;
-    --text-secondary: #A69A82;
-    --text-muted: #746A56;
-    --accent: #D9AE4E;
-    --accent-on-pale: #EDE6D6;
-    --accent-fill: #3A2F17;
-    --success: #84AE86;
-    --warning: #D9AE4E;
-    --error: #C77468;
+    --bg: #0B1220;
+    --surface: #111A2C;
+    --surface-raised: #17223A;
+    --border: #263351;
+    --border-strong: #38477A;
+    --text: #E7ECF6;
+    --text-secondary: #9CA9C2;
+    --text-muted: #6B7997;
+    --accent: #6C9BFF;
+    --accent-on-pale: #0B1220;
+    --accent-fill: #1B2C52;
+    --success: #4FCE97;
+    --warning: #E9B24E;
+    --error: #F17A6D;
     color-scheme: dark;
   }
 }
