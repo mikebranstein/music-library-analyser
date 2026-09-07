@@ -83,6 +83,67 @@
   color: var(--text-muted);
 }
 
+/* --- Pipeline strip (compact single-row overview on the dashboard) --- */
+.pipeline-strip {
+  display: flex;
+  align-items: stretch;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+.pipeline-step {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: var(--hairline) solid var(--border);
+  border-radius: var(--radius-chip);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.85rem;
+  white-space: nowrap;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.pipeline-step:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-raised);
+  text-decoration: none;
+}
+.pipeline-step__idx {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--accent-fill);
+  color: var(--accent-on-pale);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 700;
+  flex: none;
+}
+.pipeline-step__title {
+  font-weight: 500;
+}
+.pipeline-step__arrow {
+  display: flex;
+  align-items: center;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+@media (max-width: 720px) {
+  .pipeline-step__arrow {
+    display: none;
+  }
+  .pipeline-strip {
+    flex-direction: column;
+  }
+  .pipeline-step {
+    white-space: normal;
+  }
+}
+
 /* --- Badges / chips (color always paired with the text label) --- */
 .badge {
   display: inline-flex;

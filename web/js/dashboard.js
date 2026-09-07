@@ -30,14 +30,23 @@
     ]);
     row.appendChild(gaugeCard);
 
-    // Attention list
+    // Attention list (capped; full list lives on the Pieces page)
+    var ATTENTION_LIMIT = 5;
     var attnCard = el("div", { class: "card stack" });
-    attnCard.appendChild(el("div", { class: "card__label", text: "Needs attention" }));
     var attn = d.attention || [];
+    var attnHeadRow = el("div", { class: "row", style: "justify-content:space-between;align-items:baseline" }, [
+      el("div", { class: "card__label", text: "Needs attention" }),
+    ]);
+    if (attn.length > ATTENTION_LIMIT) {
+      attnHeadRow.appendChild(
+        el("a", { href: MLG.rel(MLG.href("pages/pieces.html", { severity: "high" })), text: "View all " + attn.length + " \u2192" })
+      );
+    }
+    attnCard.appendChild(attnHeadRow);
     if (!attn.length) {
       attnCard.appendChild(el("p", { class: "muted", text: "Nothing flagged \u2014 the collection looks healthy." }));
     } else {
-      attn.forEach(function (a) {
+      attn.slice(0, ATTENTION_LIMIT).forEach(function (a) {
         var line = el("a", { class: "card card--link", href: MLG.rel(MLG.href("pages/piece.html", { id: a.piece_id })) }, [
           el("div", { class: "row", style: "justify-content:space-between" }, [
             el("strong", { text: (a.catalog_number ? a.catalog_number + " \u00b7 " : "") + MLG.fmt.text(a.title) }),
@@ -47,27 +56,38 @@
         ]);
         attnCard.appendChild(line);
       });
+      if (attn.length > ATTENTION_LIMIT) {
+        attnCard.appendChild(
+          el("a", { class: "card__hint", href: MLG.rel(MLG.href("pages/pieces.html", { severity: "high" })),
+            text: "+ " + (attn.length - ATTENTION_LIMIT) + " more flagged piece" + (attn.length - ATTENTION_LIMIT === 1 ? "" : "s") + "\u2026" }),
+        );
+      }
     }
     row.appendChild(attnCard);
     app.appendChild(row);
 
-    // Pipeline flow strip -> each phase page
+    // Pipeline strip -> each phase page (compact single-row overview; details are one click away)
     app.appendChild(el("h2", { text: "Pipeline" }));
     var flow = {};
     (d.phase_flow || []).forEach(function (f) { flow[f.n] = f; });
-    var grid = el("div", { class: "grid grid--phases" });
-    MLG.PHASES.forEach(function (p) {
+    var strip = el("div", { class: "pipeline-strip" });
+    MLG.PHASES.forEach(function (p, i) {
       var f = flow[p.n] || {};
-      grid.appendChild(
-        el("a", { class: "card card--link phase-card", href: MLG.rel("pages/" + p.slug + ".html") }, [
-          el("div", { class: "phase-card__idx", text: "Phase " + p.n }),
-          el("div", { class: "phase-card__title", text: p.title }),
-          el("div", { class: "phase-card__blurb", text: f.note || p.blurb }),
-          el("div", { class: "phase-card__count", text: f.records != null ? MLG.fmt.num(f.records) + " records" : "" }),
+      strip.appendChild(
+        el("a", {
+          class: "pipeline-step",
+          href: MLG.rel("pages/" + p.slug + ".html"),
+          title: (f.note || p.blurb) + (f.records != null ? " (" + MLG.fmt.num(f.records) + " records)" : ""),
+        }, [
+          el("span", { class: "pipeline-step__idx", text: String(p.n) }),
+          el("span", { class: "pipeline-step__title", text: p.title }),
         ])
       );
+      if (i < MLG.PHASES.length - 1) {
+        strip.appendChild(el("span", { class: "pipeline-step__arrow", "aria-hidden": "true", text: "\u2192" }));
+      }
     });
-    app.appendChild(grid);
+    app.appendChild(strip);
   };
 
   MLG.severityChips = function (sev) {

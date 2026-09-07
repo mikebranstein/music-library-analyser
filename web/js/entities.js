@@ -38,7 +38,8 @@
       { key: "page_count", label: "Pages", num: true },
       { key: "missing_required_count", label: "Missing", num: true },
     ];
-    app.appendChild(MLG.table(rows, columns, { sortKey: "catalog_number", filterPlaceholder: "Filter pieces\u2026" }));
+    var initialFilter = MLG.param("severity") || "";
+    app.appendChild(MLG.table(rows, columns, { sortKey: "catalog_number", filterPlaceholder: "Filter pieces\u2026", initialFilter: initialFilter }));
   }
 
   // ---- piece detail -------------------------------------------------------

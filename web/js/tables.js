@@ -9,7 +9,7 @@
 
   MLG.table = function (rows, columns, opts) {
     opts = opts || {};
-    var state = { sortKey: opts.sortKey || null, dir: opts.dir || "asc", filter: "" };
+    var state = { sortKey: opts.sortKey || null, dir: opts.dir || "asc", filter: (opts.initialFilter || "").trim().toLowerCase() };
     var container = el("div", { class: "stack" });
 
     var filterInput = null;
@@ -20,6 +20,7 @@
         placeholder: opts.filterPlaceholder || "Filter this table\u2026",
         "aria-label": "Filter table rows",
         style: "max-width:320px",
+        value: opts.initialFilter || "",
       });
       filterInput.addEventListener("input", function () {
         state.filter = filterInput.value.trim().toLowerCase();
