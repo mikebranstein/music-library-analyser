@@ -16,27 +16,35 @@
   border-color: var(--border-strong);
   text-decoration: none;
 }
-.phase-about {
+.prose {
   line-height: 1.55;
 }
-.phase-about > * + * {
+.prose > * + * {
   margin-top: var(--space-3);
 }
-.phase-about > :first-child {
+.prose > :first-child {
   margin-top: 0;
 }
-.phase-about p {
+.prose p {
   color: var(--text);
 }
-.phase-about ol {
+.prose ol,
+.prose ul {
   margin: 0;
   padding-left: 1.25rem;
 }
-.phase-about ol > li + li {
+.prose ol > li + li,
+.prose ul > li + li {
   margin-top: var(--space-2);
 }
-.phase-about code {
+.prose code {
   font-size: 0.85em;
+}
+.prose h3 {
+  margin-top: var(--space-5);
+}
+.prose h3:first-child {
+  margin-top: 0;
 }
 .card__label {
   font-size: 0.72rem;

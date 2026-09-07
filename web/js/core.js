@@ -404,6 +404,8 @@
 
     nav.appendChild(link("pages/pieces.html", "Pieces", "pieces"));
     nav.appendChild(link("pages/documents.html", "Documents", "documents"));
+    nav.appendChild(link("pages/guide.html", "Guide", "guide"));
+    nav.appendChild(link("pages/about.html", "About", "about"));
     header.appendChild(nav);
 
     // Tools: search + theme + settings

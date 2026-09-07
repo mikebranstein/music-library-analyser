@@ -28,7 +28,7 @@
     // Rich, explanatory description behind a collapsible toggle: what this phase does, how it
     // works, and why. Collapsed by default so the page leads with metrics, not prose.
     if (meta.detail) {
-      var about = el("div", { class: "phase-about", html: meta.detail });
+      var about = el("div", { class: "prose", html: meta.detail });
       app.appendChild(MLG.detailsSection("How this phase works", about, false));
     }
 
